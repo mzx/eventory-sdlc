@@ -1,7 +1,7 @@
 ---
 id: EVT-5
 title: 'feat(api): Tags list + Categories tree (read/create)'
-status: To Do
+status: Done
 labels: [api, tags, categories]
 dependencies: [EVT-2]
 references: [PRODUCT.md]
