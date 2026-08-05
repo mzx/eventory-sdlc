@@ -34,15 +34,23 @@ lets you add items directly into it.
    renders a PNG encoding `${PUBLIC_BASE_URL}/r/:token`; `GET /api/items/by-qr/:qr`
    resolves either kind.
 4. **Location tree** — materialized path (`garage.west-wall.cabinet-3.drawer-2`);
-   scan-bin → see contents → "Add item here" auto-assigns the location.
-5. **Auth** — Google OAuth sign-in (single-household scope for v1).
+   scan-bin → see contents → "Add item here" auto-assigns the location. Categories are
+   a second, QR-less tree for classification.
+5. **Auth** — Google OAuth → JWT httpOnly cookie, with an approval workflow: new users
+   land `pending` until the admin (first-ever user) approves; admin users page.
+6. **Projects + BOM** — workshop projects with bill-of-materials lines optionally
+   linked to inventory items (denormalized name survives item deletion).
+7. **Search by photo** — photograph a thing → vision keywords → ranked matches from
+   the inventory ("do I already have one of these?").
+8. **PWA + HTTPS dev** — installable, phone-first; mkcert HTTPS on 5173/3001 (camera
+   & OAuth need secure origins); prod single-host deploy behind Caddy.
 
 ## Non-goals for v1
 
-- Multi-tenancy / sharing between households
+- Multi-tenancy / sharing between households (approval workflow ≠ multi-tenant)
 - Native mobile app (responsive PWA-style web is enough)
 - Barcode/UPC product lookup
-- Offline mode
+- Offline mutation queue (PWA caches static assets only, never `/api/*`)
 
 ## Decision log seed (already decided — do not relitigate in tasks)
 
