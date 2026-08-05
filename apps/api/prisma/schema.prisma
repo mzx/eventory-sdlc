@@ -1,0 +1,12 @@
+// Eventory API — Prisma schema
+// Intentionally empty of domain models for EVT-1 (scaffold task). Domain models
+// (Item, Location, ItemTag, etc.) are added by later backlog tasks per PRODUCT.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

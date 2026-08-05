@@ -2,3 +2,25 @@
 .ai-sdlc/state.db
 .ai-sdlc/state/
 .ai-sdlc/audit.jsonl
+
+# Node / build artifacts
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Prisma
+apps/api/prisma/generated/
+
+# Env
+.env
+.env.local
+apps/api/.env
+apps/web/.env
+
+# Logs
+npm-debug.log*
+*.log
+
+# OS
+.DS_Store
