@@ -1,0 +1,18 @@
+# Trusted contributor signing keys for review attestations.
+#
+# This file is a stub created by `ai-sdlc init --with-attestation`. Add
+# entries by running `/ai-sdlc init-signing-key` on a contributor's
+# machine and opening a PR that appends the printed YAML block below.
+#
+# Schema:
+#   - identity:  free-form string (typically email or GitHub handle)
+#   - machine:   free-form label (lets one identity register multiple keys)
+#   - pubkey:    PEM-encoded ed25519 public key (multi-line block scalar)
+#   - addedAt:   ISO 8601 date the entry was added
+#   - addedBy:   GitHub handle of the maintainer who approved this entry's PR
+#
+# The verifier in CI uses a strict YAML format: every scalar value
+# single-quoted; `pubkey:` is a `|` block scalar with each PEM line
+# indented exactly 6 spaces; no tab characters anywhere.
+
+reviewers: []

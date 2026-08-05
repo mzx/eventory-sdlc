@@ -1,0 +1,30 @@
+# Review classifier configuration (AISDLC-141, follow-up).
+#
+# The review classifier inspects a PR diff and decides which review tier
+# to invoke (cheap-pattern-match → mid-tier-LLM → full reviewer fan-out)
+# to keep review costs bounded as PR volume grows.
+#
+# This file is a stub scaffolded by `ai-sdlc init --with-classifier`.
+# The classifier runtime ships in AISDLC-141; until then this config is
+# advisory only. See docs/operations/init.md for the migration path.
+
+apiVersion: ai-sdlc.io/v1alpha1
+kind: ReviewClassifier
+metadata:
+  name: default-classifier
+spec:
+  tiers:
+    - name: cheap
+      maxFilesChanged: 5
+      maxLinesChanged: 50
+      strategy: pattern-match
+    - name: mid
+      maxFilesChanged: 20
+      maxLinesChanged: 500
+      strategy: single-llm-pass
+    - name: full
+      strategy: full-reviewer-fanout
+  routing:
+    docsOnly: cheap
+    testOnly: cheap
+    default: mid

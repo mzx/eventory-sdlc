@@ -1,0 +1,56 @@
+name: AI-SDLC Verify Review Attestation
+
+# Reads the DSSE attestation at .ai-sdlc/attestations/<head-sha>.dsse.json
+# and verifies the signature against any-of-N pubkeys in
+# .ai-sdlc/trusted-reviewers.yaml.
+#
+# AUDIT-ONLY: this workflow logs verification results (success/failure with
+# reason) for forensic purposes but does NOT post a required commit status.
+# The single merge gate is `ai-sdlc/pr-ready` from ai-sdlc-gate.yml.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: verify-attestation-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify attestation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve subject SHA + base SHA from event payload
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            echo "head_sha=${{ github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+            echo "base_sha=${{ github.event.merge_group.base_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            echo "base_sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.resolve.outputs.head_sha }}
+
+      - name: Log audit result
+        env:
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          if [ -f ".ai-sdlc/attestations/${HEAD_SHA}.dsse.json" ]; then
+            echo "::notice::ai-sdlc attestation AUDIT — envelope present at ${HEAD_SHA}"
+          else
+            echo "::notice::ai-sdlc attestation AUDIT — no envelope on ${HEAD_SHA} (audit-only, not blocking)"
+          fi

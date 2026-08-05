@@ -1,0 +1,12 @@
+{
+  "_aiSdlcComment": "Pinned to the orchestrator version that ran `ai-sdlc init`. To always pull the latest published mcp-advisor, change args to [\"-y\", \"@ai-sdlc/mcp-advisor\"].",
+  "mcpServers": {
+    "ai-sdlc": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@ai-sdlc/mcp-advisor@0.14.0"
+      ]
+    }
+  }
+}

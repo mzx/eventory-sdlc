@@ -1,0 +1,86 @@
+# RFC-0025 Framework Quality Monitoring configuration (§13.1).
+#
+# Per-org overrides for the AI-SDLC framework's failure-mode taxonomy,
+# severity rubric, attribution UX, and self-improvement metrics. Every
+# block below ships with sensible small-to-medium-team defaults
+# (un-commented entries override the defaults).
+#
+# Lifecycle:
+#   - Drop this file in `.ai-sdlc/` to override defaults org-wide.
+#   - Pass `--severity-weight <axis>=<value>` on relevant CLIs for a
+#     one-shot debugging override (precedence: CLI > YAML > defaults).
+#   - The loader rejects un-namespaced custom subclasses by default
+#     (OQ-10 strict enforcement); set `vendor-namespace.enforce: warn`
+#     to downgrade to a soft warning during migration (deprecated).
+#
+# See RFC-0025 §13.1 for the full schema rationale + OQ resolutions.
+
+quality:
+  # OQ-1 / Phase 2 — Confidence-bucketed classifier (three-tier).
+  # classifier:
+  #   confidenceThresholds:
+  #     autoClassify: 0.7   # ≥ this → auto-classify into the resolved class
+  #     ambiguous: 0.3      # ≥ this and < autoClassify → ambiguous;
+  #                         # < this → unclassified, log-only
+
+  # OQ-2 / Phase 4 — Per-axis severity weights for the §7 composite rubric.
+  # Multiplies the qualitative axis (low=0, medium=1, high=2) before the
+  # max + frequency bump. A weight of 1.0 is the qualitative-bucket default.
+  # severity-weights:
+  #   operator-time-cost: 1.0
+  #   framework-recurrence: 1.0
+  #   blast-radius: 1.0
+
+  # OQ-3 / Phase 3 — Multi-window recurrence (simultaneously computed).
+  # recurrence-windows:
+  #   - 7d   # flap detection
+  #   - 30d  # standard recurrence
+  #   - 90d  # legacy regression
+
+  # OQ-4 / Phase 4 — Framework-bug attribution UX. Default is suggest-only
+  # (small-team-safe per the operator-affirmed OQ-4 resolution). Flip
+  # `autoAttribute: true` to force-assign the top candidates on creation.
+  # framework-bug:
+  #   autoAttribute: false
+  #   suggestionCount: 3
+  #   attributionSources:
+  #     - codeowners
+  #     # - git-blame   # v2 extension (RFC-0025 §13.1)
+  #     # - recent-pr   # v2 extension
+
+  # OQ-5 / Phase 6 — Operator-initiated upstream reporting. Set
+  # `repoUrl` to your framework-repo to enable `cli-quality report-upstream`.
+  # upstream-reporting:
+  #   repoUrl: "https://github.com/<org>/<repo>"
+  #   prefilledIssueTemplate: ".ai-sdlc/templates/framework-bug-report.md"
+
+  # OQ-6 / Phase 5 — Coverage-gap response. Composes with RFC-0024
+  # emergent capture (capture-record with source: framework-coverage-gap).
+  # coverage-gap:
+  #   autoQuarantine: true
+  #   fileCapture: true
+
+  # OQ-7 / Phase 5 — Composite determinism-detection sampling. Risk-based
+  # concentration via blast-radius matches the framework's deterministic-
+  # first preflight ladder (RFC-0035 §5).
+  # determinism-detection:
+  #   defaultSampleRate: 0.02            # 1-in-50 baseline
+  #   alwaysOnRequiresDeterminism: true
+  #   alwaysOnTopBlastRadiusDecile: true
+
+  # OQ-9 / Phase 5 — Operator-time-cost instrumentation. AFK filter zeroes
+  # out elapsed-time over inactivity gaps > N minutes (default 30).
+  # operator-time-cost:
+  #   afkInactivityMinutes: 30
+
+  # OQ-10 / Phase 6 — Vendor-namespace enforcement for custom failure-mode
+  # subclasses. Matches Kubernetes CRD / npm scoped / Go module convention.
+  # vendor-namespace:
+  #   enforce: reject    # or 'warn' (deprecated) / 'none' (deprecated)
+
+  # OQ-10 / Phase 6 — Adopter-declared custom failure-mode subclasses.
+  # Each entry MUST use a vendor reverse-DNS prefix under the default
+  # `enforce: reject`. Un-prefixed entries error at resource-load time.
+  # customSubclasses:
+  #   - acme-corp:custom-gate-faulty
+  #   - acme-corp:billing-timeout

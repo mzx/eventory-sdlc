@@ -1,0 +1,109 @@
+name: AI-SDLC PR Ready Gate
+
+# Single rollup status check `ai-sdlc/pr-ready` that aggregates every PR
+# signal AI-SDLC adopters need into ONE branch-protection entry. Replaces
+# the historical pattern of enumerating N required checks by name + app_id,
+# which is brittle against path filters, [skip ci] tokens, matrix changes,
+# and multi-app posters. See `docs/operations/quality-gate.md` for the
+# full rationale.
+#
+# Industry pattern: `re-actors/alls-green` ("alls-green") is the de facto
+# community fix; named adopters include aiohttp, attrs, conda, setuptools,
+# pytest, pip-tools, Open edX, PyCA, PyPA, Mergify.
+
+on:
+  # AISDLC-261 PR #480 review fix: include 'ready_for_review' so the gate
+  # fires when adopters using the draft-PR flow (AISDLC-218) flip a PR
+  # from draft to ready. Without it, ai-sdlc/pr-ready stays unposted on
+  # the ready transition and branch protection fails.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ai-sdlc-gate-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  detect:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            docs_only:
+              - 'docs/**'
+              - '*.md'
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+
+  build-test:
+    name: Build & Test (Node ${{ matrix.node-version }})
+    needs: detect
+    if: needs.detect.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+  coverage:
+    name: Coverage
+    needs: detect
+    if: needs.detect.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:coverage
+
+  pr-ready:
+    name: ai-sdlc/pr-ready
+    needs: [detect, lint, build-test, coverage]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate required signals
+        uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}

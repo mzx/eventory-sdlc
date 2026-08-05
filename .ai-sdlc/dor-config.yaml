@@ -1,0 +1,28 @@
+# Definition-of-Ready (DoR) gate configuration.
+#
+# The DoR rubric scores incoming issues + backlog tasks against seven
+# criteria (binary-testable ACs, no wishlist markers, references resolve,
+# bounded scope, surface named, done-state describable, no invisible
+# dependencies). Failing the rubric posts a clarification comment on the
+# issue / PR.
+#
+# Ships in warn-only mode by default — flip to 'enforce' after the soak
+# window confirms the false-positive rate is low.
+
+apiVersion: ai-sdlc.io/v1alpha1
+kind: DorConfig
+metadata:
+  name: ai-sdlc-dor
+spec:
+  rubricVersion: v1
+  evaluationMode: warn-only
+
+  notifications:
+    authorChannel: true
+    # dedicatedChannel:
+    #   slack: '#ai-sdlc-dor'
+
+  staleness:
+    warnAfterDays: 14
+    closeAfterDays: 28
+    closedLabel: 'closed-as-stale-dor'

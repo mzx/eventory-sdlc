@@ -1,0 +1,140 @@
+name: AI-SDLC PR Review
+
+# Posts `Post Review Results` as a required commit status.
+# Docs-only PRs (spec/rfcs/**, docs/**, backlog/**, *.md) are short-circuited
+# with success so they do not block the merge queue.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths-ignore:
+      - 'spec/rfcs/**'
+      - 'docs/**'
+      - 'backlog/tasks/**'
+      - 'backlog/completed/**'
+      - '*.md'
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: review-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  docs-only-check:
+    name: Docs-only check
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: read
+    steps:
+      - name: Resolve event SHA
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            echo "head_sha=${{ github.event.merge_group.head_sha }}" >> "${GITHUB_OUTPUT}"
+            echo "base_sha=${{ github.event.merge_group.base_sha }}" >> "${GITHUB_OUTPUT}"
+            echo "is_merge_group=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "${GITHUB_OUTPUT}"
+            echo "is_merge_group=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.resolve.outputs.head_sha }}
+
+      - name: Detect docs-only changeset
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          IS_MERGE_GROUP: ${{ steps.resolve.outputs.is_merge_group }}
+          BASE_SHA: ${{ steps.resolve.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ "${IS_MERGE_GROUP}" = "true" ]; then
+            FILES=$(git -c core.quotePath=false diff --name-only "${BASE_SHA}...${HEAD_SHA}")
+          else
+            FILES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')
+          fi
+          if [ -z "${FILES}" ]; then
+            echo "all_docs=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # Simple docs-only check: all files must be in docs, spec/rfcs, backlog, or *.md
+          ALL_DOCS=true
+          while IFS= read -r f; do
+            case "$f" in
+              docs/*|spec/rfcs/*|backlog/tasks/*|backlog/completed/*|*.md) ;;
+              *) ALL_DOCS=false; break ;;
+            esac
+          done <<< "${FILES}"
+          echo "all_docs=${ALL_DOCS}" >> "${GITHUB_OUTPUT}"
+
+      - name: Post Review Results (docs-only short-circuit)
+        if: steps.detect.outputs.all_docs == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -X POST \
+            -f state=success \
+            -f context='Post Review Results' \
+            -f description='docs-only changeset — review N/A'
+          echo "Posted Post Review Results: success (docs-only) on ${HEAD_SHA}"
+
+  review:
+    name: Post Review Results
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      !startsWith(github.head_ref, 'release-please--') &&
+      github.event.pull_request.draft == false
+    needs: [docs-only-check]
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Post Review Results (stub — fails closed by default)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # AISDLC-261 PR #480 review fix (CRITICAL): the stub now defaults to
+          # FAILURE so adopters who configure 'Post Review Results' as a required
+          # branch-protection check + enable auto-merge don't accidentally ship
+          # a phantom review gate that auto-merges every PR with zero review.
+          # To opt in to auto-pass while wiring your reviewers, set the repo
+          # variable AISDLC_REVIEW_STUB_AUTOPASS=true. Real reviewer wiring
+          # should replace this entire step.
+          AUTOPASS: ${{ vars.AISDLC_REVIEW_STUB_AUTOPASS }}
+        run: |
+          set -euo pipefail
+          if [ "${AUTOPASS:-}" = "true" ]; then
+            STATE=success
+            DESC='Review passed (STUB AUTOPASS — wire your reviewers, then unset AISDLC_REVIEW_STUB_AUTOPASS)'
+          else
+            STATE=failure
+            DESC='Review stub not wired. Either replace this workflow step with your reviewers OR set repo var AISDLC_REVIEW_STUB_AUTOPASS=true (acknowledged risk).'
+          fi
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -X POST \
+            -f state="${STATE}" \
+            -f context='Post Review Results' \
+            -f description="${DESC}"
+          echo "Posted Post Review Results: ${STATE} on ${HEAD_SHA}"

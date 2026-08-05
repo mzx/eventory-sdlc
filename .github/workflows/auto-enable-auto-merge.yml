@@ -1,0 +1,90 @@
+name: Auto-enable auto-merge on PR open
+
+# Enables GitHub's auto-merge on every new same-repo PR. Once required
+# checks pass, GitHub adds the PR to the merge queue which rebases + runs
+# CI + merges if green. No human click needed.
+#
+# Requires repo setting "Allow auto-merge" to be enabled (Settings → General).
+# Requires a PAT or GitHub App token with `pull_requests: write` stored as
+# the `AI_SDLC_PAT` repository secret (or swap for `github.token` if your
+# repo grants it write access).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  check_suite:
+    types: [completed]
+  status:
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  enable-auto-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discover PR for this event
+        id: discover
+        env:
+          GH_TOKEN: ${{ secrets.AI_SDLC_PAT }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_FROM_PR_EVENT: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.check_suite.head_sha || github.event.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "pr=$PR_NUMBER_FROM_PR_EVENT" >> "$GITHUB_OUTPUT"
+          else
+            PR=$(gh api "/repos/$GH_REPO/commits/$HEAD_SHA/pulls" --jq '.[] | select(.state == "open") | .number' | head -1)
+            echo "pr=${PR:-}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip when no PR matches
+        if: steps.discover.outputs.pr == ''
+        run: echo "[auto-enable] no open PR for this event — nothing to arm."
+
+      - name: Skip drafts, fork PRs, and release-please PRs
+        id: guard
+        if: steps.discover.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.AI_SDLC_PAT }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.discover.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PR_INFO=$(gh pr view "$PR" --json isDraft,headRepositoryOwner,headRepository,headRefName \
+            -q '{isDraft: .isDraft, headRefName: .headRefName, headFull: (((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")) // "")}')
+          IS_DRAFT=$(echo "$PR_INFO" | jq -r '.isDraft')
+          HEAD_FULL=$(echo "$PR_INFO" | jq -r '.headFull')
+          HEAD_REF=$(echo "$PR_INFO" | jq -r '.headRefName')
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "[auto-enable] PR #$PR is draft — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HEAD_FULL" = "/" ] || [ -z "$HEAD_FULL" ]; then
+            # AISDLC-261 PR #480 review fix: defensive — head repository was
+            # deleted or API returned an empty shape. Refuse to arm; operator
+            # can re-arm manually if intended.
+            echo "[auto-enable] PR #$PR has no resolvable head repository — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HEAD_FULL" != "$REPO" ]; then
+            echo "[auto-enable] PR #$PR is from a fork ($HEAD_FULL) — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif case "$HEAD_REF" in release-please--*) true ;; *) false ;; esac; then
+            echo "[auto-enable] PR #$PR is a release-please PR — skipping. Arm manually when ready."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refresh auto-merge
+        if: steps.discover.outputs.pr != '' && steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AI_SDLC_PAT }}
+          PR: ${{ steps.discover.outputs.pr }}
+        run: |
+          # disable-then-arm to clear any stale GitHub auto-merge state.
+          gh pr merge --disable-auto "$PR" 2>/dev/null || true
+          gh pr merge --auto "$PR"

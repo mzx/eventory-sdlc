@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ai-sdlc:attestation-sign-block
+# Signs the DSSE attestation envelope for the current HEAD when verdict
+# files exist. Skip with AI_SDLC_SKIP_ATTESTATION_SIGN=1.
+if [ -z "${AI_SDLC_SKIP_ATTESTATION_SIGN:-}" ] && [ -x "./scripts/check-attestation-sign.sh" ]; then
+  ./scripts/check-attestation-sign.sh
+fi
+# end ai-sdlc:attestation-sign-block

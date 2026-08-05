@@ -1,0 +1,42 @@
+name: AI-SDLC DoR Ingress
+
+# Wires the DoR rubric into the GitHub issue + PR lifecycle:
+#   - issues:opened / issues:edited  → score the issue body, post the
+#     idempotent clarification comment when needs-clarification.
+#   - pull_request touching backlog/tasks/*.md → score the changed
+#     task bodies (the in-repo equivalent of an issue).
+#
+# Ships in warn-only mode (see .ai-sdlc/dor-config.yaml). Flip the
+# config's `evaluationMode` to `enforce` after the soak window.
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'backlog/tasks/*.md'
+
+concurrency:
+  group: dor-ingress-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    name: Evaluate against DoR rubric
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Evaluate DoR (placeholder — wire to your DoR runner)
+        run: |
+          echo "::notice::DoR ingress shim invoked. Wire pnpm --filter @ai-sdlc/pipeline-cli evaluate-dor here."
