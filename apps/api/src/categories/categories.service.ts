@@ -1,4 +1,9 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCategoryDto } from './create-category.dto';
@@ -51,6 +56,16 @@ export class CategoriesService {
    */
   async create(dto: CreateCategoryDto): Promise<CategoryRow> {
     const slug = slugify(dto.name);
+
+    // Guard: names composed entirely of non-alphanumeric characters (e.g., "!!!")
+    // produce an empty slug, which would write path="" or "parent." to the DB —
+    // silently corrupting the materialized-path structure.
+    if (!slug) {
+      throw new BadRequestException(
+        `Category name "${dto.name}" produces an empty slug. Use alphanumeric characters.`,
+      );
+    }
+
     let path: string;
     const parentId: string | null = dto.parentId ?? null;
 

@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { CategoriesService, slugify } from './categories.service';
@@ -40,6 +40,24 @@ describe('slugify', () => {
     ['UPPER CASE', 'upper-case'],
   ])('slugify(%s) → %s', (input, expected) => {
     expect(slugify(input)).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// slugify — empty-slug edge cases
+// ---------------------------------------------------------------------------
+
+describe('slugify — empty result edge cases', () => {
+  it('returns empty string for a name composed entirely of special characters', () => {
+    expect(slugify('!!!')).toBe('');
+    expect(slugify('@@@')).toBe('');
+    expect(slugify('---')).toBe('');
+    expect(slugify('...')).toBe('');
+  });
+
+  it('returns empty string for a blank name', () => {
+    expect(slugify('')).toBe('');
+    expect(slugify('   ')).toBe('');
   });
 });
 
@@ -166,6 +184,29 @@ describe('CategoriesService', () => {
 
       const result = await service.create({ name: 'Cordless Drills', parentId: 'grand-id' });
       expect(result.path).toBe('power-tools.drills.cordless-drills');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // create — empty-slug guard (defence in depth for names like "!!!")
+  // -------------------------------------------------------------------------
+
+  describe('create — empty-slug guard', () => {
+    it('throws BadRequestException when name slugifies to empty string (e.g., "!!!")', async () => {
+      await expect(service.create({ name: '!!!' })).rejects.toThrow(BadRequestException);
+    });
+
+    it('includes the offending name in the BadRequestException message', async () => {
+      await expect(service.create({ name: '@@@' })).rejects.toThrow(/@@@/);
+    });
+
+    it('does NOT call prisma.create when slug is empty', async () => {
+      await expect(service.create({ name: '---' })).rejects.toThrow(BadRequestException);
+      expect(prismaMock.category.create).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException for blank-string name', async () => {
+      await expect(service.create({ name: '   ' })).rejects.toThrow(BadRequestException);
     });
   });
 
