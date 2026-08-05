@@ -1,7 +1,7 @@
 ---
 id: EVT-1
 title: 'chore(scaffold): monorepo skeleton — web + api + db via Docker Compose, health endpoints green'
-status: To Do
+status: In Progress
 labels:
   - scaffold
   - infrastructure
