@@ -324,6 +324,39 @@ describe('LocationsService', () => {
       expect(result).toBe(existing);
     });
 
+    it('uses SUBSTRING prefix-only substitution so a slug duplicated in a child path is not corrupted', async () => {
+      // Regression guard: renaming "a" → "b" must turn descendant "a.a.child"
+      // into "b.a.child", NOT "b.b.child".  SQL REPLACE() would corrupt it;
+      // SUBSTRING-based prefix replacement is the fix.
+      const existing = makeLocation({ id: 'loc-a', name: 'A', path: 'a', parentId: null });
+      locationMock.findUnique.mockResolvedValue(existing);
+      locationMock.findFirst.mockResolvedValue(null); // no conflict
+      txClient.location.update.mockResolvedValue({ ...existing, name: 'B', path: 'b' });
+      txClient.$executeRaw.mockResolvedValue(1);
+
+      await service.rename('loc-a', 'B');
+
+      expect(txClient.$executeRaw).toHaveBeenCalledTimes(1);
+
+      // Inspect the tagged-template-literal arguments.
+      // Signature: $executeRaw(strings: TemplateStringsArray, ...values: unknown[])
+      const [strings, ...values] = txClient.$executeRaw.mock.calls[0] as [
+        TemplateStringsArray,
+        ...string[],
+      ];
+
+      // The SQL template must NOT use REPLACE() (which replaces all occurrences).
+      const sqlText = Array.from(strings).join('').toLowerCase();
+      expect(sqlText).not.toContain('replace(');
+      expect(sqlText).toContain('substring');
+
+      // First interpolated value must be newPrefix; second must be oldPrefix
+      // (used inside LENGTH()); third is the LIKE pattern.
+      expect(values[0]).toBe('b.'); // newPrefix
+      expect(values[1]).toBe('a.'); // oldPrefix for LENGTH()
+      expect(values[2]).toBe('a.%'); // WHERE path LIKE
+    });
+
     it('maps P2002 thrown inside $transaction to ConflictException (TOCTOU guard)', async () => {
       // Pre-flight findFirst passes (no conflict visible yet), but the transaction
       // itself hits the @unique constraint because a concurrent rename landed first.

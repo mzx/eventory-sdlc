@@ -213,14 +213,18 @@ export class LocationsService {
           data: { name, path: newPath },
         });
 
-        // 2. Rewrite all descendants: replace old prefix with new prefix.
-        //    Uses raw SQL REPLACE() for a single atomic UPDATE.
+        // 2. Rewrite all descendants: replace the leading old-prefix with the
+        //    new-prefix using a SUBSTRING-based expression so that only the
+        //    leading path segment is rewritten.  Using SQL REPLACE() here would
+        //    corrupt paths where the same slug appears more than once
+        //    (e.g. renaming "a" → "b" would turn descendant "a.a.child" into
+        //    "b.b.child" instead of "b.a.child").
         //    Template-literal parameters are escaped by Prisma — no injection risk.
         const oldPrefix = `${oldPath}.`;
         const newPrefix = `${newPath}.`;
         await tx.$executeRaw`
           UPDATE "Location"
-          SET    path = replace(path, ${oldPrefix}, ${newPrefix})
+          SET    path = ${newPrefix} || SUBSTRING(path FROM LENGTH(${oldPrefix}) + 1)
           WHERE  path LIKE ${oldPrefix + '%'}
         `;
 
