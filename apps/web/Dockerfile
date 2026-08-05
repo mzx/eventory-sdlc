@@ -1,6 +1,6 @@
-# pnpm 11.x requires Node >=22.13 to run its own CLI (uses node:sqlite via
-# corepack); the app's `engines` field only requires >=20, but the image
-# runtime must satisfy pnpm's own requirement.
+# Project is pinned to pnpm 10.x (see root package.json "packageManager"),
+# which supports Node >=18; Node 22 is used here to match the web dev
+# runtime's minimum supported Node version, not a pnpm requirement.
 FROM node:22-bookworm-slim
 WORKDIR /workspace
 RUN corepack enable
