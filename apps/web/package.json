@@ -10,7 +10,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings=0",
     "format:check": "prettier --check \"src/**/*.{ts,tsx}\"",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "echo \"no tests yet\" && exit 0",
+    "test:coverage": "echo \"no coverage yet\" && exit 0"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

@@ -11,6 +11,7 @@
     "lint": "eslint \"{src,test}/**/*.ts\" --max-warnings=0",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "echo \"no tests yet\" && exit 0",
+    "test:coverage": "echo \"no coverage yet\" && exit 0",
     "prisma:generate": "prisma generate",
     "prisma:migrate:deploy": "prisma migrate deploy"
   },
