@@ -1,7 +1,7 @@
 ---
 id: EVT-2
 title: 'feat(db): core inventory domain — Prisma schema + migration for Location, Category, Tag, Item, ItemTag, Photo'
-status: To Do
+status: Done
 labels: [db, prisma, domain]
 dependencies: []
 references: [PRODUCT.md, apps/api/prisma/schema.prisma]
