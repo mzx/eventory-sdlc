@@ -205,26 +205,36 @@ export class LocationsService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      // 1. Update the renamed location itself.
-      const updated = await tx.location.update({
-        where: { id },
-        data: { name, path: newPath },
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        // 1. Update the renamed location itself.
+        const updated = await tx.location.update({
+          where: { id },
+          data: { name, path: newPath },
+        });
+
+        // 2. Rewrite all descendants: replace old prefix with new prefix.
+        //    Uses raw SQL REPLACE() for a single atomic UPDATE.
+        //    Template-literal parameters are escaped by Prisma — no injection risk.
+        const oldPrefix = `${oldPath}.`;
+        const newPrefix = `${newPath}.`;
+        await tx.$executeRaw`
+          UPDATE "Location"
+          SET    path = replace(path, ${oldPrefix}, ${newPrefix})
+          WHERE  path LIKE ${oldPrefix + '%'}
+        `;
+
+        return updated;
       });
-
-      // 2. Rewrite all descendants: replace old prefix with new prefix.
-      //    Uses raw SQL REPLACE() for a single atomic UPDATE.
-      //    Template-literal parameters are escaped by Prisma — no injection risk.
-      const oldPrefix = `${oldPath}.`;
-      const newPrefix = `${newPath}.`;
-      await tx.$executeRaw`
-        UPDATE "Location"
-        SET    path = replace(path, ${oldPrefix}, ${newPrefix})
-        WHERE  path LIKE ${oldPrefix + '%'}
-      `;
-
-      return updated;
-    });
+    } catch (err) {
+      // Guard against the TOCTOU window: two concurrent rename requests can both
+      // pass the pre-flight findFirst check, then the second hits the DB @unique
+      // constraint inside the transaction.  Map that to a 409 instead of 500.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`A location with path "${newPath}" already exists`);
+      }
+      throw err;
+    }
   }
 
   /**

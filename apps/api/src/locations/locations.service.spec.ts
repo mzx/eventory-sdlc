@@ -323,6 +323,23 @@ describe('LocationsService', () => {
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
       expect(result).toBe(existing);
     });
+
+    it('maps P2002 thrown inside $transaction to ConflictException (TOCTOU guard)', async () => {
+      // Pre-flight findFirst passes (no conflict visible yet), but the transaction
+      // itself hits the @unique constraint because a concurrent rename landed first.
+      const existing = makeLocation({ id: 'loc-1', name: 'West Wall', path: 'garage.west-wall' });
+      locationMock.findUnique.mockResolvedValue(existing);
+      locationMock.findFirst.mockResolvedValue(null); // pre-flight sees no conflict
+
+      const uniqueError = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: {},
+      });
+      prismaMock.$transaction.mockRejectedValue(uniqueError);
+
+      await expect(service.rename('loc-1', 'East Wall')).rejects.toBeInstanceOf(ConflictException);
+    });
   });
 
   // ── remove ────────────────────────────────────────────────────────────────
