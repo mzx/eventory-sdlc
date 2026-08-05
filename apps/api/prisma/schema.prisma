@@ -1,6 +1,8 @@
 // Eventory API — Prisma schema
-// Intentionally empty of domain models for EVT-1 (scaffold task). Domain models
-// (Item, Location, ItemTag, etc.) are added by later backlog tasks per PRODUCT.md.
+//
+// Core inventory domain (EVT-2): Location, Category, Tag, Item, ItemTag, Photo.
+// Non-goals for this task (see backlog/tasks/evt-2): User/ownership FKs (EVT-14),
+// Project + BomLine (EVT-16), API endpoints.
 
 generator client {
   provider = "prisma-client-js"
@@ -9,4 +11,110 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+/// Physical storage location. Self-referencing tree, addressable both by
+/// parent/child relation and by a materialized `path` (e.g.
+/// "garage.west-wall.cabinet-3") for fast prefix lookups.
+model Location {
+  id       String  @id @default(uuid()) @db.Uuid
+  name     String
+  path     String  @unique
+  parentId String? @db.Uuid
+  notes    String?
+  qrCode   String  @unique @default(uuid())
+
+  parent   Location?  @relation("LocationHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children Location[] @relation("LocationHierarchy")
+  items    Item[]
+
+  @@index([parentId])
+  @@index([path])
+}
+
+/// Classification tree, same shape as Location minus the QR code (categories
+/// are not physically labelled).
+model Category {
+  id       String  @id @default(uuid()) @db.Uuid
+  name     String
+  path     String  @unique
+  parentId String? @db.Uuid
+
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryHierarchy")
+  items    Item[]
+
+  @@index([parentId])
+  @@index([path])
+}
+
+/// Free-form label, many-to-many with Item via the explicit ItemTag join.
+model Tag {
+  id    String  @id @default(uuid()) @db.Uuid
+  name  String  @unique
+  color String?
+
+  items ItemTag[]
+}
+
+/// A single inventory item.
+model Item {
+  id             String   @id @default(uuid()) @db.Uuid
+  name           String
+  description    String?
+  quantity       Int      @default(1)
+  unit           String?
+  /// Notion-style free-form attributes (e.g. { "voltage": "12V", "brand": "Bosch" }).
+  properties     Json     @default("{}")
+  qrCode         String   @unique @default(uuid())
+  locationId     String?  @db.Uuid
+  categoryId     String?  @db.Uuid
+  primaryPhotoId String?  @db.Uuid
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  location     Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  category     Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Named relation to disambiguate from the reverse Photo.item relation below,
+  // since Item and Photo reference each other (primary photo vs. photo's owning item).
+  primaryPhoto Photo?    @relation("ItemPrimaryPhoto", fields: [primaryPhotoId], references: [id], onDelete: SetNull)
+  photos       Photo[]   @relation("ItemPhotos")
+  tags         ItemTag[]
+
+  @@index([locationId])
+  @@index([categoryId])
+  @@index([name])
+}
+
+/// Explicit Item<->Tag join table (composite PK, cascade on either side).
+model ItemTag {
+  itemId String @db.Uuid
+  tagId  String @db.Uuid
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, tagId])
+  @@index([tagId])
+}
+
+/// A photo of an item. Kept even if it's not (or no longer) the item's
+/// primary photo, and even if aiAnalysis needs a re-run.
+model Photo {
+  id         String   @id @default(uuid()) @db.Uuid
+  itemId     String?  @db.Uuid
+  filename   String
+  mimeType   String
+  sizeBytes  Int
+  width      Int?
+  height     Int?
+  /// Raw Claude Vision output, kept so analysis can be re-run without re-uploading.
+  aiAnalysis Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  item            Item?  @relation("ItemPhotos", fields: [itemId], references: [id], onDelete: Cascade)
+  primaryForItems Item[] @relation("ItemPrimaryPhoto")
+
+  @@index([itemId])
 }
