@@ -21,7 +21,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test, TestingModule } from '@nestjs/testing';
-import { rmSync } from 'fs';
+import { readdirSync, rmSync } from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
 import supertest from 'supertest';
@@ -86,7 +86,12 @@ describe('Photos API (e2e)', () => {
       }),
     );
     // Mirror the static-asset wiring done in src/main.ts's bootstrap().
-    (app as NestExpressApplication).useStaticAssets(STORAGE_DIR, { prefix: STORAGE_URL_PREFIX });
+    (app as NestExpressApplication).useStaticAssets(STORAGE_DIR, {
+      prefix: STORAGE_URL_PREFIX,
+      setHeaders: (res) => {
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+      },
+    });
     await app.init();
 
     prisma = moduleFixture.get<PrismaService>(PrismaService);
@@ -127,6 +132,7 @@ describe('Photos API (e2e)', () => {
 
       const fileRes = await http.get(uploadRes.body.url as string).expect(200);
       expect(fileRes.headers['content-type']).toMatch(/^image\/png/);
+      expect(fileRes.headers['x-content-type-options']).toBe('nosniff');
       expect(Buffer.compare(fileRes.body as Buffer, png)).toBe(0);
     });
 
@@ -187,6 +193,21 @@ describe('Photos API (e2e)', () => {
 
     it('rejects an upload with no file with 400', async () => {
       await http.post('/api/photos/upload').expect(400);
+    });
+
+    it('rejects bytes that are not decodable as the declared image/png Content-Type, and leaves no orphaned file on disk', async () => {
+      const filesBefore = readdirSync(STORAGE_DIR).length;
+
+      await http
+        .post('/api/photos/upload')
+        .attach('file', Buffer.from('this is definitely not a png'), {
+          filename: 'fake.png',
+          contentType: 'image/png',
+        })
+        .expect(400);
+
+      expect(await prisma.photo.count()).toBe(0);
+      expect(readdirSync(STORAGE_DIR).length).toBe(filesBefore);
     });
   });
 

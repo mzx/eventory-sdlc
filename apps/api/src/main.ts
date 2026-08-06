@@ -18,7 +18,17 @@ async function bootstrap(): Promise<void> {
   // Serve uploaded photos at GET /storage/<filename>, outside the /api
   // prefix — this is Express-level static middleware, not a Nest
   // controller route, so setGlobalPrefix does not affect it.
-  app.useStaticAssets(STORAGE_DIR, { prefix: STORAGE_URL_PREFIX });
+  //
+  // `X-Content-Type-Options: nosniff` prevents browsers from MIME-sniffing
+  // uploaded files (e.g. content declared image/png that a browser decides
+  // to render/execute as HTML/script based on sniffed bytes) — user-supplied
+  // static content is exactly the case this header exists for.
+  app.useStaticAssets(STORAGE_DIR, {
+    prefix: STORAGE_URL_PREFIX,
+    setHeaders: (res) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+    },
+  });
   const port = process.env.PORT ?? 3001;
   await app.listen(port, '0.0.0.0');
 }

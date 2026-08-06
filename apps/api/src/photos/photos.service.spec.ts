@@ -12,6 +12,13 @@ const metadataMock = jest.fn();
 jest.mock('sharp', () => jest.fn(() => ({ metadata: metadataMock })));
 
 // ---------------------------------------------------------------------------
+// fs/promises mock — verify orphaned-file cleanup without touching real disk
+// ---------------------------------------------------------------------------
+
+const unlinkMock = jest.fn();
+jest.mock('fs/promises', () => ({ unlink: (...args: unknown[]) => unlinkMock(...args) }));
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -54,6 +61,8 @@ describe('PhotosService', () => {
   beforeEach(async () => {
     prismaMock = makePrismaMock();
     metadataMock.mockReset();
+    unlinkMock.mockReset();
+    unlinkMock.mockResolvedValue(undefined);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [PhotosService, { provide: PrismaService, useValue: prismaMock }],
@@ -68,7 +77,7 @@ describe('PhotosService', () => {
 
   describe('savePhoto', () => {
     it('creates a Photo row with width/height from sharp metadata (AC3)', async () => {
-      metadataMock.mockResolvedValue({ width: 640, height: 480 });
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
       const created = {
         id: PHOTO_ID,
         filename: 'uuid.png',
@@ -96,7 +105,7 @@ describe('PhotosService', () => {
     });
 
     it('links itemId when provided', async () => {
-      metadataMock.mockResolvedValue({ width: 100, height: 100 });
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
 
       await service.savePhoto(makeFile(), 'item-1');
@@ -106,7 +115,7 @@ describe('PhotosService', () => {
       );
     });
 
-    it('degrades to null width/height when sharp metadata read fails', async () => {
+    it('degrades to null width/height when sharp metadata read fails for the HEIC/HEIF carve-out', async () => {
       metadataMock.mockRejectedValue(new Error('unsupported image format'));
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.heic' });
 
@@ -115,23 +124,56 @@ describe('PhotosService', () => {
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ width: null, height: null }) }),
       );
+      expect(unlinkMock).not.toHaveBeenCalled();
     });
 
     it('throws BadRequestException when itemId does not reference an existing item', async () => {
-      metadataMock.mockResolvedValue({ width: 10, height: 10 });
+      metadataMock.mockResolvedValue({ format: 'png', width: 10, height: 10 });
       prismaMock.photo.create.mockRejectedValue(fkViolation());
 
-      await expect(service.savePhoto(makeFile(), 'missing-item')).rejects.toThrow(
-        BadRequestException,
-      );
+      const file = makeFile();
+      await expect(service.savePhoto(file, 'missing-item')).rejects.toThrow(BadRequestException);
+      expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
 
     it('rethrows unrelated Prisma errors', async () => {
-      metadataMock.mockResolvedValue({ width: 10, height: 10 });
+      metadataMock.mockResolvedValue({ format: 'png', width: 10, height: 10 });
       const other = new Error('connection lost');
       prismaMock.photo.create.mockRejectedValue(other);
 
-      await expect(service.savePhoto(makeFile())).rejects.toThrow(other);
+      const file = makeFile();
+      await expect(service.savePhoto(file)).rejects.toThrow(other);
+      expect(unlinkMock).toHaveBeenCalledWith(file.path);
+    });
+
+    it('rejects undecodable bytes declared as image/png with 400 and unlinks the file', async () => {
+      // sharp resolves metadata but the decoded format doesn't match the
+      // declared mimetype — e.g. a renamed .txt file uploaded as image/png.
+      metadataMock.mockResolvedValue({ format: undefined, width: undefined, height: undefined });
+
+      const file = makeFile({ mimetype: 'image/png' });
+      await expect(service.savePhoto(file)).rejects.toThrow(BadRequestException);
+      expect(prismaMock.photo.create).not.toHaveBeenCalled();
+      expect(unlinkMock).toHaveBeenCalledWith(file.path);
+    });
+
+    it('rejects bytes sharp cannot decode at all when declared image/jpeg, and unlinks the file', async () => {
+      metadataMock.mockRejectedValue(new Error('unsupported image format'));
+
+      const file = makeFile({ mimetype: 'image/jpeg', filename: 'x.jpg' });
+      await expect(service.savePhoto(file)).rejects.toThrow(BadRequestException);
+      expect(prismaMock.photo.create).not.toHaveBeenCalled();
+      expect(unlinkMock).toHaveBeenCalledWith(file.path);
+    });
+
+    it('does NOT unlink or reject when sharp successfully decodes the declared format', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'ok.png' });
+
+      const file = makeFile();
+      await service.savePhoto(file);
+
+      expect(unlinkMock).not.toHaveBeenCalled();
     });
   });
 
