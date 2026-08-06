@@ -4,7 +4,7 @@
   "private": true,
   "description": "Eventory API — NestJS 10 + Prisma 5",
   "scripts": {
-    "build": "nest build",
+    "build": "prisma generate && nest build",
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
