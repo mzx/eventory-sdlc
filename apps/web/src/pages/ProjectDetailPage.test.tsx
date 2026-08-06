@@ -199,4 +199,120 @@ describe('ProjectDetailPage', () => {
     expect(await screen.findByText('Cordless drill')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Cordless drill' })).not.toBeInTheDocument();
   });
+
+  it('clicking a BOM line delete button calls deleteBomLine with the project and line id', async () => {
+    vi.spyOn(api, 'fetchProject').mockResolvedValue(
+      project({ bomLines: [bomLine({ id: 'line-1', name: '2x4 lumber' })] }),
+    );
+    const deleteBomLineMock = vi.spyOn(api, 'deleteBomLine').mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderPage();
+
+    const deleteButton = await screen.findByRole('button', { name: 'Delete 2x4 lumber' });
+    await user.click(deleteButton);
+
+    await waitFor(() => expect(deleteBomLineMock).toHaveBeenCalledWith('project-1', 'line-1'));
+  });
+
+  it('clicking the unlink button on a linked BOM line calls updateBomLine with itemId: null', async () => {
+    vi.spyOn(api, 'fetchProject').mockResolvedValue(
+      project({
+        bomLines: [
+          bomLine({
+            id: 'line-1',
+            itemId: 'item-1',
+            name: 'Cordless drill',
+            item: { id: 'item-1', name: 'Cordless drill', qrCode: 'qr-1' },
+          }),
+        ],
+      }),
+    );
+    const updateBomLineMock = vi
+      .spyOn(api, 'updateBomLine')
+      .mockResolvedValue(
+        bomLine({ id: 'line-1', itemId: null, name: 'Cordless drill', item: null }),
+      );
+
+    const user = userEvent.setup();
+    renderPage();
+
+    const unlinkButton = await screen.findByRole('button', { name: 'Unlink Cordless drill' });
+    await user.click(unlinkButton);
+
+    await waitFor(() =>
+      expect(updateBomLineMock).toHaveBeenCalledWith('project-1', 'line-1', { itemId: null }),
+    );
+  });
+
+  it('does not render an unlink button for a free-text (unlinked) BOM line', async () => {
+    vi.spyOn(api, 'fetchProject').mockResolvedValue(
+      project({ bomLines: [bomLine({ id: 'line-1', name: '2x4 lumber' })] }),
+    );
+
+    renderPage();
+
+    await screen.findByText('2x4 lumber');
+    expect(screen.queryByRole('button', { name: 'Unlink 2x4 lumber' })).not.toBeInTheDocument();
+  });
+
+  it('rejects a negative quantity by clamping it to 1 before sending the add request', async () => {
+    vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    const addBomLineMock = vi
+      .spyOn(api, 'addBomLine')
+      .mockResolvedValue(bomLine({ name: 'Screws', quantity: 1 }));
+
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText('Garage workbench');
+
+    const autocomplete = screen.getByLabelText('Item or free text');
+    await user.type(autocomplete, 'Screws');
+
+    const qtyInput = screen.getByLabelText('Quantity');
+    await user.clear(qtyInput);
+    await user.type(qtyInput, '-5');
+
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    await waitFor(() =>
+      expect(addBomLineMock).toHaveBeenCalledWith(
+        'project-1',
+        expect.objectContaining({ quantity: 1 }),
+      ),
+    );
+  });
+
+  it('surfaces an error alert when the add-line mutation fails', async () => {
+    vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'addBomLine').mockRejectedValue(new Error('Request to /projects failed'));
+
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText('Garage workbench');
+
+    const autocomplete = screen.getByLabelText('Item or free text');
+    await user.type(autocomplete, 'Broken line');
+
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(await screen.findByText('Request to /projects failed')).toBeInTheDocument();
+  });
+
+  it('clicking "Delete project" calls deleteProject with the project id', async () => {
+    vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+    const deleteProjectMock = vi.spyOn(api, 'deleteProject').mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText('Garage workbench');
+    await user.click(screen.getByRole('button', { name: 'Delete project' }));
+
+    await waitFor(() => expect(deleteProjectMock).toHaveBeenCalledWith('project-1'));
+  });
 });

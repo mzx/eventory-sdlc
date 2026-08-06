@@ -1,15 +1,17 @@
 import { ProjectStatus } from '@prisma/client';
-import { IsDateString, IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsDateString, IsEnum, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class CreateProjectDto {
   /** Human-readable project name. Required, must not be blank. */
   @IsString()
   @IsNotEmpty()
+  @MaxLength(255)
   name!: string;
 
   /** Optional long-form description. */
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   description?: string;
 
   /** Defaults to `planned` when omitted. */
@@ -20,6 +22,7 @@ export class CreateProjectDto {
   /** Free-form notes. */
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   notes?: string;
 
   /** ISO-8601 date/time the project was (or will be) started. */

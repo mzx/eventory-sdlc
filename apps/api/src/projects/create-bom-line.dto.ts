@@ -1,4 +1,4 @@
-import { IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, Min } from 'class-validator';
+import { IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 
 /**
  * Either `itemId` (link to an inventory item — its `name` is copied) or
@@ -15,6 +15,7 @@ export class CreateBomLineDto {
   @IsOptional()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(255)
   name?: string;
 
   /** Quantity needed; defaults to 1. */
@@ -26,10 +27,12 @@ export class CreateBomLineDto {
   /** Unit of measure (e.g. "pcs", "m", "kg"). */
   @IsOptional()
   @IsString()
+  @MaxLength(50)
   unit?: string;
 
   /** Free-form notes. */
   @IsOptional()
   @IsString()
+  @MaxLength(2000)
   notes?: string;
 }

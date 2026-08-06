@@ -129,7 +129,7 @@ export async function fetchItems(params: ListItemsParams = {}): Promise<ItemList
 
 /** GET /api/items/:id */
 export async function fetchItem(id: string): Promise<ItemDetail> {
-  return request<ItemDetail>(`/items/${id}`);
+  return request<ItemDetail>(`/items/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +331,7 @@ export async function fetchProjects(params: ListProjectsParams = {}): Promise<Pr
 
 /** GET /api/projects/:id */
 export async function fetchProject(id: string): Promise<ProjectDetail> {
-  return request<ProjectDetail>(`/projects/${id}`);
+  return request<ProjectDetail>(`/projects/${encodeURIComponent(id)}`);
 }
 
 export interface CreateProjectInput {
@@ -355,7 +355,7 @@ export type UpdateProjectInput = Partial<CreateProjectInput>;
 
 /** PATCH /api/projects/:id */
 export async function updateProject(id: string, input: UpdateProjectInput): Promise<ProjectDetail> {
-  return request<ProjectDetail>(`/projects/${id}`, {
+  return request<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(input),
   });
@@ -363,7 +363,7 @@ export async function updateProject(id: string, input: UpdateProjectInput): Prom
 
 /** DELETE /api/projects/:id */
 export async function deleteProject(id: string): Promise<void> {
-  return request<void>(`/projects/${id}`, { method: 'DELETE' });
+  return request<void>(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export interface CreateBomLineInput {
@@ -378,13 +378,16 @@ export interface CreateBomLineInput {
 
 /** POST /api/projects/:id/bom */
 export async function addBomLine(projectId: string, input: CreateBomLineInput): Promise<BomLine> {
-  return request<BomLine>(`/projects/${projectId}/bom`, {
+  return request<BomLine>(`/projects/${encodeURIComponent(projectId)}/bom`, {
     method: 'POST',
     body: JSON.stringify(input),
   });
 }
 
-export type UpdateBomLineInput = Partial<CreateBomLineInput>;
+export type UpdateBomLineInput = Partial<Omit<CreateBomLineInput, 'itemId'>> & {
+  /** Pass `null` to unlink the line from its inventory item. */
+  itemId?: string | null;
+};
 
 /** PATCH /api/projects/:id/bom/:lineId */
 export async function updateBomLine(
@@ -392,13 +395,19 @@ export async function updateBomLine(
   lineId: string,
   input: UpdateBomLineInput,
 ): Promise<BomLine> {
-  return request<BomLine>(`/projects/${projectId}/bom/${lineId}`, {
-    method: 'PATCH',
-    body: JSON.stringify(input),
-  });
+  return request<BomLine>(
+    `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 /** DELETE /api/projects/:id/bom/:lineId */
 export async function deleteBomLine(projectId: string, lineId: string): Promise<void> {
-  return request<void>(`/projects/${projectId}/bom/${lineId}`, { method: 'DELETE' });
+  return request<void>(
+    `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
+    { method: 'DELETE' },
+  );
 }
