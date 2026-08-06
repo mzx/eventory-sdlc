@@ -13,6 +13,7 @@ import { ItemsModule } from './items/items.module';
 import { LocationsModule } from './locations/locations.module';
 import { PhotosModule } from './photos/photos.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { ProjectsModule } from './projects/projects.module';
 import { QrModule } from './qr/qr.module';
 import { TagsModule } from './tags/tags.module';
 import { UsersModule } from './users/users.module';
@@ -36,6 +37,7 @@ import { UsersModule } from './users/users.module';
     QrModule,
     AiModule,
     PhotosModule,
+    ProjectsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

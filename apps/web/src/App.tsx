@@ -7,9 +7,11 @@ import { IntakePage } from './pages/IntakePage';
 import { ItemsPage } from './pages/ItemsPage';
 import { LocationDetailPage } from './pages/LocationDetailPage';
 import { LocationsPage } from './pages/LocationsPage';
+import { ProjectDetailPage } from './pages/ProjectDetailPage';
+import { ProjectsPage } from './pages/ProjectsPage';
 
-/** App shell: top AppBar (title + primary "Add item" action) wrapping the
- * routed page content in a responsive, phone-first container. */
+/** App shell: top AppBar (title + nav + primary "Add item" action) wrapping
+ * the routed page content in a responsive, phone-first container. */
 export function App() {
   return (
     <>
@@ -23,6 +25,9 @@ export function App() {
           >
             Eventory
           </Typography>
+          <Button component={RouterLink} to="/projects" color="inherit">
+            Projects
+          </Button>
           <Button
             component={RouterLink}
             to="/locations"
@@ -39,6 +44,7 @@ export function App() {
             color="inherit"
             variant="outlined"
             startIcon={<AddIcon />}
+            sx={{ ml: 1 }}
           >
             Add item
           </Button>
@@ -51,6 +57,8 @@ export function App() {
           <Route path="/intake" element={<IntakePage />} />
           <Route path="/locations" element={<LocationsPage />} />
           <Route path="/locations/:id" element={<LocationDetailPage />} />
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/projects/:id" element={<ProjectDetailPage />} />
         </Routes>
       </Container>
     </>

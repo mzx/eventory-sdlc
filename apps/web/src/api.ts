@@ -129,7 +129,7 @@ export async function fetchItems(params: ListItemsParams = {}): Promise<ItemList
 
 /** GET /api/items/:id */
 export async function fetchItem(id: string): Promise<ItemDetail> {
-  return request<ItemDetail>(`/items/${id}`);
+  return request<ItemDetail>(`/items/${encodeURIComponent(id)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -261,4 +261,153 @@ export async function renameLocation(id: string, name: string): Promise<Location
 /** DELETE /api/locations/:id */
 export async function deleteLocation(id: string): Promise<void> {
   return request<void>(`/locations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
+// projects + BOM (EVT-16)
+// ---------------------------------------------------------------------------
+
+export type ProjectStatus = 'planned' | 'in_progress' | 'completed' | 'archived';
+
+/** Row shape returned by `GET /api/projects` — annotated with a BOM line count. */
+export interface ProjectListRow {
+  id: string;
+  name: string;
+  description: string | null;
+  status: ProjectStatus;
+  notes: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lineCount: number;
+}
+
+/** Summary of the inventory item a BOM line is linked to, if any. */
+export interface BomLineItemRef {
+  id: string;
+  name: string;
+  qrCode: string;
+}
+
+export interface BomLine {
+  id: string;
+  projectId: string;
+  itemId: string | null;
+  name: string;
+  quantity: number;
+  unit: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  item: BomLineItemRef | null;
+}
+
+/** Full detail shape returned by `GET /api/projects/:id` — BOM lines instead of a count. */
+export interface ProjectDetail {
+  id: string;
+  name: string;
+  description: string | null;
+  status: ProjectStatus;
+  notes: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  bomLines: BomLine[];
+}
+
+export interface ListProjectsParams {
+  status?: ProjectStatus;
+}
+
+/** GET /api/projects?status= */
+export async function fetchProjects(params: ListProjectsParams = {}): Promise<ProjectListRow[]> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set('status', params.status);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<ProjectListRow[]>(`/projects${suffix}`);
+}
+
+/** GET /api/projects/:id */
+export async function fetchProject(id: string): Promise<ProjectDetail> {
+  return request<ProjectDetail>(`/projects/${encodeURIComponent(id)}`);
+}
+
+export interface CreateProjectInput {
+  name: string;
+  description?: string;
+  status?: ProjectStatus;
+  notes?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+/** POST /api/projects */
+export async function createProject(input: CreateProjectInput): Promise<ProjectDetail> {
+  return request<ProjectDetail>('/projects', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export type UpdateProjectInput = Partial<CreateProjectInput>;
+
+/** PATCH /api/projects/:id */
+export async function updateProject(id: string, input: UpdateProjectInput): Promise<ProjectDetail> {
+  return request<ProjectDetail>(`/projects/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+}
+
+/** DELETE /api/projects/:id */
+export async function deleteProject(id: string): Promise<void> {
+  return request<void>(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export interface CreateBomLineInput {
+  /** Link to an inventory item; its name is copied server-side. */
+  itemId?: string;
+  /** Free-text line name. Required when `itemId` is omitted. */
+  name?: string;
+  quantity?: number;
+  unit?: string;
+  notes?: string;
+}
+
+/** POST /api/projects/:id/bom */
+export async function addBomLine(projectId: string, input: CreateBomLineInput): Promise<BomLine> {
+  return request<BomLine>(`/projects/${encodeURIComponent(projectId)}/bom`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export type UpdateBomLineInput = Partial<Omit<CreateBomLineInput, 'itemId'>> & {
+  /** Pass `null` to unlink the line from its inventory item. */
+  itemId?: string | null;
+};
+
+/** PATCH /api/projects/:id/bom/:lineId */
+export async function updateBomLine(
+  projectId: string,
+  lineId: string,
+  input: UpdateBomLineInput,
+): Promise<BomLine> {
+  return request<BomLine>(
+    `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+/** DELETE /api/projects/:id/bom/:lineId */
+export async function deleteBomLine(projectId: string, lineId: string): Promise<void> {
+  return request<void>(
+    `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
+    { method: 'DELETE' },
+  );
 }

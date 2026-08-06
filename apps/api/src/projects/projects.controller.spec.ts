@@ -1,0 +1,185 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { ProjectsController } from './projects.controller';
+import { ProjectsService } from './projects.service';
+
+// ─── helpers ───────────────────────────────────────────────────────────────
+
+function makeProject(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'project-1',
+    name: 'Garage workbench',
+    description: null,
+    status: 'planned',
+    notes: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    lineCount: 0,
+    ...overrides,
+  };
+}
+
+function makeBomLine(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'line-1',
+    projectId: 'project-1',
+    itemId: null,
+    name: '2x4 lumber',
+    quantity: 4,
+    unit: 'pcs',
+    notes: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    item: null,
+    ...overrides,
+  };
+}
+
+// ─── ProjectsController unit tests ─────────────────────────────────────────
+
+describe('ProjectsController', () => {
+  let controller: ProjectsController;
+
+  const serviceMock = {
+    list: jest.fn(),
+    findOne: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    remove: jest.fn(),
+    addBomLine: jest.fn(),
+    updateBomLine: jest.fn(),
+    removeBomLine: jest.fn(),
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [ProjectsController],
+      providers: [{ provide: ProjectsService, useValue: serviceMock }],
+    }).compile();
+
+    controller = module.get<ProjectsController>(ProjectsController);
+  });
+
+  // ── list ──────────────────────────────────────────────────────────────────
+
+  describe('GET /projects (list)', () => {
+    it('delegates to ProjectsService.list with the query', async () => {
+      const projects = [makeProject(), makeProject({ id: 'project-2' })];
+      serviceMock.list.mockResolvedValue(projects);
+
+      const result = await controller.list({});
+
+      expect(serviceMock.list).toHaveBeenCalledWith({});
+      expect(result).toBe(projects);
+    });
+
+    it('passes the status filter through', async () => {
+      serviceMock.list.mockResolvedValue([]);
+
+      await controller.list({ status: 'in_progress' as never });
+
+      expect(serviceMock.list).toHaveBeenCalledWith({ status: 'in_progress' });
+    });
+  });
+
+  // ── findOne ──────────────────────────────────────────────────────────────
+
+  describe('GET /projects/:id (findOne)', () => {
+    it('delegates to ProjectsService.findOne with the id', async () => {
+      const detail = { ...makeProject(), bomLines: [makeBomLine()] };
+      serviceMock.findOne.mockResolvedValue(detail);
+
+      const result = await controller.findOne('project-1');
+
+      expect(serviceMock.findOne).toHaveBeenCalledWith('project-1');
+      expect(result).toBe(detail);
+    });
+  });
+
+  // ── create ───────────────────────────────────────────────────────────────
+
+  describe('POST /projects (create)', () => {
+    it('delegates to ProjectsService.create with the body', async () => {
+      const body = { name: 'Garage workbench' };
+      const created = makeProject();
+      serviceMock.create.mockResolvedValue(created);
+
+      const result = await controller.create(body);
+
+      expect(serviceMock.create).toHaveBeenCalledWith(body);
+      expect(result).toBe(created);
+    });
+  });
+
+  // ── update ───────────────────────────────────────────────────────────────
+
+  describe('PATCH /projects/:id (update)', () => {
+    it('delegates to ProjectsService.update with id and body', async () => {
+      const body = { status: 'in_progress' as never };
+      const updated = makeProject({ status: 'in_progress' });
+      serviceMock.update.mockResolvedValue(updated);
+
+      const result = await controller.update('project-1', body);
+
+      expect(serviceMock.update).toHaveBeenCalledWith('project-1', body);
+      expect(result).toBe(updated);
+    });
+  });
+
+  // ── remove ───────────────────────────────────────────────────────────────
+
+  describe('DELETE /projects/:id (remove)', () => {
+    it('delegates to ProjectsService.remove and returns void', async () => {
+      serviceMock.remove.mockResolvedValue(undefined);
+
+      await controller.remove('project-1');
+
+      expect(serviceMock.remove).toHaveBeenCalledWith('project-1');
+    });
+  });
+
+  // ── addBomLine ───────────────────────────────────────────────────────────
+
+  describe('POST /projects/:id/bom (addBomLine)', () => {
+    it('delegates to ProjectsService.addBomLine with id and body', async () => {
+      const body = { itemId: 'item-1' };
+      const created = makeBomLine();
+      serviceMock.addBomLine.mockResolvedValue(created);
+
+      const result = await controller.addBomLine('project-1', body);
+
+      expect(serviceMock.addBomLine).toHaveBeenCalledWith('project-1', body);
+      expect(result).toBe(created);
+    });
+  });
+
+  // ── updateBomLine ────────────────────────────────────────────────────────
+
+  describe('PATCH /projects/:id/bom/:lineId (updateBomLine)', () => {
+    it('delegates to ProjectsService.updateBomLine with id, lineId, and body', async () => {
+      const body = { quantity: 6 };
+      const updated = makeBomLine({ quantity: 6 });
+      serviceMock.updateBomLine.mockResolvedValue(updated);
+
+      const result = await controller.updateBomLine('project-1', 'line-1', body);
+
+      expect(serviceMock.updateBomLine).toHaveBeenCalledWith('project-1', 'line-1', body);
+      expect(result).toBe(updated);
+    });
+  });
+
+  // ── removeBomLine ────────────────────────────────────────────────────────
+
+  describe('DELETE /projects/:id/bom/:lineId (removeBomLine)', () => {
+    it('delegates to ProjectsService.removeBomLine and returns void', async () => {
+      serviceMock.removeBomLine.mockResolvedValue(undefined);
+
+      await controller.removeBomLine('project-1', 'line-1');
+
+      expect(serviceMock.removeBomLine).toHaveBeenCalledWith('project-1', 'line-1');
+    });
+  });
+});
