@@ -208,8 +208,10 @@ export interface UpdateItemInput {
   quantity?: number;
   unit?: string;
   properties?: Record<string, unknown>;
-  locationId?: string;
-  categoryId?: string;
+  /** `undefined` (omitted) leaves the relation unchanged; `null` clears it. */
+  locationId?: string | null;
+  /** `undefined` (omitted) leaves the relation unchanged; `null` clears it. */
+  categoryId?: string | null;
   tags?: string[];
   photoIds?: string[];
 }

@@ -93,7 +93,10 @@ export function ItemDetailPage() {
         <Button
           color="error"
           startIcon={<DeleteOutlineIcon />}
-          onClick={() => setConfirmOpen(true)}
+          onClick={() => {
+            setDeleteError(null);
+            setConfirmOpen(true);
+          }}
         >
           Delete
         </Button>
@@ -207,7 +210,13 @@ export function ItemDetailPage() {
 
       <QrThumb token={item.qrCode} printHref={`/items/${item.id}/print`} size={256} />
 
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
+      <Dialog
+        open={confirmOpen}
+        onClose={() => {
+          setConfirmOpen(false);
+          setDeleteError(null);
+        }}
+      >
         <DialogTitle>Delete {item.name}?</DialogTitle>
         <DialogContent>
           <DialogContentText>
@@ -220,7 +229,14 @@ export function ItemDetailPage() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+          <Button
+            onClick={() => {
+              setConfirmOpen(false);
+              setDeleteError(null);
+            }}
+          >
+            Cancel
+          </Button>
           <Button
             color="error"
             onClick={() => deleteMutation.mutate()}

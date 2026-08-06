@@ -109,6 +109,33 @@ describe('ItemDetailPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('clears the stale delete error when the dialog is closed and reopened', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    vi.spyOn(api, 'deleteItem').mockRejectedValue(new Error('Cannot delete: item is referenced'));
+    const user = userEvent.setup();
+
+    renderDetailPage();
+
+    await screen.findByText('Cordless drill');
+
+    // First attempt fails and shows the error.
+    await user.click(screen.getByRole('button', { name: /delete/i }));
+    let dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    expect(
+      await within(dialog).findByText('Cannot delete: item is referenced'),
+    ).toBeInTheDocument();
+
+    // Close without retrying.
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    // Reopen — the stale error must not still be shown.
+    await user.click(screen.getByRole('button', { name: /delete/i }));
+    dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByText('Cannot delete: item is referenced')).not.toBeInTheDocument();
+  });
+
   it('deletes the item and navigates back to the list after confirming', async () => {
     vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
     const deleteMock = vi.spyOn(api, 'deleteItem').mockResolvedValue(undefined);

@@ -78,6 +78,7 @@ export function EditItemPage() {
   const [locationId, setLocationId] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [properties, setProperties] = useState<PropertyRow[]>([]);
+  const [photoActionError, setPhotoActionError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Seed local form state once, the first time the item loads.
@@ -108,8 +109,12 @@ export function EditItemPage() {
         quantity,
         unit,
         tags,
-        locationId: locationId || undefined,
-        categoryId: categoryId || undefined,
+        // Empty string ("No location"/"No category" selected) must send an
+        // explicit `null` — sending `undefined` drops the key from the JSON
+        // body entirely, which the server treats as "leave unchanged" rather
+        // than "clear the relation".
+        locationId: locationId || null,
+        categoryId: categoryId || null,
         properties: Object.fromEntries(
           properties.filter((p) => p.key.trim().length > 0).map((p) => [p.key.trim(), p.value]),
         ),
@@ -121,21 +126,35 @@ export function EditItemPage() {
     },
   });
 
+  function handlePhotoActionError(error: unknown, fallback: string) {
+    setPhotoActionError(error instanceof Error ? error.message : fallback);
+  }
+
   const uploadMutation = useMutation({
     mutationFn: (file: File) => uploadPhoto(file, id as string),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items', id] }),
+    onSuccess: () => {
+      setPhotoActionError(null);
+      queryClient.invalidateQueries({ queryKey: ['items', id] });
+    },
+    onError: (error: unknown) => handlePhotoActionError(error, 'Failed to upload photo'),
   });
 
   const setPrimaryMutation = useMutation({
     mutationFn: (photoId: string) => updateItem(id as string, { photoIds: [photoId] }),
     onSuccess: () => {
+      setPhotoActionError(null);
       queryClient.invalidateQueries({ queryKey: ['items'] });
     },
+    onError: (error: unknown) => handlePhotoActionError(error, 'Failed to set primary photo'),
   });
 
   const removePhotoMutation = useMutation({
     mutationFn: (photoId: string) => deletePhoto(photoId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items'] }),
+    onSuccess: () => {
+      setPhotoActionError(null);
+      queryClient.invalidateQueries({ queryKey: ['items'] });
+    },
+    onError: (error: unknown) => handlePhotoActionError(error, 'Failed to remove photo'),
   });
 
   if (itemQuery.isLoading) {
@@ -351,6 +370,11 @@ export function EditItemPage() {
         >
           Add photo
         </Button>
+        {photoActionError && (
+          <Alert severity="error" sx={{ mt: 1 }}>
+            {photoActionError}
+          </Alert>
+        )}
       </Box>
 
       {saveMutation.isError && (

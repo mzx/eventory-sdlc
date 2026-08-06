@@ -228,4 +228,143 @@ describe('EditItemPage', () => {
       ),
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // Round-3 review fix: clearing location/category must send explicit `null`,
+  // not omit the key (which the server treats as "leave unchanged").
+  // ---------------------------------------------------------------------------
+
+  it('selecting "No location" sends explicit locationId: null in the PATCH payload', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({
+        locationId: 'loc-1',
+        location: { id: 'loc-1', name: 'Garage', path: 'garage' },
+      }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      { id: 'loc-1', name: 'Garage', path: 'garage', parentId: null, qrCode: 'q1', itemCount: 3 },
+    ]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    await user.click(screen.getByLabelText('Location'));
+    await user.click(await screen.findByRole('option', { name: 'No location' }));
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ locationId: null }),
+      ),
+    );
+  });
+
+  it('selecting "No category" sends explicit categoryId: null in the PATCH payload', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({
+        categoryId: 'cat-1',
+        category: { id: 'cat-1', name: 'Hand tools', path: 'hand-tools' },
+      }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([
+      { id: 'cat-1', name: 'Hand tools', path: 'hand-tools', parentId: null },
+    ]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    await user.click(screen.getByLabelText('Category'));
+    await user.click(await screen.findByRole('option', { name: 'No category' }));
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ categoryId: null }),
+      ),
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Round-3 review fix: photo-action mutations must surface errors, not fail
+  // silently.
+  // ---------------------------------------------------------------------------
+
+  it('shows an error alert when uploading a photo fails', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    vi.spyOn(api, 'uploadPhoto').mockRejectedValue(new Error('Upload failed: file too large'));
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    const file = new File(['bytes'], 'second.jpg', { type: 'image/jpeg' });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, file);
+
+    expect(await screen.findByText('Upload failed: file too large')).toBeInTheDocument();
+  });
+
+  it('shows an error alert when setting a photo as primary fails', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({
+        primaryPhotoId: 'photo-1',
+        photos: [
+          { id: 'photo-1', filename: 'primary.jpg', mimeType: 'image/jpeg' },
+          { id: 'photo-2', filename: 'second.jpg', mimeType: 'image/jpeg' },
+        ],
+      }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    vi.spyOn(api, 'updateItem').mockRejectedValue(new Error('Failed to set primary photo'));
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    await user.click(screen.getByRole('button', { name: 'Set as primary photo' }));
+
+    expect(await screen.findByText('Failed to set primary photo')).toBeInTheDocument();
+  });
+
+  it('shows an error alert when removing a photo fails', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({
+        primaryPhotoId: 'photo-1',
+        photos: [
+          { id: 'photo-1', filename: 'primary.jpg', mimeType: 'image/jpeg' },
+          { id: 'photo-2', filename: 'second.jpg', mimeType: 'image/jpeg' },
+        ],
+      }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    vi.spyOn(api, 'deletePhoto').mockRejectedValue(new Error('Failed to remove photo'));
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove photo' });
+    await user.click(removeButtons[0]);
+
+    expect(await screen.findByText('Failed to remove photo')).toBeInTheDocument();
+  });
 });

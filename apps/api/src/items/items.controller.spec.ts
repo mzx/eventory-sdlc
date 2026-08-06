@@ -328,6 +328,24 @@ describe('ItemsController', () => {
         const dto = await pipe.transform({}, { type: 'body', metatype: UpdateItemDto });
         expect(dto).toEqual({});
       });
+
+      // Round-3 review fix: explicit `null` must pass validation (it means
+      // "clear the relation"), distinct from an absent key ("leave unchanged").
+      it('accepts explicit null for locationId (clears the relation)', async () => {
+        const dto = await pipe.transform(
+          { locationId: null },
+          { type: 'body', metatype: UpdateItemDto },
+        );
+        expect(dto).toEqual({ locationId: null });
+      });
+
+      it('accepts explicit null for categoryId (clears the relation)', async () => {
+        const dto = await pipe.transform(
+          { categoryId: null },
+          { type: 'body', metatype: UpdateItemDto },
+        );
+        expect(dto).toEqual({ categoryId: null });
+      });
     });
 
     // -----------------------------------------------------------------------
