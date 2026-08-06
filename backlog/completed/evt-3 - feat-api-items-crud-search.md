@@ -1,7 +1,7 @@
 ---
 id: EVT-3
 title: 'feat(api): Items CRUD + search — list with ?search=&tag=&locationId=, by-qr lookup'
-status: To Do
+status: Done
 labels: [api, items, search]
 dependencies: [EVT-2]
 references: [PRODUCT.md]
