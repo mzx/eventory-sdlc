@@ -86,6 +86,7 @@ jobs:
         if: steps.discover.outputs.pr != '' && steps.guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           PR: ${{ steps.discover.outputs.pr }}
         run: |
           # disable-then-arm to clear any stale GitHub auto-merge state.
