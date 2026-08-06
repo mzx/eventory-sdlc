@@ -6,6 +6,7 @@ import { HealthModule } from './health/health.module';
 import { ItemsModule } from './items/items.module';
 import { LocationsModule } from './locations/locations.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { QrModule } from './qr/qr.module';
 import { TagsModule } from './tags/tags.module';
 
 @Module({
@@ -18,6 +19,7 @@ import { TagsModule } from './tags/tags.module';
     TagsModule,
     CategoriesModule,
     ItemsModule,
+    QrModule,
   ],
 })
 export class AppModule {}
