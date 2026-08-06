@@ -14,7 +14,7 @@ export function photoUrl(filename: string): string {
   return `${STORAGE_URL_PREFIX}/${filename}`;
 }
 
-/** Builds the browser-facing URL for a QR sticker PNG (see apps/api QrController). */
+/** Builds the browser-facing URL for the QR sticker PNG of an item/location token. */
 export function qrImageUrl(token: string, size?: number): string {
   const suffix = size ? `?size=${size}` : '';
   return `${API_BASE}/qr/${encodeURIComponent(token)}${suffix}`;
@@ -107,6 +107,24 @@ export interface Tag {
   itemCount: number;
 }
 
+/** Row shape returned by `GET /api/locations` (flat list, materialized path). */
+export interface LocationListItem {
+  id: string;
+  name: string;
+  path: string;
+  parentId: string | null;
+  qrCode: string;
+  itemCount: number;
+}
+
+/** Row shape returned by `GET /api/categories` (flat list, materialized path). */
+export interface CategoryListItem {
+  id: string;
+  name: string;
+  path: string;
+  parentId: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // items (EVT-3)
 // ---------------------------------------------------------------------------
@@ -179,6 +197,34 @@ export async function searchItemsByPhoto(file: File): Promise<PhotoSearchResult>
   return (await response.json()) as PhotoSearchResult;
 }
 
+/**
+ * PATCH /api/items/:id — partial update.
+ * `tags`, when present, fully replaces the tag list.
+ * `photoIds`, when present, sets the primary photo to its first entry.
+ */
+export interface UpdateItemInput {
+  name?: string;
+  description?: string;
+  quantity?: number;
+  unit?: string;
+  properties?: Record<string, unknown>;
+  /** `undefined` (omitted) leaves the relation unchanged; `null` clears it. */
+  locationId?: string | null;
+  /** `undefined` (omitted) leaves the relation unchanged; `null` clears it. */
+  categoryId?: string | null;
+  tags?: string[];
+  photoIds?: string[];
+}
+
+export async function updateItem(id: string, input: UpdateItemInput): Promise<ItemDetail> {
+  return request<ItemDetail>(`/items/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+}
+
+/** DELETE /api/items/:id — 204 on success. */
+export async function deleteItem(id: string): Promise<void> {
+  return request<void>(`/items/${id}`, { method: 'DELETE' });
+}
+
 // ---------------------------------------------------------------------------
 // tags (EVT-5)
 // ---------------------------------------------------------------------------
@@ -191,16 +237,6 @@ export async function fetchTags(): Promise<Tag[]> {
 // ---------------------------------------------------------------------------
 // locations (EVT-4)
 // ---------------------------------------------------------------------------
-
-/** Row shape returned by `GET /api/locations` — a flat, path-ordered list. */
-export interface LocationListItem {
-  id: string;
-  name: string;
-  path: string;
-  parentId: string | null;
-  qrCode: string;
-  itemCount: number;
-}
 
 export interface LocationChildRef {
   id: string;
@@ -232,7 +268,7 @@ export interface CreateLocationInput {
   notes?: string;
 }
 
-/** GET /api/locations */
+/** GET /api/locations — flat list ordered by path. */
 export async function fetchLocations(): Promise<LocationListItem[]> {
   return request<LocationListItem[]>('/locations');
 }
@@ -410,4 +446,45 @@ export async function deleteBomLine(projectId: string, lineId: string): Promise<
     `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
     { method: 'DELETE' },
   );
+}
+
+// ---------------------------------------------------------------------------
+// categories (EVT-4)
+// ---------------------------------------------------------------------------
+
+/** GET /api/categories — flat list ordered by path. */
+export async function fetchCategories(): Promise<CategoryListItem[]> {
+  return request<CategoryListItem[]>('/categories');
+}
+
+// ---------------------------------------------------------------------------
+// photos (EVT-6)
+// ---------------------------------------------------------------------------
+
+export interface UploadedPhoto extends PhotoRef {
+  url: string;
+  itemId?: string | null;
+}
+
+/**
+ * POST /api/photos/upload — multipart upload, optionally linked to an item.
+ *
+ * Deliberately bypasses the shared `request()` helper: that helper always
+ * sends `Content-Type: application/json`, which would omit the multipart
+ * boundary the browser needs to generate for a `FormData` body.
+ */
+export async function uploadPhoto(file: File, itemId?: string): Promise<UploadedPhoto> {
+  const form = new FormData();
+  form.append('file', file);
+  if (itemId) form.append('itemId', itemId);
+  const response = await fetch(`${API_BASE}/photos/upload`, { method: 'POST', body: form });
+  if (!response.ok) {
+    throw new Error(`Photo upload failed with status ${response.status}`);
+  }
+  return (await response.json()) as UploadedPhoto;
+}
+
+/** DELETE /api/photos/:id — removes the photo (row + on-disk file). */
+export async function deletePhoto(id: string): Promise<void> {
+  return request<void>(`/photos/${id}`, { method: 'DELETE' });
 }

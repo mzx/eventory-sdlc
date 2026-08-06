@@ -36,13 +36,20 @@ export class UpdateItemDto {
   @IsObject()
   properties?: Record<string, unknown>;
 
+  /**
+   * `undefined` (key omitted) leaves the relation unchanged; explicit `null`
+   * clears it (Prisma disconnect). `@IsOptional()` skips validation for both
+   * `undefined` and `null`, so a `null` value bypasses `@IsUUID()` and reaches
+   * the service, where it is forwarded to Prisma as `locationId: null`.
+   */
   @IsOptional()
   @IsUUID()
-  locationId?: string;
+  locationId?: string | null;
 
+  /** See `locationId` above — same undefined-vs-null "leave unchanged" vs "clear" semantics. */
   @IsOptional()
   @IsUUID()
-  categoryId?: string;
+  categoryId?: string | null;
 
   /** When provided, replaces the item's tag list entirely. */
   @IsOptional()

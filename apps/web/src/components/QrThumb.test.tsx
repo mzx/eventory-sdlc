@@ -69,4 +69,20 @@ describe('QrThumb', () => {
     // No throw — handlePrint returns early when window.open is blocked.
     expect(window.open).toHaveBeenCalled();
   });
+
+  it('opens printHref directly in a new tab when provided, instead of the self-built print popup', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+
+    render(<QrThumb token="qr-item-1" label="Garage" printHref="/print/item-1" />);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Print sticker' }));
+
+    // The printHref branch calls window.open with the href, target, and
+    // noopener/noreferrer features — never the popup-building call signature
+    // (empty URL + width/height popup features).
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(openSpy).toHaveBeenCalledWith('/print/item-1', '_blank', 'noopener,noreferrer');
+    expect(openSpy).not.toHaveBeenCalledWith('', '_blank', 'width=400,height=500');
+  });
 });

@@ -805,6 +805,48 @@ describe('ItemsService', () => {
       const result = await service.update(ITEM_ID, { name: 'Updated Drill' });
       expect(result).toBe(updated);
     });
+
+    // -------------------------------------------------------------------------
+    // Round-3 review fix: explicit null clears locationId/categoryId, while an
+    // omitted key leaves the relation unchanged.
+    // -------------------------------------------------------------------------
+
+    it('clears locationId when explicit null is provided', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail({ locationId: null }));
+
+      await service.update(ITEM_ID, { locationId: null });
+
+      expect(prismaMock.item.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ locationId: null }),
+        }),
+      );
+    });
+
+    it('clears categoryId when explicit null is provided', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail({ categoryId: null }));
+
+      await service.update(ITEM_ID, { categoryId: null });
+
+      expect(prismaMock.item.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ categoryId: null }),
+        }),
+      );
+    });
+
+    it('leaves locationId unchanged when the key is omitted from the DTO', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { name: 'New Name' });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data).not.toHaveProperty('locationId');
+      expect(updateCall.data).not.toHaveProperty('categoryId');
+    });
   });
 
   // =========================================================================

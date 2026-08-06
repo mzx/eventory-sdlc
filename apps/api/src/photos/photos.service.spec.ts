@@ -34,6 +34,7 @@ function makePrismaMock() {
     photo: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      delete: jest.fn(),
     },
     item: {
       findUnique: jest.fn(),
@@ -370,6 +371,29 @@ describe('PhotosService', () => {
     it('throws NotFoundException when the photo does not exist', async () => {
       prismaMock.photo.findUnique.mockResolvedValue(null);
       await expect(service.findById(PHOTO_ID)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // =========================================================================
+  // remove
+  // =========================================================================
+
+  describe('remove', () => {
+    it('deletes the Photo row and unlinks its on-disk file', async () => {
+      prismaMock.photo.findUnique.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
+      prismaMock.photo.delete.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
+
+      await service.remove(PHOTO_ID);
+
+      expect(prismaMock.photo.delete).toHaveBeenCalledWith({ where: { id: PHOTO_ID } });
+      expect(unlinkMock).toHaveBeenCalledWith(expect.stringContaining('a.png'));
+    });
+
+    it('throws NotFoundException when the photo does not exist, without attempting delete', async () => {
+      prismaMock.photo.findUnique.mockResolvedValue(null);
+
+      await expect(service.remove(PHOTO_ID)).rejects.toThrow(NotFoundException);
+      expect(prismaMock.photo.delete).not.toHaveBeenCalled();
     });
   });
 });

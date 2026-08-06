@@ -209,6 +209,28 @@ export class PhotosService {
   }
 
   // -------------------------------------------------------------------------
+  // remove — DELETE /api/photos/:id
+  // -------------------------------------------------------------------------
+
+  /**
+   * Deletes a Photo row and best-effort unlinks its file from disk.
+   *
+   * If the photo was an item's `primaryPhotoId`, the schema's
+   * `onDelete: SetNull` on the `Item.primaryPhoto` relation clears that
+   * reference automatically — no extra query needed here.
+   *
+   * 404 when the photo does not exist.
+   */
+  async remove(id: string): Promise<void> {
+    const photo = await this.prisma.photo.findUnique({ where: { id } });
+    if (!photo) {
+      throw new NotFoundException(`Photo ${id} not found`);
+    }
+    await this.prisma.photo.delete({ where: { id } });
+    await this.unlinkQuietly(path.join(STORAGE_DIR, photo.filename));
+  }
+
+  // -------------------------------------------------------------------------
   // helpers
   // -------------------------------------------------------------------------
 
