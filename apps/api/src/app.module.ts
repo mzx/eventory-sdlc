@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { CategoriesModule } from './categories/categories.module';
 import { DbModule } from './db/db.module';
 import { HealthModule } from './health/health.module';
+import { ItemsModule } from './items/items.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { TagsModule } from './tags/tags.module';
 
@@ -14,6 +15,7 @@ import { TagsModule } from './tags/tags.module';
     HealthModule,
     TagsModule,
     CategoriesModule,
+    ItemsModule,
   ],
 })
 export class AppModule {}
