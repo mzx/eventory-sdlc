@@ -90,4 +90,4 @@ jobs:
         run: |
           # disable-then-arm to clear any stale GitHub auto-merge state.
           gh pr merge --disable-auto "$PR" 2>/dev/null || true
-          gh pr merge --auto "$PR"
+          gh pr merge --auto --squash "$PR"
