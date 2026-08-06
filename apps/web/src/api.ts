@@ -133,6 +133,53 @@ export async function fetchItem(id: string): Promise<ItemDetail> {
 }
 
 // ---------------------------------------------------------------------------
+// search-by-photo (EVT-17)
+// ---------------------------------------------------------------------------
+
+/**
+ * The vision analysis draft shape (see apps/api AiService.analyzePhoto).
+ * `stub_reason` is present only when the model call was deliberately
+ * skipped (unsupported format / oversized) rather than attempted.
+ */
+export interface PhotoSearchAnalysis {
+  suggested_name: string;
+  description: string;
+  tags: string[];
+  color: string | null;
+  quantity: number | null;
+  unit: string | null;
+  properties: Record<string, unknown>;
+  search_keywords: string[];
+  stub_reason?: 'unsupported-image-format' | 'oversized';
+}
+
+/** Response shape of `POST /api/items/search-by-photo`. */
+export interface PhotoSearchResult {
+  analysis: PhotoSearchAnalysis;
+  matches: ItemListRow[];
+}
+
+/**
+ * POST /api/items/search-by-photo — multipart upload, NOT JSON, so this
+ * bypasses the shared `request()` helper (which always sets
+ * `Content-Type: application/json`). The browser sets the multipart
+ * boundary itself when `FormData` is used with no explicit Content-Type
+ * header, so none is set here.
+ */
+export async function searchItemsByPhoto(file: File): Promise<PhotoSearchResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await fetch(`${API_BASE}/items/search-by-photo`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    throw new Error(`Request to /items/search-by-photo failed with status ${response.status}`);
+  }
+  return (await response.json()) as PhotoSearchResult;
+}
+
+// ---------------------------------------------------------------------------
 // tags (EVT-5)
 // ---------------------------------------------------------------------------
 

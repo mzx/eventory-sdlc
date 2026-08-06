@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -10,10 +11,18 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
+  UseFilters,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
+import { uploadThrottlerConfig } from '../common/throttle.config';
+import { PayloadTooLargeFilter } from '../photos/photo-upload.helpers';
 import { CreateItemDto } from './create-item.dto';
 import { ItemsService } from './items.service';
 import { ListItemsQueryDto } from './list-items-query.dto';
+import { searchByPhotoMulterOptions } from './search-by-photo.helpers';
 import { UpdateItemDto } from './update-item.dto';
 
 @Controller('items')
@@ -57,6 +66,37 @@ export class ItemsController {
   @Get(':id')
   findById(@Param('id', ParseUUIDPipe) id: string) {
     return this.itemsService.findById(id);
+  }
+
+  /**
+   * POST /api/items/search-by-photo
+   *
+   * Multipart photo upload (`file` field). Runs the EVT-7 Claude vision
+   * analysis against the photo (the photo itself is NEVER persisted — see
+   * `search-by-photo.helpers.ts`) and searches existing items using the
+   * analysis's suggested name, search keywords, and tags. Returns
+   * `{ analysis, matches }`; `matches` is list-shape items (same as
+   * `GET /api/items`), ranked by distinct search-term hit count.
+   *
+   * Wrong mimetype → 415. Oversized (>5 MB, the vision-analysis ceiling,
+   * stricter than the general upload ceiling since nothing here is stored)
+   * → 400.
+   *
+   * Rate-limited with the same strict throttle as `POST /api/photos/upload`
+   * (see `common/throttle.config.ts`) — this route triggers the same billed
+   * Anthropic vision call with no auth guard in front of it (EVT-7 review
+   * round 2, finding 1).
+   */
+  @Post('search-by-photo')
+  @Throttle(uploadThrottlerConfig())
+  @HttpCode(HttpStatus.OK)
+  @UseFilters(new PayloadTooLargeFilter('File exceeds the 5 MB search-by-photo upload limit'))
+  @UseInterceptors(FileInterceptor('file', searchByPhotoMulterOptions))
+  searchByPhoto(@UploadedFile() file: Express.Multer.File) {
+    if (!file) {
+      throw new BadRequestException('file is required');
+    }
+    return this.itemsService.searchByPhoto(file.buffer, file.mimetype);
   }
 
   /**
