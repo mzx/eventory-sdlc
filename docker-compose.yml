@@ -29,6 +29,8 @@ services:
       PUBLIC_BASE_URL: https://localhost:5173
     ports:
       - '3001:3001'
+    volumes:
+      - eventory-photo-storage:/workspace/apps/api/storage
     depends_on:
       db:
         condition: service_healthy
@@ -54,3 +56,4 @@ services:
 
 volumes:
   eventory-db-data:
+  eventory-photo-storage:

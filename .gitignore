@@ -12,6 +12,10 @@ build/
 # Prisma
 apps/api/prisma/generated/
 
+# Photo upload storage (EVT-6) — Docker volume in prod, local uploads in dev
+apps/api/storage/*
+!apps/api/storage/.gitkeep
+
 # Env
 .env
 .env.local
