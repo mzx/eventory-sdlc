@@ -26,6 +26,7 @@ services:
     environment:
       DATABASE_URL: postgresql://eventory:eventory@db:5432/eventory?schema=public
       PORT: 3001
+      PUBLIC_BASE_URL: https://localhost:5173
     ports:
       - '3001:3001'
     depends_on:
