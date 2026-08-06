@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { User, UserRole, UserStatus } from '@prisma/client';
 import type { CookieOptions } from 'express';
@@ -19,9 +19,38 @@ export const DEFAULT_WEB_BASE = 'http://localhost:5173';
  * Fallback JWT signing secret used when `JWT_SECRET` is not configured
  * (dev/test boot). Same rationale as `GoogleStrategy`'s `UNCONFIGURED`
  * placeholder — never use this in production; the operator must set
- * `JWT_SECRET` for real deployments.
+ * `JWT_SECRET` for real deployments. `resolveJwtSecret` below refuses to
+ * fall back to this value when `NODE_ENV === 'production'`.
  */
 export const DEFAULT_JWT_SECRET = 'dev-insecure-jwt-secret-change-me';
+
+/**
+ * Resolves the secret `JwtModule` signs/verifies session cookies with.
+ *
+ * - `JWT_SECRET` set to anything other than the known default → used as-is.
+ * - Otherwise (unset, or explicitly set to the default): allowed in
+ *   dev/test, but throws at bootstrap when `NODE_ENV === 'production'` —
+ *   a production deployment that forgot to configure `JWT_SECRET` must
+ *   fail to start rather than silently sign every session with a secret
+ *   published in this repo's source (EVT-14 review round 2, finding 1).
+ *
+ * Takes `env` as a parameter (defaulting to `process.env`) so it's a pure,
+ * directly-testable function rather than reaching for the global at every
+ * call site.
+ */
+export function resolveJwtSecret(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.JWT_SECRET;
+  if (configured && configured !== DEFAULT_JWT_SECRET) {
+    return configured;
+  }
+  if (env.NODE_ENV === 'production') {
+    throw new Error(
+      'JWT_SECRET must be set to a non-default value when NODE_ENV=production. ' +
+        'Refusing to boot signing sessions with the publicly known dev fallback secret.',
+    );
+  }
+  return DEFAULT_JWT_SECRET;
+}
 
 /** Session lifetime — 30 days, matching the cookie's `maxAge`. */
 const TOKEN_EXPIRY = '30d';
@@ -68,23 +97,32 @@ export class AuthService {
   /**
    * Upserts a `User` row from a verified Google profile.
    *
-   * - Matched first by `googleId`, falling back to `email` (covers the edge
-   *   case of a row that predates a `googleId` change on Google's side).
+   * - Matched first by `googleId`. Only falls back to matching by `email`
+   *   when no row owns this `googleId` — and even then, if the matched row
+   *   already has a DIFFERENT `googleId` bound, the sign-in is refused
+   *   rather than silently rebinding it. Silently rebinding on an email
+   *   match is an account-takeover path: anyone who can present a Google
+   *   profile with a given email (see `GoogleStrategy`'s `email_verified`
+   *   check, which is the other half of this defense) would otherwise
+   *   hijack whatever existing row — including an approved admin's — has
+   *   that email (EVT-14 review round 2, finding 2).
    * - The FIRST user ever created is auto-promoted to `admin` + `approved`
    *   so the household is never locked out waiting for an admin to approve
-   *   the very first admin.
+   *   the very first admin. The count-then-create is wrapped in an
+   *   interactive transaction so two concurrent first sign-ins can't both
+   *   observe `count() === 0` and both become admin (EVT-14 review round
+   *   2, finding 5).
    * - Every sign-in (new or returning) stamps `lastLoginAt`.
    */
   async upsertFromGoogleProfile(profile: GoogleProfile): Promise<User> {
-    const existing = await this.prisma.user.findFirst({
-      where: { OR: [{ googleId: profile.googleId }, { email: profile.email }] },
+    const byGoogleId = await this.prisma.user.findUnique({
+      where: { googleId: profile.googleId },
     });
 
-    if (existing) {
+    if (byGoogleId) {
       return this.prisma.user.update({
-        where: { id: existing.id },
+        where: { id: byGoogleId.id },
         data: {
-          googleId: profile.googleId,
           email: profile.email,
           name: profile.name,
           picture: profile.picture,
@@ -93,21 +131,45 @@ export class AuthService {
       });
     }
 
-    const isFirstUser = (await this.prisma.user.count()) === 0;
+    const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
 
-    return this.prisma.user.create({
-      data: {
-        googleId: profile.googleId,
-        email: profile.email,
-        name: profile.name,
-        picture: profile.picture,
-        lastLoginAt: new Date(),
-        ...(isFirstUser && {
-          role: UserRole.admin,
-          status: UserStatus.approved,
-          approvedAt: new Date(),
-        }),
-      },
+    if (byEmail) {
+      if (byEmail.googleId) {
+        // We already ruled out a match on THIS profile's googleId above, so
+        // if we're here the email-matched row is bound to a DIFFERENT
+        // Google account. Never overwrite it.
+        throw new UnauthorizedException(
+          'This email address is already linked to a different Google account.',
+        );
+      }
+      return this.prisma.user.update({
+        where: { id: byEmail.id },
+        data: {
+          googleId: profile.googleId,
+          name: profile.name,
+          picture: profile.picture,
+          lastLoginAt: new Date(),
+        },
+      });
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const isFirstUser = (await tx.user.count()) === 0;
+
+      return tx.user.create({
+        data: {
+          googleId: profile.googleId,
+          email: profile.email,
+          name: profile.name,
+          picture: profile.picture,
+          lastLoginAt: new Date(),
+          ...(isFirstUser && {
+            role: UserRole.admin,
+            status: UserStatus.approved,
+            approvedAt: new Date(),
+          }),
+        },
+      });
     });
   }
 

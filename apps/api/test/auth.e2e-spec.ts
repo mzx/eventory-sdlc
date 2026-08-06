@@ -19,20 +19,143 @@
  *   AC3 — admin endpoints reject non-admins; self-demotion/self-rejection
  *          rejected
  *   AC4 — GET /api/qr/:token remains public
- *   AC5 — guard sweep: every route except the @Public list returns 401
- *          without a cookie
+ *   AC5 — guard sweep: every route discovered from Nest's ACTUAL route
+ *          table (via `DiscoveryService`, not a hand-maintained list) that
+ *          isn't `@Public()`/`@AllowPending()` returns 401 without a cookie
  */
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, RequestMethod, ValidationPipe } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { DiscoveryService, MetadataScanner, ModulesContainer } from '@nestjs/core';
 import { Test, TestingModule } from '@nestjs/testing';
 import { UserRole, UserStatus } from '@prisma/client';
 import cookieParser from 'cookie-parser';
 import supertest from 'supertest';
 import { AppModule } from '../src/app.module';
 import { AUTH_COOKIE_NAME, AuthService } from '../src/auth/auth.service';
+import { ALLOW_PENDING_KEY, IS_PUBLIC_KEY } from '../src/auth/decorators';
 import { GoogleProfile } from '../src/auth/google.strategy';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { wrapWithCookie } from './e2e-auth-helper';
+
+// ---------------------------------------------------------------------------
+// Route-table discovery (AC5) — see the describe block below for rationale.
+// ---------------------------------------------------------------------------
+
+type SupportedMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
+
+const METHOD_NAME_BY_REQUEST_METHOD: Partial<Record<RequestMethod, SupportedMethod>> = {
+  [RequestMethod.GET]: 'get',
+  [RequestMethod.POST]: 'post',
+  [RequestMethod.PUT]: 'put',
+  [RequestMethod.PATCH]: 'patch',
+  [RequestMethod.DELETE]: 'delete',
+};
+
+function toPathArray(pathMeta: string | string[] | undefined): string[] {
+  if (!pathMeta) {
+    return [''];
+  }
+  return Array.isArray(pathMeta) ? pathMeta : [pathMeta];
+}
+
+function joinPaths(...parts: string[]): string {
+  const joined = parts
+    .filter((part) => part.length > 0)
+    .join('/')
+    .replace(/\/+/g, '/');
+  return joined.startsWith('/') ? joined : `/${joined}`;
+}
+
+/**
+ * Guards run before pipes in Nest's request lifecycle, so any placeholder
+ * satisfies a `:id` / `:qr` / `:token` param for the purposes of exercising
+ * `JwtAuthGuard` — the route handler (and any `ParseUUIDPipe`) never runs
+ * when the guard rejects the request first.
+ */
+function withPlaceholderParams(path: string): string {
+  return path
+    .split('/')
+    .map((segment) => (segment.startsWith(':') ? 'placeholder-value' : segment))
+    .join('/');
+}
+
+/**
+ * Walks Nest's ACTUAL route table (via `DiscoveryService`, the same
+ * discovery mechanism Nest uses internally — not Express router-stack
+ * scraping) and returns every registered route that is neither `@Public()`
+ * nor `@AllowPending()`, i.e. every route `JwtAuthGuard` is expected to
+ * reject without a cookie.
+ *
+ * Deliberately NOT a hand-maintained list (EVT-14 review round 2, finding
+ * 3): a hardcoded `PROTECTED_ROUTES` array silently omitted several real
+ * routes (PATCH/DELETE /api/items/:id, /api/locations/:id, etc.) because
+ * nobody remembered to add them when those controllers were built. Deriving
+ * from the route table means a future controller/route is covered
+ * automatically the next time this suite runs — no test file edit needed.
+ */
+function discoverProtectedRoutes(
+  app: INestApplication,
+): { method: SupportedMethod; path: string }[] {
+  const modulesContainer = app.get(ModulesContainer);
+  const discovery = new DiscoveryService(modulesContainer);
+  const metadataScanner = new MetadataScanner();
+
+  const routes: { method: SupportedMethod; path: string }[] = [];
+
+  for (const wrapper of discovery.getControllers()) {
+    const { instance, metatype } = wrapper;
+    if (!instance || !metatype) {
+      continue;
+    }
+    const prototype = Object.getPrototypeOf(instance);
+    const controllerPaths = toPathArray(Reflect.getMetadata(PATH_METADATA, metatype));
+    const controllerIsPublic = Boolean(Reflect.getMetadata(IS_PUBLIC_KEY, metatype));
+    const controllerAllowsPending = Boolean(Reflect.getMetadata(ALLOW_PENDING_KEY, metatype));
+
+    for (const methodName of metadataScanner.getAllMethodNames(prototype)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handler = (prototype as any)[methodName];
+      const requestMethod: RequestMethod | undefined = Reflect.getMetadata(
+        METHOD_METADATA,
+        handler,
+      );
+      if (requestMethod === undefined) {
+        continue; // not a route handler — a plain helper method on the controller
+      }
+
+      const methodIsPublicMeta = Reflect.getMetadata(IS_PUBLIC_KEY, handler);
+      const isPublic =
+        methodIsPublicMeta !== undefined ? Boolean(methodIsPublicMeta) : controllerIsPublic;
+      const methodAllowsPendingMeta = Reflect.getMetadata(ALLOW_PENDING_KEY, handler);
+      const allowsPending =
+        methodAllowsPendingMeta !== undefined
+          ? Boolean(methodAllowsPendingMeta)
+          : controllerAllowsPending;
+
+      if (isPublic || allowsPending) {
+        continue;
+      }
+
+      const supportedMethod = METHOD_NAME_BY_REQUEST_METHOD[requestMethod];
+      if (!supportedMethod) {
+        continue; // ALL/OPTIONS/HEAD/SEARCH — unused in this API, nothing to assert
+      }
+
+      const methodPaths = toPathArray(Reflect.getMetadata(PATH_METADATA, handler));
+      for (const controllerPath of controllerPaths) {
+        for (const methodPath of methodPaths) {
+          routes.push({
+            method: supportedMethod,
+            path: withPlaceholderParams(joinPaths('/api', controllerPath, methodPath)),
+          });
+        }
+      }
+    }
+  }
+
+  return routes;
+}
 
 // ---------------------------------------------------------------------------
 // Test database URL — provided by global-setup.ts via the known container URL
@@ -257,23 +380,28 @@ describe('Auth API (e2e)', () => {
   // =========================================================================
 
   describe('AC5: guard sweep', () => {
-    const PROTECTED_ROUTES: { method: 'get' | 'post' | 'patch' | 'delete'; path: string }[] = [
-      { method: 'get', path: '/api/items' },
-      { method: 'post', path: '/api/items' },
-      { method: 'get', path: '/api/items/11111111-1111-1111-1111-111111111111' },
-      { method: 'get', path: '/api/items/by-qr/some-token' },
-      { method: 'get', path: '/api/locations' },
-      { method: 'post', path: '/api/locations' },
-      { method: 'get', path: '/api/categories' },
-      { method: 'get', path: '/api/tags' },
-      { method: 'get', path: '/api/photos/11111111-1111-1111-1111-111111111111' },
-      { method: 'post', path: '/api/photos/upload' },
-      { method: 'get', path: '/api/users' },
-      { method: 'patch', path: '/api/users/11111111-1111-1111-1111-111111111111/status' },
-    ];
+    let discoveredRoutes: { method: SupportedMethod; path: string }[];
 
-    it.each(PROTECTED_ROUTES)('$method $path → 401 without a cookie', async ({ method, path }) => {
-      await http[method](path).expect(401);
+    beforeAll(() => {
+      discoveredRoutes = discoverProtectedRoutes(app);
+      // Sanity-check the crawl actually found real routes — guards against
+      // a discovery bug (e.g. a metadata-key typo) silently returning an
+      // empty list, which would make the sweep below vacuously pass. The
+      // hand-curated list this replaced had 12 entries and MISSED several
+      // real routes; the discovered set should comfortably exceed it.
+      expect(discoveredRoutes.length).toBeGreaterThanOrEqual(15);
+    });
+
+    it('every route discovered from the real Nest route table returns 401 without a cookie', async () => {
+      for (const { method, path } of discoveredRoutes) {
+        const res = await http[method](path);
+        if (res.status !== 401) {
+          throw new Error(
+            `expected 401 for ${method.toUpperCase()} ${path} (no cookie), got ${res.status}. ` +
+              'A route was added without protecting it, or without an explicit @Public()/@AllowPending().',
+          );
+        }
+      }
     });
 
     it('GET /api/health is never 401 (@Public)', async () => {

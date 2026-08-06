@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Profile, Strategy, VerifyCallback } from 'passport-google-oauth20';
 
@@ -39,6 +39,14 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
    * their profile. Normalizes it to {@link GoogleProfile} and hands it to
    * `done`, which passport attaches to `req.user` for the callback route
    * handler to read.
+   *
+   * Rejects profiles whose email is not `verified`. Google generally only
+   * reports `email_verified: true` for hosted/Gmail addresses, but the
+   * account-linking logic in `AuthService.upsertFromGoogleProfile` falls
+   * back to matching an existing row by email — an unverified email would
+   * let anyone who can present *any* Google profile claiming a given
+   * address hijack the row that owns it (e.g. an approved admin's account).
+   * See EVT-14 review round 2, finding 2.
    */
   validate(
     _accessToken: string,
@@ -46,14 +54,19 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     profile: Profile,
     done: VerifyCallback,
   ): void {
-    const email = profile.emails?.[0]?.value;
-    if (!email) {
-      done(new Error('Google profile did not include an email address'));
+    const emailEntry = profile.emails?.[0];
+    if (!emailEntry?.value) {
+      done(new UnauthorizedException('Google profile did not include an email address'));
+      return;
+    }
+    const emailVerified = emailEntry.verified ?? profile._json?.email_verified ?? false;
+    if (!emailVerified) {
+      done(new UnauthorizedException('Google account email is not verified'));
       return;
     }
     const googleProfile: GoogleProfile = {
       googleId: profile.id,
-      email,
+      email: emailEntry.value,
       name: profile.displayName || null,
       picture: profile.photos?.[0]?.value || null,
     };

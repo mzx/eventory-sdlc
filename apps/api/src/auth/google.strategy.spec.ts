@@ -1,3 +1,4 @@
+import { UnauthorizedException } from '@nestjs/common';
 import type { Profile } from 'passport-google-oauth20';
 import { GoogleStrategy } from './google.strategy';
 
@@ -46,6 +47,49 @@ describe('GoogleStrategy', () => {
     const done = jest.fn();
     strategy.validate('a', 'r', makeProfile({ emails: [] }), done);
 
-    expect(done).toHaveBeenCalledWith(expect.any(Error));
+    expect(done).toHaveBeenCalledWith(expect.any(UnauthorizedException));
+  });
+
+  it('rejects an unverified email (emails[0].verified === false)', () => {
+    const done = jest.fn();
+    strategy.validate(
+      'a',
+      'r',
+      makeProfile({ emails: [{ value: 'attacker@example.com', verified: false }] as never }),
+      done,
+    );
+
+    expect(done).toHaveBeenCalledWith(expect.any(UnauthorizedException));
+    expect(done).not.toHaveBeenCalledWith(null, expect.anything());
+  });
+
+  it('accepts an email verified only via `_json.email_verified` (verified flag absent on emails[0])', () => {
+    const done = jest.fn();
+    strategy.validate(
+      'a',
+      'r',
+      makeProfile({
+        emails: [{ value: 'alice@example.com' }] as never,
+        _json: { email_verified: true } as never,
+      }),
+      done,
+    );
+
+    expect(done).toHaveBeenCalledWith(
+      null,
+      expect.objectContaining({ email: 'alice@example.com' }),
+    );
+  });
+
+  it('rejects when neither emails[0].verified nor _json.email_verified is true', () => {
+    const done = jest.fn();
+    strategy.validate(
+      'a',
+      'r',
+      makeProfile({ emails: [{ value: 'alice@example.com' }] as never, _json: {} as never }),
+      done,
+    );
+
+    expect(done).toHaveBeenCalledWith(expect.any(UnauthorizedException));
   });
 });

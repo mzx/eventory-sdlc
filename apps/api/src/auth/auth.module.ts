@@ -3,7 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AdminGuard } from './admin.guard';
 import { AuthController } from './auth.controller';
-import { AuthService, DEFAULT_JWT_SECRET } from './auth.service';
+import { AuthService, resolveJwtSecret } from './auth.service';
 import { GoogleStrategy } from './google.strategy';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
@@ -11,9 +11,10 @@ import { JwtAuthGuard } from './jwt-auth.guard';
   imports: [
     PassportModule,
     JwtModule.register({
-      // See `DEFAULT_JWT_SECRET`'s doc comment — dev/test fallback only; the
-      // operator must set `JWT_SECRET` for real deployments.
-      secret: process.env.JWT_SECRET || DEFAULT_JWT_SECRET,
+      // `resolveJwtSecret` throws at bootstrap when JWT_SECRET is unset (or
+      // left at the known dev default) and NODE_ENV=production — see its
+      // doc comment in auth.service.ts (EVT-14 review round 2, finding 1).
+      secret: resolveJwtSecret(),
     }),
   ],
   controllers: [AuthController],

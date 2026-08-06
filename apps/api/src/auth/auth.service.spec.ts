@@ -1,8 +1,9 @@
+import { UnauthorizedException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AuthService, toPublicUser } from './auth.service';
+import { AuthService, DEFAULT_JWT_SECRET, resolveJwtSecret, toPublicUser } from './auth.service';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -12,15 +13,24 @@ import { GoogleProfile } from './google.strategy';
 const USER_ID = '11111111-1111-1111-1111-111111111111';
 
 function makePrismaMock() {
-  return {
-    user: {
-      findFirst: jest.fn(),
-      findUnique: jest.fn(),
-      create: jest.fn(),
-      update: jest.fn(),
-      count: jest.fn(),
-    },
+  const user = {
+    findFirst: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
   };
+  const mock: {
+    user: typeof user;
+    $transaction: jest.Mock;
+  } = {
+    user,
+    // Mimics Prisma's interactive `$transaction(async (tx) => ...)` by
+    // handing the callback this same mock — `tx.user.count()` /
+    // `tx.user.create()` hit the exact jest mocks the test configured.
+    $transaction: jest.fn((callback: (tx: unknown) => unknown) => callback(mock)),
+  };
+  return mock;
 }
 
 function makeProfile(overrides: Partial<GoogleProfile> = {}): GoogleProfile {
@@ -85,13 +95,14 @@ describe('AuthService', () => {
 
   describe('upsertFromGoogleProfile', () => {
     it('creates the FIRST-ever user as admin + approved', async () => {
-      prisma.user.findFirst.mockResolvedValue(null);
+      prisma.user.findUnique.mockResolvedValue(null); // neither googleId nor email match
       prisma.user.count.mockResolvedValue(0);
       const created = makeUser({ role: UserRole.admin, status: UserStatus.approved });
       prisma.user.create.mockResolvedValue(created);
 
       const result = await service.upsertFromGoogleProfile(makeProfile());
 
+      expect(prisma.$transaction).toHaveBeenCalled();
       expect(prisma.user.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -105,7 +116,7 @@ describe('AuthService', () => {
     });
 
     it('creates the SECOND user as a plain pending user (no auto-approval)', async () => {
-      prisma.user.findFirst.mockResolvedValue(null);
+      prisma.user.findUnique.mockResolvedValue(null);
       prisma.user.count.mockResolvedValue(1);
       const created = makeUser({ id: 'second-user' });
       prisma.user.create.mockResolvedValue(created);
@@ -117,33 +128,76 @@ describe('AuthService', () => {
       expect(createArg.data.status).toBeUndefined();
     });
 
-    it('updates an existing user (matched by googleId) and stamps lastLoginAt', async () => {
+    it('the first-user count+create runs inside the SAME $transaction callback (race-safe)', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.count.mockResolvedValue(0);
+      prisma.user.create.mockResolvedValue(makeUser());
+
+      await service.upsertFromGoogleProfile(makeProfile());
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      // Called via the `tx` handed to the transaction callback, not a
+      // standalone top-level call outside the transaction.
+      expect(prisma.user.count).toHaveBeenCalledTimes(1);
+      expect(prisma.user.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('updates an existing user (matched by googleId) and stamps lastLoginAt, WITHOUT creating', async () => {
       const existing = makeUser();
-      prisma.user.findFirst.mockResolvedValue(existing);
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
       const updated = { ...existing, lastLoginAt: new Date() };
       prisma.user.update.mockResolvedValue(updated);
 
       const result = await service.upsertFromGoogleProfile(makeProfile());
 
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { googleId: 'google-id-1' },
+      });
       expect(prisma.user.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: existing.id },
           data: expect.objectContaining({ lastLoginAt: expect.any(Date) }),
         }),
       );
+      expect(prisma.user.create).not.toHaveBeenCalled();
       expect(result).toEqual(updated);
     });
 
-    it('matches an existing user by email as a fallback when googleId differs', async () => {
-      const existing = makeUser({ googleId: 'stale-google-id' });
-      prisma.user.findFirst.mockResolvedValue(existing);
-      prisma.user.update.mockResolvedValue(existing);
+    it('binds googleId to an existing row matched by email ONLY when that row has no googleId yet', async () => {
+      const existing = makeUser({ googleId: null as unknown as string });
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // no match by googleId
+        .mockResolvedValueOnce(existing); // matched by email
+      prisma.user.update.mockResolvedValue({ ...existing, googleId: 'fresh-google-id' });
 
       await service.upsertFromGoogleProfile(makeProfile({ googleId: 'fresh-google-id' }));
 
-      expect(prisma.user.findFirst).toHaveBeenCalledWith({
-        where: { OR: [{ googleId: 'fresh-google-id' }, { email: 'alice@example.com' }] },
+      expect(prisma.user.findUnique).toHaveBeenNthCalledWith(1, {
+        where: { googleId: 'fresh-google-id' },
       });
+      expect(prisma.user.findUnique).toHaveBeenNthCalledWith(2, {
+        where: { email: 'alice@example.com' },
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: existing.id },
+          data: expect.objectContaining({ googleId: 'fresh-google-id' }),
+        }),
+      );
+    });
+
+    it('REFUSES to rebind an email-matched row that already has a DIFFERENT googleId (account-takeover guard)', async () => {
+      const existing = makeUser({ googleId: 'legitimate-owner-google-id' });
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // no match by the incoming googleId
+        .mockResolvedValueOnce(existing); // matched by email, but a DIFFERENT googleId is already bound
+
+      await expect(
+        service.upsertFromGoogleProfile(makeProfile({ googleId: 'attacker-google-id' })),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.user.create).not.toHaveBeenCalled();
     });
   });
 
@@ -256,6 +310,46 @@ describe('AuthService', () => {
       process.env.WEB_BASE = 'https://eventory.example.com';
       expect(service.webBase()).toBe('https://eventory.example.com');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveJwtSecret
+// ---------------------------------------------------------------------------
+
+describe('resolveJwtSecret', () => {
+  it('returns a configured, non-default JWT_SECRET as-is', () => {
+    expect(resolveJwtSecret({ JWT_SECRET: 'a-real-production-secret' })).toBe(
+      'a-real-production-secret',
+    );
+  });
+
+  it('falls back to the dev default when JWT_SECRET is unset outside production', () => {
+    expect(resolveJwtSecret({ NODE_ENV: 'test' })).toBe(DEFAULT_JWT_SECRET);
+    expect(resolveJwtSecret({ NODE_ENV: 'development' })).toBe(DEFAULT_JWT_SECRET);
+    expect(resolveJwtSecret({})).toBe(DEFAULT_JWT_SECRET);
+  });
+
+  it('falls back to the dev default when JWT_SECRET is explicitly the default outside production', () => {
+    expect(resolveJwtSecret({ JWT_SECRET: DEFAULT_JWT_SECRET, NODE_ENV: 'test' })).toBe(
+      DEFAULT_JWT_SECRET,
+    );
+  });
+
+  it('THROWS at bootstrap when JWT_SECRET is unset and NODE_ENV=production', () => {
+    expect(() => resolveJwtSecret({ NODE_ENV: 'production' })).toThrow(/JWT_SECRET/);
+  });
+
+  it('THROWS at bootstrap when JWT_SECRET is explicitly the default and NODE_ENV=production', () => {
+    expect(() =>
+      resolveJwtSecret({ JWT_SECRET: DEFAULT_JWT_SECRET, NODE_ENV: 'production' }),
+    ).toThrow(/JWT_SECRET/);
+  });
+
+  it('does NOT throw in production when a real JWT_SECRET is configured', () => {
+    expect(
+      resolveJwtSecret({ JWT_SECRET: 'a-real-production-secret', NODE_ENV: 'production' }),
+    ).toBe('a-real-production-secret');
   });
 });
 
