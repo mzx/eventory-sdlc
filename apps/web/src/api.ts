@@ -14,6 +14,12 @@ export function photoUrl(filename: string): string {
   return `${STORAGE_URL_PREFIX}/${filename}`;
 }
 
+/** Builds the browser-facing URL for a QR sticker PNG (see apps/api QrController). */
+export function qrImageUrl(token: string, size?: number): string {
+  const suffix = size ? `?size=${size}` : '';
+  return `${API_BASE}/qr/${encodeURIComponent(token)}${suffix}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -133,4 +139,79 @@ export async function fetchItem(id: string): Promise<ItemDetail> {
 /** GET /api/tags */
 export async function fetchTags(): Promise<Tag[]> {
   return request<Tag[]>('/tags');
+}
+
+// ---------------------------------------------------------------------------
+// locations (EVT-4)
+// ---------------------------------------------------------------------------
+
+/** Row shape returned by `GET /api/locations` — a flat, path-ordered list. */
+export interface LocationListItem {
+  id: string;
+  name: string;
+  path: string;
+  parentId: string | null;
+  qrCode: string;
+  itemCount: number;
+}
+
+export interface LocationChildRef {
+  id: string;
+  name: string;
+  path: string;
+}
+
+export interface LocationBreadcrumbSegment {
+  segment: string;
+  path: string;
+}
+
+/** Detail shape returned by `GET /api/locations/:id`. */
+export interface LocationDetail {
+  id: string;
+  name: string;
+  path: string;
+  parentId: string | null;
+  notes: string | null;
+  qrCode: string;
+  children: LocationChildRef[];
+  items: Array<{ id: string; name: string; primaryPhoto: { id: string; filename: string } | null }>;
+  breadcrumb: LocationBreadcrumbSegment[];
+}
+
+export interface CreateLocationInput {
+  name: string;
+  parentId?: string;
+  notes?: string;
+}
+
+/** GET /api/locations */
+export async function fetchLocations(): Promise<LocationListItem[]> {
+  return request<LocationListItem[]>('/locations');
+}
+
+/** GET /api/locations/:id */
+export async function fetchLocation(id: string): Promise<LocationDetail> {
+  return request<LocationDetail>(`/locations/${encodeURIComponent(id)}`);
+}
+
+/** POST /api/locations */
+export async function createLocation(input: CreateLocationInput): Promise<LocationListItem> {
+  return request<LocationListItem>('/locations', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/** PATCH /api/locations/:id */
+export async function renameLocation(id: string, name: string): Promise<LocationListItem> {
+  return request<LocationListItem>(`/locations/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** DELETE /api/locations/:id */
+export async function deleteLocation(id: string): Promise<void> {
+  return request<void>(`/locations/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
