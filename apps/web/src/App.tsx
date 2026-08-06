@@ -1,32 +1,43 @@
-import { Alert, Box, CircularProgress, Container, Paper, Typography } from '@mui/material';
-import { useQuery } from '@tanstack/react-query';
-import { fetchHealth } from './api';
+import AddIcon from '@mui/icons-material/Add';
+import { AppBar, Button, Container, Toolbar, Typography } from '@mui/material';
+import { Link as RouterLink, Route, Routes } from 'react-router-dom';
+import { ItemDetailPage } from './pages/ItemDetailPage';
+import { IntakePage } from './pages/IntakePage';
+import { ItemsPage } from './pages/ItemsPage';
 
+/** App shell: top AppBar (title + primary "Add item" action) wrapping the
+ * routed page content in a responsive, phone-first container. */
 export function App() {
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['health'],
-    queryFn: fetchHealth,
-  });
-
   return (
-    <Container maxWidth="sm" sx={{ py: 8 }}>
-      <Paper elevation={2} sx={{ p: 4 }}>
-        <Typography variant="h4" component="h1" gutterBottom>
-          Eventory
-        </Typography>
-        <Typography variant="body1" color="text.secondary" gutterBottom>
-          Workshop home inventory — API health check
-        </Typography>
-        <Box sx={{ mt: 3 }} data-testid="health-status">
-          {isLoading && <CircularProgress size={24} />}
-          {isError && <Alert severity="error">{(error as Error).message}</Alert>}
-          {data && (
-            <Alert severity={data.status === 'ok' && data.db ? 'success' : 'warning'}>
-              status: {data.status} — db: {String(data.db)}
-            </Alert>
-          )}
-        </Box>
-      </Paper>
-    </Container>
+    <>
+      <AppBar position="sticky" color="primary" enableColorOnDark>
+        <Toolbar>
+          <Typography
+            variant="h6"
+            component={RouterLink}
+            to="/"
+            sx={{ flexGrow: 1, color: 'inherit', textDecoration: 'none' }}
+          >
+            Eventory
+          </Typography>
+          <Button
+            component={RouterLink}
+            to="/intake"
+            color="inherit"
+            variant="outlined"
+            startIcon={<AddIcon />}
+          >
+            Add item
+          </Button>
+        </Toolbar>
+      </AppBar>
+      <Container maxWidth="lg" sx={{ py: 2, px: { xs: 1, sm: 2 } }}>
+        <Routes>
+          <Route path="/" element={<ItemsPage />} />
+          <Route path="/items/:id" element={<ItemDetailPage />} />
+          <Route path="/intake" element={<IntakePage />} />
+        </Routes>
+      </Container>
+    </>
   );
 }
