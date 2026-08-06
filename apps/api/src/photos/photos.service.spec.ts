@@ -35,6 +35,9 @@ function makePrismaMock() {
       create: jest.fn(),
       findUnique: jest.fn(),
     },
+    item: {
+      findUnique: jest.fn(),
+    },
   };
 }
 
@@ -249,6 +252,84 @@ describe('PhotosService', () => {
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ aiAnalysis: STUB_ANALYSIS }) }),
       );
+    });
+
+    // =======================================================================
+    // Analysis-specific size ceiling (EVT-7 review round 2, finding 3)
+    // =======================================================================
+
+    it('skips AiService entirely and persists an oversized stub when the file exceeds the analysis size ceiling', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'big.png' });
+
+      const file = makeFile({ size: 6 * 1024 * 1024 }); // > MAX_ANALYSIS_SIZE_BYTES (5 MB)
+      await service.savePhoto(file, undefined, true);
+
+      expect(readFileMock).not.toHaveBeenCalled();
+      expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
+      expect(prismaMock.photo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            aiAnalysis: expect.objectContaining({ stub_reason: 'oversized' }),
+          }),
+        }),
+      );
+    });
+
+    it('still runs AiService.analyzePhoto for a file at/under the analysis size ceiling', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      aiServiceMock.analyzePhoto.mockResolvedValue(STUB_ANALYSIS);
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'ok.png' });
+
+      const file = makeFile({ size: 5 * 1024 * 1024 }); // exactly at the ceiling
+      await service.savePhoto(file, undefined, true);
+
+      expect(aiServiceMock.analyzePhoto).toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
+  // savePhoto — itemId pre-validation before a billed AI call
+  // (EVT-7 review round 2, finding 5)
+  // =========================================================================
+
+  describe('savePhoto — itemId pre-validation for analyze=true', () => {
+    it('throws BadRequestException and never calls AiService when itemId does not exist', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.item.findUnique.mockResolvedValue(null);
+
+      const file = makeFile();
+      await expect(service.savePhoto(file, 'missing-item', true)).rejects.toThrow(
+        BadRequestException,
+      );
+
+      expect(prismaMock.item.findUnique).toHaveBeenCalledWith({
+        where: { id: 'missing-item' },
+        select: { id: true },
+      });
+      expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
+      expect(prismaMock.photo.create).not.toHaveBeenCalled();
+      expect(unlinkMock).toHaveBeenCalledWith(file.path);
+    });
+
+    it('proceeds to run AiService.analyzePhoto when itemId exists', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.item.findUnique.mockResolvedValue({ id: 'item-1' });
+      aiServiceMock.analyzePhoto.mockResolvedValue(STUB_ANALYSIS);
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'ok.png' });
+
+      await service.savePhoto(makeFile(), 'item-1', true);
+
+      expect(aiServiceMock.analyzePhoto).toHaveBeenCalled();
+    });
+
+    it('does not pre-validate itemId when analyze is false (photo.create FK handling covers it)', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
+
+      await service.savePhoto(makeFile(), 'item-1', false);
+
+      expect(prismaMock.item.findUnique).not.toHaveBeenCalled();
     });
   });
 

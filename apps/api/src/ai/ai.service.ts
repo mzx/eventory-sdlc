@@ -22,7 +22,19 @@ export interface AiAnalysisResult {
   unit: string | null;
   properties: Record<string, unknown>;
   search_keywords: string[];
+  /**
+   * Present only when this result is a stub returned *without* a model call
+   * being attempted (as opposed to a stub returned after a call failed,
+   * refused, or produced unparsable JSON) — lets callers distinguish "we
+   * didn't even try" from "the model came back with nothing useful". See
+   * {@link StubReason} for the enumerated causes (EVT-7 review round 2,
+   * findings 2 & 3).
+   */
+  stub_reason?: StubReason;
 }
+
+/** Enumerated reasons {@link AiAnalysisResult.stub_reason} may carry. */
+export type StubReason = 'unsupported-image-format' | 'oversized';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -30,6 +42,30 @@ export interface AiAnalysisResult {
 
 const DEFAULT_MODEL = 'claude-sonnet-5';
 const MAX_TOKENS = 2048;
+
+/**
+ * MIME types Anthropic's base64 image content block accepts (per the
+ * `@anthropic-ai/sdk` `Base64ImageSource['media_type']` union — jpeg, png,
+ * gif, webp only). Deliberately narrower than `ALLOWED_PHOTO_MIME_TYPES` in
+ * `photos.service.ts` (which also accepts `image/heic` / `image/heif` for
+ * *storage*): an unconverted iPhone HEIC/HEIF photo previously hit the
+ * unchecked `media_type as ...` cast and silently degraded to the generic
+ * stub via the catch-all error path, indistinguishable from "the model
+ * couldn't identify the item" (EVT-7 review round 2, finding 2).
+ */
+const SUPPORTED_VISION_MIME_TYPES: ReadonlySet<string> = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+/** Narrows `mimeType` to Anthropic's accepted media-type union. */
+function isSupportedVisionMimeType(
+  mimeType: string,
+): mimeType is Anthropic.Base64ImageSource['media_type'] {
+  return SUPPORTED_VISION_MIME_TYPES.has(mimeType);
+}
 
 /**
  * Deterministic fallback shape — used when no API key is configured, the
@@ -52,13 +88,20 @@ export const STUB_ANALYSIS: AiAnalysisResult = {
  * itself must never be handed out directly — its `tags`/`properties`/
  * `search_keywords` are reference types, and callers (e.g. the intake form)
  * treat the result as their own mutable draft.
+ *
+ * `reason`, when supplied, is stamped onto `stub_reason` — used for the
+ * "we deliberately skipped the model call" cases (unsupported mimetype,
+ * oversized file) as opposed to the plain no-key/refusal/malformed-JSON
+ * stub paths, which stay bare for backwards compatibility with existing
+ * callers that `toEqual(STUB_ANALYSIS)`.
  */
-function stubAnalysis(): AiAnalysisResult {
+export function stubAnalysis(reason?: StubReason): AiAnalysisResult {
   return {
     ...STUB_ANALYSIS,
     tags: [...STUB_ANALYSIS.tags],
     properties: { ...STUB_ANALYSIS.properties },
     search_keywords: [...STUB_ANALYSIS.search_keywords],
+    ...(reason && { stub_reason: reason }),
   };
 }
 
@@ -99,6 +142,15 @@ export class AiService {
    */
   private client: Anthropic | undefined;
 
+  /**
+   * The `apiKey` the cached {@link client} was built with. `EVENTORY_ANTHROPIC_KEY`
+   * is read fresh on every call (see {@link apiKey}), so if it changes at
+   * runtime (e.g. a secrets-manager rotation without a process restart) the
+   * client must be rebuilt rather than silently keep using the stale key
+   * (EVT-7 review round 2, finding 4).
+   */
+  private cachedApiKey: string | undefined;
+
   private get apiKey(): string | undefined {
     return process.env.EVENTORY_ANTHROPIC_KEY;
   }
@@ -108,8 +160,9 @@ export class AiService {
   }
 
   private getClient(apiKey: string): Anthropic {
-    if (!this.client) {
+    if (!this.client || this.cachedApiKey !== apiKey) {
       this.client = new Anthropic({ apiKey });
+      this.cachedApiKey = apiKey;
     }
     return this.client;
   }
@@ -122,6 +175,13 @@ export class AiService {
    * so a flaky/absent AI provider never blocks the upload flow.
    */
   async analyzePhoto(buffer: Buffer, mimeType: string): Promise<AiAnalysisResult> {
+    if (!isSupportedVisionMimeType(mimeType)) {
+      this.logger.log(
+        `${mimeType} is not a vision-supported MIME type (jpeg/png/gif/webp only) — skipping Claude call, returning stub analysis`,
+      );
+      return stubAnalysis('unsupported-image-format');
+    }
+
     const apiKey = this.apiKey;
     if (!apiKey) {
       this.logger.log('EVENTORY_ANTHROPIC_KEY not configured — returning stub analysis');
@@ -142,7 +202,7 @@ export class AiService {
                 type: 'image',
                 source: {
                   type: 'base64',
-                  media_type: mimeType as Anthropic.Base64ImageSource['media_type'],
+                  media_type: mimeType,
                   data: buffer.toString('base64'),
                 },
               },

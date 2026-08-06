@@ -1,7 +1,15 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { uploadThrottlerConfig } from '../common/throttle.config';
 import { PhotosController } from './photos.controller';
 import { PhotosService } from './photos.service';
+
+// `@nestjs/throttler`'s `@Throttle()` decorator stashes its config under
+// these Reflect metadata keys (see `throttler.constants.ts` — not part of
+// the package's public export surface, so the string literals are
+// duplicated here rather than deep-importing `dist/throttler.constants`).
+const THROTTLER_LIMIT_METADATA_KEY = 'THROTTLER:LIMIT';
+const THROTTLER_TTL_METADATA_KEY = 'THROTTLER:TTL';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -108,6 +116,22 @@ describe('PhotosController', () => {
       await expect(controller.upload(file, { itemId: 'missing' })).rejects.toThrow(
         BadRequestException,
       );
+    });
+
+    // =========================================================================
+    // Rate limiting (EVT-7 review round 2, finding 1)
+    // =========================================================================
+
+    it('carries the stricter upload throttle config from @Throttle metadata', () => {
+      const expected = uploadThrottlerConfig();
+      const limit = Reflect.getMetadata(
+        THROTTLER_LIMIT_METADATA_KEY + 'default',
+        controller.upload,
+      );
+      const ttl = Reflect.getMetadata(THROTTLER_TTL_METADATA_KEY + 'default', controller.upload);
+
+      expect(limit).toBe(expected.default.limit);
+      expect(ttl).toBe(expected.default.ttl);
     });
   });
 

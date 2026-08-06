@@ -71,6 +71,48 @@ describe('AiService', () => {
   });
 
   // =========================================================================
+  // Unsupported vision MIME types (EVT-7 review round 2, finding 2)
+  //
+  // Anthropic's base64 image content block accepts only jpeg/png/gif/webp;
+  // the upload allowlist in photos.service.ts also accepts image/heic and
+  // image/heif for storage, which previously hit an unchecked `as` cast and
+  // silently degraded to the generic stub via the catch-all error path.
+  // =========================================================================
+
+  describe('unsupported vision MIME types', () => {
+    it.each(['image/heic', 'image/heif'])(
+      'returns a stub tagged unsupported-image-format for %s without constructing a client or calling the API',
+      async (mimeType) => {
+        process.env.EVENTORY_ANTHROPIC_KEY = 'test-key';
+
+        const result = await service.analyzePhoto(FAKE_BUFFER, mimeType);
+
+        expect(result).toEqual({ ...STUB_ANALYSIS, stub_reason: 'unsupported-image-format' });
+        expect(anthropicConstructorMock).not.toHaveBeenCalled();
+        expect(createMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it('returns a stub tagged unsupported-image-format even when no key is configured', async () => {
+      delete process.env.EVENTORY_ANTHROPIC_KEY;
+
+      const result = await service.analyzePhoto(FAKE_BUFFER, 'image/heic');
+
+      expect(result.stub_reason).toBe('unsupported-image-format');
+      expect(anthropicConstructorMock).not.toHaveBeenCalled();
+    });
+
+    it('does not tag stub_reason for supported types (backwards-compatible with STUB_ANALYSIS shape)', async () => {
+      delete process.env.EVENTORY_ANTHROPIC_KEY;
+
+      const result = await service.analyzePhoto(FAKE_BUFFER, 'image/jpeg');
+
+      expect(result).toEqual(STUB_ANALYSIS);
+      expect(result.stub_reason).toBeUndefined();
+    });
+  });
+
+  // =========================================================================
   // No key configured (AC 3)
   // =========================================================================
 
@@ -132,6 +174,24 @@ describe('AiService', () => {
 
       await service.analyzePhoto(FAKE_BUFFER, 'image/jpeg');
       expect(anthropicConstructorMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds the client when EVENTORY_ANTHROPIC_KEY changes between calls (EVT-7 review round 2, finding 4)', async () => {
+      process.env.EVENTORY_ANTHROPIC_KEY = 'key-one';
+      createMock.mockResolvedValue(textResponse('{}'));
+
+      await service.analyzePhoto(FAKE_BUFFER, 'image/jpeg');
+      expect(anthropicConstructorMock).toHaveBeenCalledTimes(1);
+      expect(anthropicConstructorMock).toHaveBeenLastCalledWith({ apiKey: 'key-one' });
+
+      process.env.EVENTORY_ANTHROPIC_KEY = 'key-two';
+      await service.analyzePhoto(FAKE_BUFFER, 'image/jpeg');
+      expect(anthropicConstructorMock).toHaveBeenCalledTimes(2);
+      expect(anthropicConstructorMock).toHaveBeenLastCalledWith({ apiKey: 'key-two' });
+
+      // and caches again once stable on the new key
+      await service.analyzePhoto(FAKE_BUFFER, 'image/jpeg');
+      expect(anthropicConstructorMock).toHaveBeenCalledTimes(2);
     });
 
     it('uses EVENTORY_ANTHROPIC_MODEL when set, else defaults to claude-sonnet-5', async () => {

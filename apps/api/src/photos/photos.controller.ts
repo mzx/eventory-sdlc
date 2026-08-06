@@ -14,7 +14,9 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
 import { IsOptional, IsUUID } from 'class-validator';
+import { uploadThrottlerConfig } from '../common/throttle.config';
 import { photoUploadMulterOptions, PayloadTooLargeFilter } from './photo-upload.helpers';
 import { PhotosService } from './photos.service';
 
@@ -46,8 +48,15 @@ export class PhotosController {
    *   intake form — nothing is auto-created from it.
    *
    * Returns the Photo row plus a public `url` the file is served at.
+   *
+   * Rate-limited more strictly than the app-wide default (10/min per IP by
+   * default, env-tunable — see `common/throttle.config.ts`) since this
+   * route can trigger a billed Anthropic vision call with no auth guard in
+   * front of it (auth is out of scope — EVT-14/15); see EVT-7 review round
+   * 2, finding 1.
    */
   @Post('upload')
+  @Throttle(uploadThrottlerConfig())
   @HttpCode(HttpStatus.CREATED)
   @UseFilters(PayloadTooLargeFilter)
   @UseInterceptors(FileInterceptor('file', photoUploadMulterOptions))
