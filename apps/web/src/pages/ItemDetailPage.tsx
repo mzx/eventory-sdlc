@@ -23,7 +23,7 @@ import {
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { deleteItem, fetchItem, photoUrl, type ItemDetail, type PhotoRef } from '../api';
 import { QrThumb } from '../components/QrThumb';
 
@@ -41,6 +41,7 @@ export function ItemDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const itemQuery = useQuery({
     queryKey: ['items', id],
@@ -53,6 +54,9 @@ export function ItemDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['items'] });
       navigate('/');
+    },
+    onError: (error: unknown) => {
+      setDeleteError(error instanceof Error ? error.message : 'Failed to delete item');
     },
   });
 
@@ -75,7 +79,10 @@ export function ItemDetailPage() {
   const item = itemQuery.data;
   const gallery = orderedGallery(item);
   const propertyEntries = Object.entries(item.properties ?? {});
-  const locationSegments = item.location ? item.location.path.split('.') : [];
+  // `path` is a materialized path whose last segment is the current location's
+  // own slug (e.g. 'garage.cabinet-3' for 'Cabinet 3'), so drop it — the leaf
+  // is rendered separately below via `item.location.name`.
+  const locationSegments = item.location ? item.location.path.split('.').slice(0, -1) : [];
 
   return (
     <Stack spacing={3}>
@@ -162,12 +169,9 @@ export function ItemDetailPage() {
                 {segment}
               </Typography>
             ))}
-            <Typography
-              component={RouterLink}
-              to={`/locations/${item.location.id}`}
-              variant="body2"
-              color="primary"
-            >
+            {/* Locations pages (EVT-12) don't exist yet, so the current
+                location is plain text rather than a link to a blank page. */}
+            <Typography variant="body2" color="text.secondary">
               {item.location.name}
             </Typography>
           </Breadcrumbs>
@@ -209,6 +213,11 @@ export function ItemDetailPage() {
           <DialogContentText>
             This permanently removes the item and its photo associations. This cannot be undone.
           </DialogContentText>
+          {deleteError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {deleteError}
+            </Alert>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>

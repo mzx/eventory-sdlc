@@ -77,6 +77,38 @@ describe('ItemDetailPage', () => {
     expect(qr).toHaveAttribute('src', expect.stringContaining('qr-token-1'));
   });
 
+  it('renders the location breadcrumb without duplicating the leaf segment or linking to a blank page', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+
+    renderDetailPage();
+
+    const breadcrumb = await screen.findByLabelText('location breadcrumb');
+    expect(within(breadcrumb).getByText('garage')).toBeInTheDocument();
+    // 'Cabinet 3' should render exactly once (the leaf), not also as its raw
+    // path segment 'cabinet-3'.
+    expect(within(breadcrumb).getByText('Cabinet 3')).toBeInTheDocument();
+    expect(within(breadcrumb).queryByText('cabinet-3')).not.toBeInTheDocument();
+    // No locations detail page exists yet (EVT-12), so the leaf must not be a link.
+    expect(within(breadcrumb).queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('shows an error alert if deleting the item fails', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    vi.spyOn(api, 'deleteItem').mockRejectedValue(new Error('Cannot delete: item is referenced'));
+    const user = userEvent.setup();
+
+    renderDetailPage();
+
+    await screen.findByText('Cordless drill');
+    await user.click(screen.getByRole('button', { name: /delete/i }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+    expect(
+      await within(dialog).findByText('Cannot delete: item is referenced'),
+    ).toBeInTheDocument();
+  });
+
   it('deletes the item and navigates back to the list after confirming', async () => {
     vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
     const deleteMock = vi.spyOn(api, 'deleteItem').mockResolvedValue(undefined);

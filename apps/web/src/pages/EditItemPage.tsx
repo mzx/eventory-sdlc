@@ -135,7 +135,7 @@ export function EditItemPage() {
 
   const removePhotoMutation = useMutation({
     mutationFn: (photoId: string) => deletePhoto(photoId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items', id] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items'] }),
   });
 
   if (itemQuery.isLoading) {

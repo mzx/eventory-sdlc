@@ -131,4 +131,101 @@ describe('EditItemPage', () => {
       expect(updateMock).toHaveBeenCalledWith('item-1', { photoIds: ['photo-2'] }),
     );
   });
+
+  it('removes a photo via the Remove photo button', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({
+        primaryPhotoId: 'photo-1',
+        photos: [
+          { id: 'photo-1', filename: 'primary.jpg', mimeType: 'image/jpeg' },
+          { id: 'photo-2', filename: 'second.jpg', mimeType: 'image/jpeg' },
+        ],
+      }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const removeMock = vi.spyOn(api, 'deletePhoto').mockResolvedValue(undefined);
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove photo' });
+    await user.click(removeButtons[0]);
+
+    await waitFor(() => expect(removeMock).toHaveBeenCalledWith('photo-1'));
+  });
+
+  it('adds, edits, and removes a properties row and saves the resulting payload', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ properties: { voltage: '18V' } }));
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    // Edit the existing "voltage" row's value.
+    const valueInputs = screen.getAllByLabelText('Value');
+    await user.clear(valueInputs[0]);
+    await user.type(valueInputs[0], '20V');
+
+    // Add a new row and fill it in.
+    await user.click(screen.getByRole('button', { name: /add property/i }));
+    const keyInputs = screen.getAllByLabelText('Key');
+    const newKeyInput = keyInputs[keyInputs.length - 1];
+    await user.type(newKeyInput, 'color');
+    const newValueInputs = screen.getAllByLabelText('Value');
+    await user.type(newValueInputs[newValueInputs.length - 1], 'yellow');
+
+    // Now remove the newly-added "color" row before saving, so the payload
+    // reflects an add followed by a remove.
+    await user.click(screen.getByRole('button', { name: 'Remove property color' }));
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ properties: { voltage: '20V' } }),
+      ),
+    );
+  });
+
+  it('changes the location via the Select and saves the resulting payload', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ locationId: null, location: null }));
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      { id: 'loc-1', name: 'Garage', path: 'garage', parentId: null, qrCode: 'q1', itemCount: 3 },
+      {
+        id: 'loc-2',
+        name: 'Cabinet 3',
+        path: 'garage.cabinet-3',
+        parentId: 'loc-1',
+        qrCode: 'q2',
+        itemCount: 1,
+      },
+    ]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    await user.click(screen.getByLabelText('Location'));
+    await user.click(await screen.findByRole('option', { name: 'Cabinet 3' }));
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ locationId: 'loc-2' }),
+      ),
+    );
+  });
 });
