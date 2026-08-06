@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -79,5 +80,18 @@ export class PhotosController {
   @Get(':id')
   findById(@Param('id', ParseUUIDPipe) id: string) {
     return this.photosService.findById(id);
+  }
+
+  /**
+   * DELETE /api/photos/:id
+   *
+   * Removes a photo (row + on-disk file). If it was an item's primary
+   * photo, `Item.primaryPhotoId` is cleared automatically (schema
+   * `onDelete: SetNull`). 404 when the photo does not exist.
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    return this.photosService.remove(id);
   }
 }

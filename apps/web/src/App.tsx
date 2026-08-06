@@ -2,7 +2,9 @@ import AddIcon from '@mui/icons-material/Add';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import { AppBar, Button, Container, Toolbar, Typography } from '@mui/material';
 import { Link as RouterLink, Route, Routes } from 'react-router-dom';
+import { EditItemPage } from './pages/EditItemPage';
 import { ItemDetailPage } from './pages/ItemDetailPage';
+import { ItemPrintPage } from './pages/ItemPrintPage';
 import { IntakePage } from './pages/IntakePage';
 import { ItemsPage } from './pages/ItemsPage';
 import { LocationDetailPage } from './pages/LocationDetailPage';
@@ -10,9 +12,21 @@ import { LocationsPage } from './pages/LocationsPage';
 import { ProjectDetailPage } from './pages/ProjectDetailPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 
+/** Top-level router: the QR sticker print view is deliberately rendered
+ * outside `AppShell` (no AppBar, no Container chrome) since it must produce
+ * only the sticker + item name when printed — see `ItemPrintPage`. */
+export function App() {
+  return (
+    <Routes>
+      <Route path="/items/:id/print" element={<ItemPrintPage />} />
+      <Route path="/*" element={<AppShell />} />
+    </Routes>
+  );
+}
+
 /** App shell: top AppBar (title + nav + primary "Add item" action) wrapping
  * the routed page content in a responsive, phone-first container. */
-export function App() {
+function AppShell() {
   return (
     <>
       <AppBar position="sticky" color="primary" enableColorOnDark>
@@ -54,6 +68,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<ItemsPage />} />
           <Route path="/items/:id" element={<ItemDetailPage />} />
+          <Route path="/items/:id/edit" element={<EditItemPage />} />
           <Route path="/intake" element={<IntakePage />} />
           <Route path="/locations" element={<LocationsPage />} />
           <Route path="/locations/:id" element={<LocationDetailPage />} />

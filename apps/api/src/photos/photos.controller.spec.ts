@@ -24,6 +24,7 @@ function makePhotosServiceMock() {
   return {
     savePhoto: jest.fn(),
     findById: jest.fn(),
+    remove: jest.fn(),
   };
 }
 
@@ -154,6 +155,23 @@ describe('PhotosController', () => {
     it('propagates NotFoundException from service', async () => {
       service.findById.mockRejectedValue(new NotFoundException());
       await expect(controller.findById(PHOTO_ID)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // =========================================================================
+  // remove
+  // =========================================================================
+
+  describe('remove', () => {
+    it('delegates to PhotosService.remove', async () => {
+      service.remove.mockResolvedValue(undefined);
+      await controller.remove(PHOTO_ID);
+      expect(service.remove).toHaveBeenCalledWith(PHOTO_ID);
+    });
+
+    it('propagates NotFoundException from service', async () => {
+      service.remove.mockRejectedValue(new NotFoundException());
+      await expect(controller.remove(PHOTO_ID)).rejects.toThrow(NotFoundException);
     });
   });
 });

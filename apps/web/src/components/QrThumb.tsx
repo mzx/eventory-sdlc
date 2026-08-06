@@ -7,23 +7,34 @@ interface QrThumbProps {
   token: string;
   /** Human-readable label rendered under the code and on the printed sticker. */
   label?: string;
+  /**
+   * When set, "Print sticker" opens this in-app minimal print route (see
+   * `ItemPrintPage`) in a new tab instead of the self-built print popup.
+   */
+  printHref?: string;
   /** Pixel size of the on-screen thumbnail; the printed PNG is fetched at 4x this. */
   size?: number;
 }
 
 /**
  * QR sticker thumbnail — renders the scannable PNG served by `GET /api/qr/:token`
- * plus a "Print sticker" action that opens a bare print-friendly popup (image +
- * label only, no app chrome) and triggers the browser print dialog.
+ * plus a "Print sticker" action. By default the action opens a bare
+ * print-friendly popup (image + label only, no app chrome) and triggers the
+ * browser print dialog; when `printHref` is provided it instead opens that
+ * minimal print route (see `ItemPrintPage`) in a new tab.
  *
- * Shared between the location sticker block (EVT-12) and, later, the item
- * detail page (EVT-10).
+ * Shared between the location sticker block (EVT-12) and the item detail
+ * page (EVT-10).
  */
-export function QrThumb({ token, label, size = 160 }: QrThumbProps) {
+export function QrThumb({ token, label, printHref, size = 160 }: QrThumbProps) {
   const thumbSrc = qrImageUrl(token, size);
   const printSrc = qrImageUrl(token, size * 4);
 
   const handlePrint = () => {
+    if (printHref) {
+      window.open(printHref, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const printWindow = window.open('', '_blank', 'width=400,height=500');
     if (!printWindow) {
       return;

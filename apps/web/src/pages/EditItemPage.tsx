@@ -1,0 +1,374 @@
+import AddIcon from '@mui/icons-material/Add';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import PhotoCameraOutlinedIcon from '@mui/icons-material/PhotoCameraOutlined';
+import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
+import StarIcon from '@mui/icons-material/Star';
+import StarBorderIcon from '@mui/icons-material/StarBorder';
+import {
+  Alert,
+  Autocomplete,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  FormControl,
+  IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Typography,
+  type SelectChangeEvent,
+} from '@mui/material';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import {
+  deletePhoto,
+  fetchCategories,
+  fetchItem,
+  fetchLocations,
+  fetchTags,
+  photoUrl,
+  updateItem,
+  uploadPhoto,
+  type CategoryListItem,
+  type LocationListItem,
+} from '../api';
+
+/** One row of the dynamic properties (key/value) editor. */
+interface PropertyRow {
+  /** Stable React key — properties are a plain object, not naturally keyed. */
+  id: number;
+  key: string;
+  value: string;
+}
+
+let propertyRowSeq = 0;
+function newPropertyRow(key = '', value = ''): PropertyRow {
+  return { id: propertyRowSeq++, key, value };
+}
+
+/** Depth of a materialized-path entry, for indenting tree selects. */
+function pathDepth(path: string): number {
+  return path.split('.').length - 1;
+}
+
+export function EditItemPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const itemQuery = useQuery({
+    queryKey: ['items', id],
+    queryFn: () => fetchItem(id as string),
+    enabled: Boolean(id),
+  });
+  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: fetchTags });
+  const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
+  const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: fetchCategories });
+
+  const [initialized, setInitialized] = useState(false);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [quantity, setQuantity] = useState(1);
+  const [unit, setUnit] = useState('');
+  const [tags, setTags] = useState<string[]>([]);
+  const [locationId, setLocationId] = useState('');
+  const [categoryId, setCategoryId] = useState('');
+  const [properties, setProperties] = useState<PropertyRow[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Seed local form state once, the first time the item loads.
+  useEffect(() => {
+    if (itemQuery.data && !initialized) {
+      const item = itemQuery.data;
+      setName(item.name);
+      setDescription(item.description ?? '');
+      setQuantity(item.quantity);
+      setUnit(item.unit ?? '');
+      setTags(item.tags.map((t) => t.tag.name));
+      setLocationId(item.locationId ?? '');
+      setCategoryId(item.categoryId ?? '');
+      setProperties(
+        Object.entries(item.properties ?? {}).map(([key, value]) =>
+          newPropertyRow(key, String(value)),
+        ),
+      );
+      setInitialized(true);
+    }
+  }, [itemQuery.data, initialized]);
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      updateItem(id as string, {
+        name,
+        description,
+        quantity,
+        unit,
+        tags,
+        locationId: locationId || undefined,
+        categoryId: categoryId || undefined,
+        properties: Object.fromEntries(
+          properties.filter((p) => p.key.trim().length > 0).map((p) => [p.key.trim(), p.value]),
+        ),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+      navigate(`/items/${id}`);
+    },
+  });
+
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => uploadPhoto(file, id as string),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items', id] }),
+  });
+
+  const setPrimaryMutation = useMutation({
+    mutationFn: (photoId: string) => updateItem(id as string, { photoIds: [photoId] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['items'] });
+    },
+  });
+
+  const removePhotoMutation = useMutation({
+    mutationFn: (photoId: string) => deletePhoto(photoId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['items', id] }),
+  });
+
+  if (itemQuery.isLoading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (itemQuery.isError || !itemQuery.data) {
+    return (
+      <Alert severity="error">
+        {itemQuery.error instanceof Error ? itemQuery.error.message : 'Failed to load item'}
+      </Alert>
+    );
+  }
+
+  const item = itemQuery.data;
+  const locations = locationsQuery.data ?? [];
+  const categories = categoriesQuery.data ?? [];
+  const tagOptions = (tagsQuery.data ?? []).map((t) => t.name);
+
+  function addPropertyRow() {
+    setProperties((rows) => [...rows, newPropertyRow()]);
+  }
+
+  function updatePropertyRow(id: number, field: 'key' | 'value', value: string) {
+    setProperties((rows) => rows.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+  }
+
+  function removePropertyRow(id: number) {
+    setProperties((rows) => rows.filter((r) => r.id !== id));
+  }
+
+  return (
+    <Stack spacing={3} sx={{ maxWidth: 640 }}>
+      <Typography variant="h5" component="h1">
+        Edit {item.name}
+      </Typography>
+
+      <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} />
+
+      <TextField
+        label="Description"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        multiline
+        minRows={2}
+      />
+
+      <Stack direction="row" spacing={2}>
+        <TextField
+          label="Quantity"
+          type="number"
+          value={quantity}
+          onChange={(e) => setQuantity(Math.max(0, Number(e.target.value)))}
+          fullWidth
+          inputProps={{ min: 0 }}
+        />
+        <TextField label="Unit" value={unit} onChange={(e) => setUnit(e.target.value)} fullWidth />
+      </Stack>
+
+      <Autocomplete
+        multiple
+        freeSolo
+        options={tagOptions}
+        value={tags}
+        onChange={(_e, value) => setTags(value)}
+        renderTags={(value, getTagProps) =>
+          value.map((option, index) => {
+            const { key, ...tagProps } = getTagProps({ index });
+            return <Chip key={key} label={option} size="small" {...tagProps} />;
+          })
+        }
+        renderInput={(params) => <TextField {...params} label="Tags" placeholder="Add a tag" />}
+      />
+
+      <FormControl fullWidth>
+        <InputLabel id="location-label">Location</InputLabel>
+        <Select
+          labelId="location-label"
+          label="Location"
+          value={locationId}
+          onChange={(e: SelectChangeEvent) => setLocationId(e.target.value)}
+        >
+          <MenuItem value="">
+            <em>No location</em>
+          </MenuItem>
+          {locations.map((loc: LocationListItem) => (
+            <MenuItem key={loc.id} value={loc.id} sx={{ pl: 2 + pathDepth(loc.path) * 2 }}>
+              {loc.name}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+
+      <FormControl fullWidth>
+        <InputLabel id="category-label">Category</InputLabel>
+        <Select
+          labelId="category-label"
+          label="Category"
+          value={categoryId}
+          onChange={(e: SelectChangeEvent) => setCategoryId(e.target.value)}
+        >
+          <MenuItem value="">
+            <em>No category</em>
+          </MenuItem>
+          {categories.map((cat: CategoryListItem) => (
+            <MenuItem key={cat.id} value={cat.id} sx={{ pl: 2 + pathDepth(cat.path) * 2 }}>
+              {cat.name}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+
+      <Box>
+        <Typography variant="subtitle1" gutterBottom>
+          Properties
+        </Typography>
+        <Stack spacing={1}>
+          {properties.map((row) => (
+            <Stack key={row.id} direction="row" spacing={1} alignItems="center">
+              <TextField
+                label="Key"
+                size="small"
+                value={row.key}
+                onChange={(e) => updatePropertyRow(row.id, 'key', e.target.value)}
+              />
+              <TextField
+                label="Value"
+                size="small"
+                value={row.value}
+                onChange={(e) => updatePropertyRow(row.id, 'value', e.target.value)}
+                fullWidth
+              />
+              <IconButton
+                aria-label={`Remove property ${row.key || row.id}`}
+                onClick={() => removePropertyRow(row.id)}
+              >
+                <RemoveCircleOutlineIcon />
+              </IconButton>
+            </Stack>
+          ))}
+          <Button startIcon={<AddIcon />} onClick={addPropertyRow} sx={{ alignSelf: 'flex-start' }}>
+            Add property
+          </Button>
+        </Stack>
+      </Box>
+
+      <Box>
+        <Typography variant="subtitle1" gutterBottom>
+          Photos
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+          {item.photos.map((photo) => (
+            <Box key={photo.id} sx={{ position: 'relative' }}>
+              <Box
+                component="img"
+                src={photoUrl(photo.filename)}
+                alt={item.name}
+                sx={{
+                  width: 120,
+                  height: 90,
+                  objectFit: 'cover',
+                  borderRadius: 1,
+                  border: photo.id === item.primaryPhotoId ? 2 : 1,
+                  borderColor: photo.id === item.primaryPhotoId ? 'primary.main' : 'divider',
+                }}
+              />
+              <Stack direction="row" sx={{ position: 'absolute', top: 0, right: 0 }}>
+                <IconButton
+                  size="small"
+                  aria-label={
+                    photo.id === item.primaryPhotoId ? 'Primary photo' : 'Set as primary photo'
+                  }
+                  onClick={() => setPrimaryMutation.mutate(photo.id)}
+                  disabled={photo.id === item.primaryPhotoId}
+                >
+                  {photo.id === item.primaryPhotoId ? (
+                    <StarIcon fontSize="small" color="primary" />
+                  ) : (
+                    <StarBorderIcon fontSize="small" />
+                  )}
+                </IconButton>
+                <IconButton
+                  size="small"
+                  aria-label="Remove photo"
+                  onClick={() => removePhotoMutation.mutate(photo.id)}
+                >
+                  <DeleteOutlineIcon fontSize="small" />
+                </IconButton>
+              </Stack>
+            </Box>
+          ))}
+        </Stack>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) uploadMutation.mutate(file);
+            e.target.value = '';
+          }}
+        />
+        <Button
+          startIcon={<PhotoCameraOutlinedIcon />}
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploadMutation.isPending}
+          sx={{ mt: 1 }}
+        >
+          Add photo
+        </Button>
+      </Box>
+
+      {saveMutation.isError && (
+        <Alert severity="error">
+          {saveMutation.error instanceof Error ? saveMutation.error.message : 'Failed to save item'}
+        </Alert>
+      )}
+
+      <Stack direction="row" spacing={2}>
+        <Button
+          variant="contained"
+          onClick={() => saveMutation.mutate()}
+          disabled={saveMutation.isPending || name.trim().length === 0}
+        >
+          Save
+        </Button>
+        <Button onClick={() => navigate(`/items/${id}`)}>Cancel</Button>
+      </Stack>
+    </Stack>
+  );
+}
