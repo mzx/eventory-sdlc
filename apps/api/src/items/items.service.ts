@@ -86,14 +86,20 @@ export class ItemsService {
   /**
    * Raw SQL: ILIKE across name, description, and the JSONB properties column
    * (cast to text). Returns matching item IDs.
+   *
+   * `search` is escaped via `escapeLikePattern` before being embedded in the
+   * `%...%` pattern — otherwise a caller-supplied `%` or `_` would act as a
+   * LIKE wildcard rather than a literal character (EVT-17 review round 2,
+   * finding 1c). The pattern itself is still passed as a bound Prisma
+   * parameter, never string-concatenated into the SQL text.
    */
   private async searchItemIds(search: string): Promise<string[]> {
-    const pattern = `%${search}%`;
+    const pattern = `%${escapeLikePattern(search)}%`;
     const rows = await this.prisma.$queryRaw<{ id: string }[]>`
       SELECT id FROM "Item"
-      WHERE name ILIKE ${pattern}
-         OR description ILIKE ${pattern}
-         OR properties::text ILIKE ${pattern}
+      WHERE name ILIKE ${pattern} ESCAPE '\\'
+         OR description ILIKE ${pattern} ESCAPE '\\'
+         OR properties::text ILIKE ${pattern} ESCAPE '\\'
     `;
     return rows.map((r) => r.id);
   }
@@ -106,15 +112,19 @@ export class ItemsService {
    * Runs the EVT-7 vision analysis on an uploaded photo (never persisted —
    * see `search-by-photo.helpers.ts`) and searches existing items using the
    * analysis's `suggested_name` + `search_keywords` + `tags` as search
-   * terms. Matching reuses the same name/description/properties-JSONB ILIKE
-   * approach as `list()`'s `search` filter, extended to also match against
-   * item tag names (the vision `tags` output has no exact-name equivalent
-   * to filter by, unlike `list()`'s `tag` param).
+   * terms (capped to `MAX_SEARCH_TERMS` by `buildSearchTerms` — see EVT-17
+   * review round 2, finding 1a). Matching reuses the same
+   * name/description/properties-JSONB ILIKE approach as `list()`'s `search`
+   * filter, extended to also match against item tag names (the vision
+   * `tags` output has no exact-name equivalent to filter by, unlike
+   * `list()`'s `tag` param).
    *
    * Ranking: each search term contributes at most one match to an item
-   * (distinct-term hit count), and results are sorted by that count,
-   * descending. Simple and easy to reason about, per the task's
-   * implementation notes — no fancier relevance scoring.
+   * (distinct-term hit count), sorted by that count descending, ties broken
+   * by `createdAt` descending (newest first) — a deterministic, tested
+   * contract (EVT-17 review round 2, finding 3). The response is capped to
+   * the top `MAX_MATCHES` after ranking (finding 1d), so a term that happens
+   * to match a large fraction of the inventory can't balloon the response.
    *
    * Never throws on a "nothing found" or "nothing to search" outcome: a
    * stub analysis (no AI key configured, unsupported format, oversized
@@ -129,49 +139,72 @@ export class ItemsService {
       return { analysis, matches: [] };
     }
 
-    const matchCounts = new Map<string, number>();
-    for (const term of terms) {
-      const ids = await this.matchingItemIdsForTerm(term);
-      for (const id of ids) {
-        matchCounts.set(id, (matchCounts.get(id) ?? 0) + 1);
-      }
-    }
+    const hits = await this.matchingItemHitsForTerms(terms);
 
-    if (matchCounts.size === 0) {
+    if (hits.size === 0) {
       return { analysis, matches: [] };
     }
 
+    // Rank BEFORE fetching full item rows, then cap — bounds the response
+    // to MAX_MATCHES regardless of how many items a term happens to hit
+    // (EVT-17 review round 2, finding 1d).
+    const rankedIds = [...hits.entries()]
+      .sort(([, a], [, b]) => {
+        if (b.count !== a.count) {
+          return b.count - a.count;
+        }
+        return b.createdAt.getTime() - a.createdAt.getTime();
+      })
+      .slice(0, MAX_MATCHES)
+      .map(([id]) => id);
+
     const items = await this.prisma.item.findMany({
-      where: { id: { in: [...matchCounts.keys()] } },
-      orderBy: { createdAt: 'desc' },
+      where: { id: { in: rankedIds } },
       include: ITEM_LIST_INCLUDE,
     });
 
-    const matches = [...items].sort(
-      (a, b) => (matchCounts.get(b.id) ?? 0) - (matchCounts.get(a.id) ?? 0),
-    );
+    const rankOf = new Map(rankedIds.map((id, index) => [id, index]));
+    const matches = [...items].sort((a, b) => (rankOf.get(a.id) ?? 0) - (rankOf.get(b.id) ?? 0));
 
     return { analysis, matches };
   }
 
   /**
-   * Item IDs whose name, description, properties JSONB, or any tag name
-   * contains `term` (case-insensitive substring match). Extends
-   * `searchItemIds`'s approach with a tag-name join, since vision-suggested
-   * `tags` have no exact-name filter to reuse (unlike `list()`'s `tag` param).
+   * Single parameterized query across all `terms` (already capped to
+   * `MAX_SEARCH_TERMS`), replacing the previous per-term sequential
+   * `$queryRaw` loop — an unbounded/high-cardinality `search_keywords` list
+   * from a crafted image could previously drive one sequential full-table
+   * scan per term (EVT-17 review round 2, finding 1b).
+   *
+   * Each escaped `%term%` pattern is `unnest()`'d via `Prisma.join` (still
+   * fully parameterized — never string-concatenated) and cross-joined
+   * against `Item`/`ItemTag`/`Tag`, so matching against name, description,
+   * properties JSONB, or any tag name happens in one round trip. Returns
+   * per-item hit counts (one hit per distinct term that matched) plus each
+   * item's `createdAt`, so the caller can rank without a second query.
    */
-  private async matchingItemIdsForTerm(term: string): Promise<string[]> {
-    const pattern = `%${term}%`;
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
-      SELECT DISTINCT i.id FROM "Item" i
+  private async matchingItemHitsForTerms(
+    terms: string[],
+  ): Promise<Map<string, { count: number; createdAt: Date }>> {
+    const patterns = terms.map((term) => `%${escapeLikePattern(term)}%`);
+    const rows = await this.prisma.$queryRaw<{ id: string; createdAt: Date; term: string }[]>`
+      SELECT DISTINCT i.id, i."createdAt", t.term
+      FROM "Item" i
+      CROSS JOIN unnest(ARRAY[${Prisma.join(patterns)}]::text[]) AS t(term)
       LEFT JOIN "ItemTag" it ON it."itemId" = i.id
       LEFT JOIN "Tag" tag ON tag.id = it."tagId"
-      WHERE i.name ILIKE ${pattern}
-         OR i.description ILIKE ${pattern}
-         OR i.properties::text ILIKE ${pattern}
-         OR tag.name ILIKE ${pattern}
+      WHERE i.name ILIKE t.term ESCAPE '\\'
+         OR i.description ILIKE t.term ESCAPE '\\'
+         OR i.properties::text ILIKE t.term ESCAPE '\\'
+         OR tag.name ILIKE t.term ESCAPE '\\'
     `;
-    return rows.map((r) => r.id);
+
+    const hits = new Map<string, { count: number; createdAt: Date }>();
+    for (const row of rows) {
+      const existing = hits.get(row.id);
+      hits.set(row.id, { count: (existing?.count ?? 0) + 1, createdAt: row.createdAt });
+    }
+    return hits;
   }
 
   // -------------------------------------------------------------------------
@@ -320,8 +353,39 @@ export interface SearchByPhotoResult {
 }
 
 /**
- * Builds the deduplicated list of search terms from a vision analysis:
- * `suggested_name` + every `search_keywords` entry + every `tags` entry.
+ * Hard cap on the number of AI-derived search terms fanned out to the
+ * database per `searchByPhoto` call. `normalizeAnalysis` (ai.service.ts)
+ * accepts any number of `search_keywords`/`tags` from the vision model, so
+ * without this cap a crafted image could steer the model into emitting
+ * hundreds of terms, each previously driving its own full-table-scan query
+ * (EVT-17 review round 2, finding 1a).
+ */
+export const MAX_SEARCH_TERMS = 10;
+
+/**
+ * Hard cap on the number of items `searchByPhoto` returns. Ranking
+ * (distinct-term hit count, ties broken by `createdAt` desc) is applied
+ * BEFORE this cap, so it always keeps the strongest matches regardless of
+ * how many rows happen to match (EVT-17 review round 2, finding 1d).
+ */
+export const MAX_MATCHES = 50;
+
+/**
+ * Escapes ILIKE/LIKE metacharacters (`\`, `%`, `_`) in `term` so it can be
+ * safely embedded in a `%...%` substring pattern without the caller being
+ * able to smuggle in their own wildcards (e.g. a lone `%` or `_` term would
+ * otherwise match everything / any single character). Every ILIKE clause
+ * that consumes an escaped pattern MUST also carry an `ESCAPE '\'` clause
+ * (EVT-17 review round 2, finding 1c).
+ */
+export function escapeLikePattern(term: string): string {
+  return term.replace(/[\\%_]/g, (metachar) => `\\${metachar}`);
+}
+
+/**
+ * Builds the deduplicated, capped list of search terms from a vision
+ * analysis: `suggested_name` + every `search_keywords` entry + every `tags`
+ * entry, in that priority order, capped to `MAX_SEARCH_TERMS`.
  *
  * `suggested_name` is excluded when it's still the bare stub default
  * (`STUB_ANALYSIS.suggested_name`, "Unknown item") — that's a placeholder
@@ -342,6 +406,9 @@ export function buildSearchTerms(analysis: AiAnalysisResult): string[] {
   const seen = new Set<string>();
   const terms: string[] = [];
   for (const candidate of candidates) {
+    if (terms.length >= MAX_SEARCH_TERMS) {
+      break;
+    }
     const trimmed = candidate.trim();
     if (!trimmed) {
       continue;

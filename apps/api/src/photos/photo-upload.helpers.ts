@@ -81,12 +81,22 @@ export const photoUploadMulterOptions: MulterModuleOptions = {
  * `LIMIT_FILE_SIZE` error to the built-in `PayloadTooLargeException` (413).
  * EVT-6's AC2 specifies oversized uploads must return 400, not 413 — remap
  * it here rather than fighting Multer's internals.
+ *
+ * `message` is constructor-configurable (default: the 20 MB
+ * `photoUploadMulterOptions` ceiling) so routes with a different `fileSize`
+ * limit — e.g. `POST /api/items/search-by-photo`'s 5 MB
+ * `MAX_ANALYSIS_SIZE_BYTES` ceiling — can report their own actual limit
+ * instead of a hardcoded, inaccurate "20 MB" (EVT-17 review round 2,
+ * finding 4). Apply via `@UseFilters(new PayloadTooLargeFilter('...'))`
+ * rather than the bare class when the default message doesn't apply.
  */
 @Catch(PayloadTooLargeException)
 export class PayloadTooLargeFilter implements ExceptionFilter {
+  constructor(private readonly message: string = 'File exceeds the 20 MB upload limit') {}
+
   catch(_exception: PayloadTooLargeException, host: ArgumentsHost): void {
     const response = host.switchToHttp().getResponse<Response>();
-    const badRequest = new BadRequestException('File exceeds the 20 MB upload limit');
+    const badRequest = new BadRequestException(this.message);
     response.status(badRequest.getStatus()).json(badRequest.getResponse());
   }
 }

@@ -144,6 +144,30 @@ describe('POST /api/items/search-by-photo (e2e)', () => {
       expect(res.body.analysis.suggested_name).toBe('Exotic gadget');
     });
 
+    it('matches case-insensitively — keyword "HEX BOLT" matches an item named "hex bolt"', async () => {
+      analyzePhotoMock.mockResolvedValue({
+        suggested_name: 'Fastener',
+        description: '',
+        tags: [],
+        color: null,
+        quantity: null,
+        unit: null,
+        properties: {},
+        search_keywords: ['HEX BOLT'],
+      });
+      const created = await http.post('/api/items').send({ name: 'hex bolt' }).expect(201);
+
+      const res = await http
+        .post('/api/items/search-by-photo')
+        .attach('file', Buffer.from('fake-image-bytes'), {
+          filename: 'photo.jpg',
+          contentType: 'image/jpeg',
+        })
+        .expect(200);
+
+      expect(res.body.matches.map((m: { id: string }) => m.id)).toEqual([created.body.id]);
+    });
+
     it('stub AI output (empty keywords/tags) echoes the analysis with empty matches', async () => {
       analyzePhotoMock.mockResolvedValue({
         suggested_name: 'Unknown item',
@@ -224,13 +248,17 @@ describe('POST /api/items/search-by-photo (e2e)', () => {
       expect(analyzePhotoMock).not.toHaveBeenCalled();
     });
 
-    it('rejects a file over the 5 MB analysis ceiling with 400', async () => {
+    it('rejects a file over the 5 MB analysis ceiling with 400 and a route-accurate message', async () => {
       const oversized = Buffer.alloc(6 * 1024 * 1024, 1);
 
-      await http
+      const res = await http
         .post('/api/items/search-by-photo')
         .attach('file', oversized, { filename: 'huge.jpg', contentType: 'image/jpeg' })
         .expect(400);
+
+      // Round 2, finding 4 — this route's ceiling is 5 MB, not the general
+      // 20 MB `photos.controller.ts` upload limit.
+      expect(res.body.message).toBe('File exceeds the 5 MB search-by-photo upload limit');
     });
 
     it('rejects a request with no file with 400', async () => {

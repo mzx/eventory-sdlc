@@ -4,7 +4,13 @@ import { Prisma } from '@prisma/client';
 import { AiService, STUB_ANALYSIS, stubAnalysis } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TagsService } from '../tags/tags.service';
-import { buildSearchTerms, ItemsService } from './items.service';
+import {
+  buildSearchTerms,
+  escapeLikePattern,
+  ItemsService,
+  MAX_MATCHES,
+  MAX_SEARCH_TERMS,
+} from './items.service';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -184,6 +190,18 @@ describe('ItemsService', () => {
       expect(result[0]).toMatchObject({ properties: { voltage: '18V', brand: 'Makita' } });
     });
 
+    // Review round 2, finding 1c — the ?search= path must escape LIKE
+    // metacharacters too, not just the searchByPhoto path.
+    it('escapes LIKE metacharacters in the search term before querying', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.item.findMany.mockResolvedValue([]);
+
+      await service.list({ search: '50%_off\\path' });
+
+      const [, patternArg] = prismaMock.$queryRaw.mock.calls[0];
+      expect(patternArg).toBe('%50\\%\\_off\\\\path%');
+    });
+
     // -----------------------------------------------------------------------
     // tag filter
     // -----------------------------------------------------------------------
@@ -260,6 +278,11 @@ describe('ItemsService', () => {
       };
     }
 
+    /** A row from the batched `matchingItemHitsForTerms` query. */
+    function hitRow(id: string, term: string, createdAt = new Date('2026-01-01')) {
+      return { id, term, createdAt };
+    }
+
     // AC1: mocked vision output whose keywords match seeded items returns
     // ranked matches.
     it('AC1: keywords matching seeded items return ranked matches, most hits first', async () => {
@@ -267,13 +290,17 @@ describe('ItemsService', () => {
       aiMock.analyzePhoto.mockResolvedValue(analysis);
 
       // Terms (dedup order): "M4 hex bolt", "hex bolt", "M4", "fastener"
-      // ITEM_ID matches all 4 terms; a second item matches only 1.
+      // ITEM_ID matches all 4 terms; a second item matches only 1. Both hit
+      // rows come back from the single batched query (review round 2,
+      // finding 1b — no more one $queryRaw call per term).
       const OTHER_ID = '66666666-6666-6666-6666-666666666666';
-      prismaMock.$queryRaw
-        .mockResolvedValueOnce([{ id: ITEM_ID }]) // "M4 hex bolt"
-        .mockResolvedValueOnce([{ id: ITEM_ID }, { id: OTHER_ID }]) // "hex bolt"
-        .mockResolvedValueOnce([{ id: ITEM_ID }]) // "M4"
-        .mockResolvedValueOnce([{ id: ITEM_ID }]); // "fastener"
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        hitRow(ITEM_ID, 'M4 hex bolt'),
+        hitRow(ITEM_ID, 'hex bolt'),
+        hitRow(OTHER_ID, 'hex bolt'),
+        hitRow(ITEM_ID, 'M4'),
+        hitRow(ITEM_ID, 'fastener'),
+      ]);
 
       const bestMatch = makeItemRow({ id: ITEM_ID, name: 'M4 Hex Bolt (pack of 50)' });
       const weakMatch = makeItemRow({ id: OTHER_ID, name: 'Assorted hex bolts' });
@@ -283,6 +310,7 @@ describe('ItemsService', () => {
 
       expect(aiMock.analyzePhoto).toHaveBeenCalledWith(FILE_BUFFER, MIME_TYPE);
       expect(result.analysis).toBe(analysis);
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: { in: [ITEM_ID, OTHER_ID] } },
@@ -326,13 +354,149 @@ describe('ItemsService', () => {
         search_keywords: [],
       });
       aiMock.analyzePhoto.mockResolvedValue(analysis);
-      prismaMock.$queryRaw.mockResolvedValueOnce([{ id: ITEM_ID }]);
+      prismaMock.$queryRaw.mockResolvedValueOnce([hitRow(ITEM_ID, 'power-tool')]);
       prismaMock.item.findMany.mockResolvedValue([makeItemRow()]);
 
       const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
 
       expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
       expect(result.matches).toHaveLength(1);
+    });
+
+    // -----------------------------------------------------------------------
+    // Review round 2, finding 1 — term cap, escaping, and response bound
+    // -----------------------------------------------------------------------
+
+    it('finding 1a/1b: caps the number of terms sent to the batched query at MAX_SEARCH_TERMS', async () => {
+      const keywords = Array.from({ length: 30 }, (_, i) => `keyword-${i}`);
+      aiMock.analyzePhoto.mockResolvedValue(
+        analysisWith({
+          suggested_name: STUB_ANALYSIS.suggested_name,
+          tags: [],
+          search_keywords: keywords,
+        }),
+      );
+      prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      const [, patternsArg] = prismaMock.$queryRaw.mock.calls[0] as [unknown, { values: string[] }];
+      expect(patternsArg.values).toHaveLength(MAX_SEARCH_TERMS);
+    });
+
+    it('finding 1c: escapes a wildcard-only search term before it reaches the query', async () => {
+      aiMock.analyzePhoto.mockResolvedValue(
+        analysisWith({ suggested_name: '%', tags: [], search_keywords: [] }),
+      );
+      prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      const [, patternsArg] = prismaMock.$queryRaw.mock.calls[0] as [unknown, { values: string[] }];
+      // A raw '%' would match everything unescaped; escaped it only matches
+      // a literal '%' character.
+      expect(patternsArg.values).toEqual(['%\\%%']);
+    });
+
+    it('finding 1c: escapes an underscore-only search term before it reaches the query', async () => {
+      aiMock.analyzePhoto.mockResolvedValue(
+        analysisWith({ suggested_name: '_', tags: [], search_keywords: [] }),
+      );
+      prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      const [, patternsArg] = prismaMock.$queryRaw.mock.calls[0] as [unknown, { values: string[] }];
+      expect(patternsArg.values).toEqual(['%\\_%']);
+    });
+
+    it('finding 1d: caps the response to MAX_MATCHES even when far more items match', async () => {
+      aiMock.analyzePhoto.mockResolvedValue(
+        analysisWith({
+          suggested_name: STUB_ANALYSIS.suggested_name,
+          tags: [],
+          search_keywords: ['widget'],
+        }),
+      );
+
+      const totalHits = MAX_MATCHES + 10;
+      // Distinct createdAt per row (later index = newer) so ranking (equal
+      // 1-hit counts, tie-broken by createdAt desc) is deterministic.
+      const rows = Array.from({ length: totalHits }, (_, i) =>
+        hitRow(
+          `77770000-0000-0000-0000-${String(i).padStart(12, '0')}`,
+          'widget',
+          new Date(2026, 0, i + 1),
+        ),
+      );
+      prismaMock.$queryRaw.mockResolvedValueOnce(rows);
+
+      const expectedIds = [...rows]
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, MAX_MATCHES)
+        .map((r) => r.id);
+      prismaMock.item.findMany.mockResolvedValue(expectedIds.map((id) => makeItemRow({ id })));
+
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(prismaMock.item.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: { in: expectedIds } } }),
+      );
+      expect(result.matches).toHaveLength(MAX_MATCHES);
+    });
+
+    // -----------------------------------------------------------------------
+    // Review round 2, finding 3 — ranking tie-break is a tested contract
+    // -----------------------------------------------------------------------
+
+    it('finding 3: ranking tie-break — equal distinct-hit counts fall back to createdAt desc', async () => {
+      aiMock.analyzePhoto.mockResolvedValue(
+        analysisWith({
+          suggested_name: STUB_ANALYSIS.suggested_name,
+          tags: [],
+          search_keywords: ['widget'],
+        }),
+      );
+
+      const OLDER_ID = '77777777-7777-7777-7777-777777777777';
+      const NEWER_ID = '88888888-8888-8888-8888-888888888888';
+      prismaMock.$queryRaw.mockResolvedValueOnce([
+        hitRow(OLDER_ID, 'widget', new Date('2026-01-01')),
+        hitRow(NEWER_ID, 'widget', new Date('2026-02-01')),
+      ]);
+      // findMany returns them in an arbitrary order — the service must
+      // re-sort by rank, not trust findMany's own ordering.
+      prismaMock.item.findMany.mockResolvedValue([
+        makeItemRow({ id: OLDER_ID }),
+        makeItemRow({ id: NEWER_ID }),
+      ]);
+
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(result.matches.map((m) => m.id)).toEqual([NEWER_ID, OLDER_ID]);
+    });
+  });
+
+  // =========================================================================
+  // escapeLikePattern (EVT-17 review round 2, finding 1c)
+  // =========================================================================
+
+  describe('escapeLikePattern', () => {
+    it('escapes backslash, percent, and underscore', () => {
+      expect(escapeLikePattern('50%_off\\path')).toBe('50\\%\\_off\\\\path');
+    });
+
+    it('a lone "%" is escaped to a literal-match pattern, not a LIKE wildcard', () => {
+      expect(escapeLikePattern('%')).toBe('\\%');
+    });
+
+    it('a lone "_" is escaped to a literal-match pattern, not a LIKE single-char wildcard', () => {
+      expect(escapeLikePattern('_')).toBe('\\_');
+    });
+
+    it('leaves ordinary text untouched', () => {
+      expect(escapeLikePattern('hex bolt')).toBe('hex bolt');
     });
   });
 
@@ -372,6 +536,24 @@ describe('ItemsService', () => {
         search_keywords: [' ', 'fastener'],
       });
       expect(terms).toEqual(['M4 Bolt', 'fastener']);
+    });
+
+    // Review round 2, finding 1a
+    it('caps the term list at MAX_SEARCH_TERMS, keeping suggested_name first then keywords/tags in order', () => {
+      const keywords = Array.from({ length: 15 }, (_, i) => `keyword-${i}`);
+      const terms = buildSearchTerms({
+        suggested_name: 'Widget',
+        description: '',
+        tags: ['tag-a', 'tag-b'],
+        color: null,
+        quantity: null,
+        unit: null,
+        properties: {},
+        search_keywords: keywords,
+      });
+
+      expect(terms).toHaveLength(MAX_SEARCH_TERMS);
+      expect(terms).toEqual(['Widget', ...keywords.slice(0, MAX_SEARCH_TERMS - 1)]);
     });
   });
 

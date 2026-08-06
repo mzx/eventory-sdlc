@@ -90,7 +90,7 @@ export class ItemsController {
   @Post('search-by-photo')
   @Throttle(uploadThrottlerConfig())
   @HttpCode(HttpStatus.OK)
-  @UseFilters(PayloadTooLargeFilter)
+  @UseFilters(new PayloadTooLargeFilter('File exceeds the 5 MB search-by-photo upload limit'))
   @UseInterceptors(FileInterceptor('file', searchByPhotoMulterOptions))
   searchByPhoto(@UploadedFile() file: Express.Multer.File) {
     if (!file) {

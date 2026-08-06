@@ -58,7 +58,7 @@ export class PhotosController {
   @Post('upload')
   @Throttle(uploadThrottlerConfig())
   @HttpCode(HttpStatus.CREATED)
-  @UseFilters(PayloadTooLargeFilter)
+  @UseFilters(new PayloadTooLargeFilter())
   @UseInterceptors(FileInterceptor('file', photoUploadMulterOptions))
   upload(
     @UploadedFile() file: Express.Multer.File,

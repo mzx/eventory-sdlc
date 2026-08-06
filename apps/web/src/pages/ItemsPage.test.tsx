@@ -188,5 +188,62 @@ describe('ItemsPage', () => {
 
       expect(await screen.findByText('boom')).toBeInTheDocument();
     });
+
+    // -----------------------------------------------------------------------
+    // Review round 2, finding 2 — new text input clears a stale photo search
+    // -----------------------------------------------------------------------
+
+    it('typing in the text search while photo results are shown clears the photo search and returns to normal browsing', async () => {
+      const fetchItemsMock = vi
+        .spyOn(api, 'fetchItems')
+        .mockResolvedValue([item({ id: 'item-1', name: 'Cordless drill' })]);
+      vi.spyOn(api, 'searchItemsByPhoto').mockResolvedValue({
+        analysis: analysis({ suggested_name: 'M4 hex bolt' }),
+        matches: [item({ id: 'item-2', name: 'M4 Hex Bolt (pack of 50)' })],
+      });
+
+      renderItemsPage();
+      await screen.findByText('Cordless drill');
+
+      const fileInput = screen.getByTestId('photo-search-input');
+      await userEvent.upload(fileInput, photoFile);
+      await screen.findByText(/Looks like: M4 hex bolt/);
+      expect(screen.getByText('M4 Hex Bolt (pack of 50)')).toBeInTheDocument();
+
+      const searchBox = screen.getByRole('textbox', { name: /search items/i });
+      await userEvent.type(searchBox, 'drill');
+
+      // Photo search banner and matches are gone; the grid returns to
+      // normal browsing (itemsQuery refetches with the new ?search=).
+      await waitFor(() => expect(screen.queryByText(/Looks like:/)).not.toBeInTheDocument());
+      expect(screen.queryByText('M4 Hex Bolt (pack of 50)')).not.toBeInTheDocument();
+      await waitFor(() =>
+        expect(fetchItemsMock).toHaveBeenLastCalledWith({ search: 'drill', tag: undefined }),
+      );
+    });
+
+    it('submitting a photo search while a text filter is active overrides the grid with photo matches', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([
+        item({ id: 'item-1', name: 'Cordless drill' }),
+      ]);
+      const searchByPhotoMock = vi.spyOn(api, 'searchItemsByPhoto').mockResolvedValue({
+        analysis: analysis({ suggested_name: 'M4 hex bolt' }),
+        matches: [item({ id: 'item-2', name: 'M4 Hex Bolt (pack of 50)' })],
+      });
+
+      renderItemsPage();
+      await screen.findByText('Cordless drill');
+
+      const searchBox = screen.getByRole('textbox', { name: /search items/i });
+      await userEvent.type(searchBox, 'drill');
+
+      const fileInput = screen.getByTestId('photo-search-input');
+      await userEvent.upload(fileInput, photoFile);
+
+      expect(searchByPhotoMock).toHaveBeenCalledWith(photoFile, expect.anything());
+      expect(await screen.findByText(/Looks like: M4 hex bolt/)).toBeInTheDocument();
+      expect(screen.getByText('M4 Hex Bolt (pack of 50)')).toBeInTheDocument();
+      expect(screen.queryByText('Cordless drill')).not.toBeInTheDocument();
+    });
   });
 });

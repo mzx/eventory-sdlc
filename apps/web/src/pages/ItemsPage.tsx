@@ -63,6 +63,25 @@ export function ItemsPage() {
     photoSearchMutation.reset();
   };
 
+  // Any change to the text search input or a tag-chip toggle exits photo
+  // search mode: without this, typing in the text box while photo matches
+  // are shown left the grid pinned to the stale `photoSearch.matches` even
+  // though `itemsQuery` had refetched underneath it (EVT-17 review round 2,
+  // finding 2).
+  const handleSearchChange = (e: ChangeEvent<HTMLInputElement>) => {
+    setSearch(e.target.value);
+    if (photoSearch !== null) {
+      clearPhotoSearch();
+    }
+  };
+
+  const handleTagToggle = (tagName: string) => {
+    setActiveTag(activeTag === tagName ? null : tagName);
+    if (photoSearch !== null) {
+      clearPhotoSearch();
+    }
+  };
+
   const handlePhotoSelected = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     // Reset so choosing the same file again still fires onChange.
@@ -95,7 +114,7 @@ export function ItemsPage() {
         size="small"
         placeholder="Search items…"
         value={search}
-        onChange={(e) => setSearch(e.target.value)}
+        onChange={handleSearchChange}
         slotProps={{
           input: {
             startAdornment: (
@@ -154,7 +173,7 @@ export function ItemsPage() {
               key={tag.id}
               label={`${tag.name} (${tag.itemCount})`}
               color={activeTag === tag.name ? 'primary' : 'default'}
-              onClick={() => setActiveTag(activeTag === tag.name ? null : tag.name)}
+              onClick={() => handleTagToggle(tag.name)}
               variant={activeTag === tag.name ? 'filled' : 'outlined'}
             />
           ))}
