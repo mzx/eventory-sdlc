@@ -2,7 +2,8 @@
 //
 // Core inventory domain (EVT-2): Location, Category, Tag, Item, ItemTag, Photo.
 // Auth + approval workflow (EVT-14): User, ownership FKs on Item/Photo.
-// Non-goals for this task (see backlog/tasks/evt-2): Project + BomLine (EVT-16).
+// Projects + BOM (EVT-16): Project, BomLine — workshop projects with a bill of
+// materials optionally linked back to inventory items.
 
 generator client {
   provider = "prisma-client-js"
@@ -125,6 +126,10 @@ model Item {
   photos       Photo[]   @relation("ItemPhotos")
   tags         ItemTag[]
   createdBy    User?     @relation("ItemCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  // Reverse side of BomLine.item (EVT-16). Deleting an item does NOT delete
+  // the BOM line — see BomLine.itemId (onDelete: SetNull) — the line keeps
+  // its denormalized `name`.
+  bomLines     BomLine[]
 
   @@index([locationId])
   @@index([categoryId])
@@ -168,4 +173,51 @@ model Photo {
 
   @@index([itemId])
   @@index([uploadedById])
+}
+
+/// A workshop project (EVT-16). Bill-of-materials lines are owned via
+/// `BomLine.projectId` (cascade delete).
+enum ProjectStatus {
+  planned
+  in_progress
+  completed
+  archived
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  status      ProjectStatus @default(planned)
+  notes       String?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  bomLines BomLine[]
+
+  @@index([status])
+}
+
+/// A single bill-of-materials line on a Project. May optionally link back to
+/// an inventory Item — `name` is denormalized (copied from the item at link
+/// time, or typed free-text) so the line still reads sensibly after the
+/// linked item is deleted (`itemId` becomes null via `onDelete: SetNull`).
+model BomLine {
+  id        String   @id @default(uuid()) @db.Uuid
+  projectId String   @db.Uuid
+  itemId    String?  @db.Uuid
+  name      String
+  quantity  Int      @default(1)
+  unit      String?
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  item    Item?   @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([itemId])
 }
