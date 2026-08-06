@@ -1,4 +1,5 @@
 import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
+import { Public } from '../auth/decorators';
 import { DbService } from '../db/db.service';
 
 interface HealthResponse {
@@ -10,6 +11,8 @@ interface HealthResponse {
 export class HealthController {
   constructor(private readonly db: DbService) {}
 
+  /** @Public() (EVT-14) — container healthchecks/load balancers hit this unauthenticated. */
+  @Public()
   @Get()
   async check(): Promise<HealthResponse> {
     try {

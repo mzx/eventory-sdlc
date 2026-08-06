@@ -143,8 +143,16 @@ export class PhotosService {
    * On any failure past this point — decode rejection or a DB error — the
    * file Multer already wrote to `STORAGE_DIR` is unlinked so rejected /
    * failed uploads don't accumulate as orphaned disk usage.
+   *
+   * `uploadedById` (EVT-14) is optional so this remains callable without a
+   * caller in scope (e.g. seed scripts, tests predating auth).
    */
-  async savePhoto(file: UploadedPhotoFile, itemId?: string, analyze = false) {
+  async savePhoto(
+    file: UploadedPhotoFile,
+    itemId?: string,
+    analyze = false,
+    uploadedById?: string,
+  ) {
     try {
       const { width, height } = await this.readDimensions(file.path, file.mimetype);
       // Pre-validate itemId before paying for a billed AI call —
@@ -175,6 +183,7 @@ export class PhotosService {
             aiAnalysis: aiAnalysis as unknown as Prisma.InputJsonValue,
           }),
           ...(itemId && { itemId }),
+          ...(uploadedById && { uploadedById }),
         },
       });
       return this.withUrl(photo);

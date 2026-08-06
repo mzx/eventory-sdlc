@@ -710,6 +710,32 @@ describe('ItemsService', () => {
       await service.create({ name: 'Drill', tags: [] });
       expect(tagsMock.upsertMany).not.toHaveBeenCalled();
     });
+
+    // -----------------------------------------------------------------------
+    // EVT-14: createdById stamping
+    // -----------------------------------------------------------------------
+
+    it('EVT-14: stamps createdById when provided', async () => {
+      const userId = '99999999-9999-9999-9999-999999999999';
+      prismaMock.item.create.mockResolvedValue(makeItemDetail({ createdById: userId }));
+      tagsMock.upsertMany.mockResolvedValue([]);
+
+      await service.create({ name: 'Drill' }, userId);
+
+      expect(prismaMock.item.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ createdById: userId }) }),
+      );
+    });
+
+    it('EVT-14: omits createdById from the write when not provided', async () => {
+      prismaMock.item.create.mockResolvedValue(makeItemDetail());
+      tagsMock.upsertMany.mockResolvedValue([]);
+
+      await service.create({ name: 'Drill' });
+
+      const createArg = prismaMock.item.create.mock.calls[0][0];
+      expect(createArg.data).not.toHaveProperty('createdById');
+    });
   });
 
   // =========================================================================

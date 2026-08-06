@@ -3,6 +3,8 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AiModule } from './ai/ai.module';
+import { AuthModule } from './auth/auth.module';
+import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { CategoriesModule } from './categories/categories.module';
 import { globalThrottlerConfig } from './common/throttle.config';
 import { DbModule } from './db/db.module';
@@ -13,6 +15,7 @@ import { PhotosModule } from './photos/photos.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { QrModule } from './qr/qr.module';
 import { TagsModule } from './tags/tags.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -24,6 +27,8 @@ import { TagsModule } from './tags/tags.module';
     DbModule,
     PrismaModule,
     HealthModule,
+    AuthModule,
+    UsersModule,
     LocationsModule,
     TagsModule,
     CategoriesModule,
@@ -32,6 +37,14 @@ import { TagsModule } from './tags/tags.module';
     AiModule,
     PhotosModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Global auth gate (EVT-14) — every route requires an approved user by
+    // default; see `JwtAuthGuard`'s doc comment for the `@Public()` /
+    // `@AllowPending()` carve-outs. Registered AFTER ThrottlerGuard so an
+    // unauthenticated flood is throttled before it reaches the (cheap, but
+    // non-zero) DB lookup this guard does per request.
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
 })
 export class AppModule {}

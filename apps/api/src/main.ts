@@ -1,13 +1,18 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { STORAGE_DIR, STORAGE_URL_PREFIX } from './photos/photos.service';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.setGlobalPrefix('api');
-  app.enableCors();
+  // Global JwtAuthGuard (EVT-14) reads the session cookie off `req.cookies`,
+  // which only exists once this middleware has parsed the raw `Cookie`
+  // header — must run before any route handler / guard sees a request.
+  app.use(cookieParser());
+  app.enableCors({ origin: true, credentials: true });
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true, // strip unknown properties
