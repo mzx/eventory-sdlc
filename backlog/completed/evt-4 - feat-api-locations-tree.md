@@ -1,11 +1,12 @@
 ---
 id: EVT-4
 title: 'feat(api): Locations tree — materialized path CRUD, by-qr, subtree rename'
-status: To Do
+status: Done
 labels: [api, locations]
 dependencies: [EVT-2]
 references: [PRODUCT.md]
 priority: high
+updated_date: '2026-08-06 10:12'
 ---
 
 ## Description
@@ -38,3 +39,7 @@ Locations are the physical backbone (garage → wall → cabinet → drawer). No
 - [ ] `itemCount` in flat list matches actual direct items
 - [ ] Slugification: "West Wall / Cabinet #3" → path segment `west-wall-cabinet-3` (lowercase, non-alnum → `-`)
 <!-- AC:END -->
+
+## Final Summary
+
+Merged via PR #4 (`ea009dd`). Locations tree API: materialized-path CRUD, by-qr lookup, subtree rename. Branch was rebased onto main to pick up the `prisma generate && nest build` fix (EVT-3) after CI failed on stub Prisma client types; one mechanical conflict in `app.module.ts` resolved by keeping both ItemsModule and LocationsModule imports. All gate checks green: build/test Node 20+22, coverage 99.2%, lint, attestation, ai-sdlc/pr-ready.
