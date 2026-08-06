@@ -1,8 +1,8 @@
 // Eventory API — Prisma schema
 //
 // Core inventory domain (EVT-2): Location, Category, Tag, Item, ItemTag, Photo.
-// Non-goals for this task (see backlog/tasks/evt-2): User/ownership FKs (EVT-14),
-// Project + BomLine (EVT-16), API endpoints.
+// Auth + approval workflow (EVT-14): User, ownership FKs on Item/Photo.
+// Non-goals for this task (see backlog/tasks/evt-2): Project + BomLine (EVT-16).
 
 generator client {
   provider = "prisma-client-js"
@@ -11,6 +11,47 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+/// Household-member approval state (EVT-14). New sign-ins start `pending`
+/// and are blocked from every route except `/auth/me` until an admin flips
+/// them to `approved` (or `rejected`).
+enum UserStatus {
+  pending
+  approved
+  rejected
+}
+
+/// `admin` can manage users (approve/reject, promote/demote); `user` cannot.
+/// The first-ever Google sign-in is auto-promoted to `admin` + `approved`.
+enum UserRole {
+  user
+  admin
+}
+
+/// A household member authenticated via Google OAuth.
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  email        String     @unique
+  name         String?
+  picture      String?
+  googleId     String     @unique
+  status       UserStatus @default(pending)
+  role         UserRole   @default(user)
+  approvedAt   DateTime?
+  approvedById String?    @db.Uuid
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  /// Self-relation: which admin approved/rejected this user.
+  approvedBy    User?  @relation("UserApprovals", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedUsers User[] @relation("UserApprovals")
+
+  createdItems   Item[]  @relation("ItemCreatedBy")
+  uploadedPhotos Photo[] @relation("PhotoUploadedBy")
+
+  @@index([status])
 }
 
 /// Physical storage location. Self-referencing tree, addressable both by
@@ -70,6 +111,9 @@ model Item {
   locationId     String?  @db.Uuid
   categoryId     String?  @db.Uuid
   primaryPhotoId String?  @db.Uuid
+  /// Who created this item (EVT-14). Nullable — items predating auth, or
+  /// items whose creator was later deleted, keep `null` (SetNull).
+  createdById    String?  @db.Uuid
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -80,10 +124,12 @@ model Item {
   primaryPhoto Photo?    @relation("ItemPrimaryPhoto", fields: [primaryPhotoId], references: [id], onDelete: SetNull)
   photos       Photo[]   @relation("ItemPhotos")
   tags         ItemTag[]
+  createdBy    User?     @relation("ItemCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([locationId])
   @@index([categoryId])
   @@index([name])
+  @@index([createdById])
 }
 
 /// Explicit Item<->Tag join table (composite PK, cascade on either side).
@@ -101,20 +147,25 @@ model ItemTag {
 /// A photo of an item. Kept even if it's not (or no longer) the item's
 /// primary photo, and even if aiAnalysis needs a re-run.
 model Photo {
-  id         String   @id @default(uuid()) @db.Uuid
-  itemId     String?  @db.Uuid
-  filename   String
-  mimeType   String
-  sizeBytes  Int
-  width      Int?
-  height     Int?
+  id           String   @id @default(uuid()) @db.Uuid
+  itemId       String?  @db.Uuid
+  filename     String
+  mimeType     String
+  sizeBytes    Int
+  width        Int?
+  height       Int?
   /// Raw Claude Vision output, kept so analysis can be re-run without re-uploading.
-  aiAnalysis Json?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  aiAnalysis   Json?
+  /// Who uploaded this photo (EVT-14). Nullable, same rationale as
+  /// `Item.createdById`.
+  uploadedById String?  @db.Uuid
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   item            Item?  @relation("ItemPhotos", fields: [itemId], references: [id], onDelete: Cascade)
   primaryForItems Item[] @relation("ItemPrimaryPhoto")
+  uploadedBy      User?  @relation("PhotoUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
 
   @@index([itemId])
+  @@index([uploadedById])
 }

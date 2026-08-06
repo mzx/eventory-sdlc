@@ -259,7 +259,9 @@ export class ItemsService {
   // create — POST /api/items
   // -------------------------------------------------------------------------
 
-  async create(dto: CreateItemDto) {
+  /** `createdById` (EVT-14) is optional so this remains callable without a
+   * caller in scope (e.g. seed scripts, tests predating auth). */
+  async create(dto: CreateItemDto, createdById?: string) {
     const { tags: tagNames, photoIds, ...itemData } = dto;
 
     // Upsert tags by name → get their IDs
@@ -278,6 +280,7 @@ export class ItemsService {
         locationId: itemData.locationId,
         categoryId: itemData.categoryId,
         primaryPhotoId,
+        ...(createdById && { createdById }),
         ...(photoIds?.length && {
           photos: { connect: photoIds.map((id) => ({ id })) },
         }),

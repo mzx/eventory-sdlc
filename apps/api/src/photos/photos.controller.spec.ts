@@ -16,6 +16,9 @@ const THROTTLER_TTL_METADATA_KEY = 'THROTTLER:TTL';
 // ---------------------------------------------------------------------------
 
 const PHOTO_ID = '11111111-1111-1111-1111-111111111111';
+const USER_ID = '22222222-2222-2222-2222-222222222222';
+/** Minimal `AuthenticatedUser` stand-in — only `.id` is read by the controller. */
+const CURRENT_USER = { id: USER_ID } as never;
 
 function makePhotosServiceMock() {
   return {
@@ -69,43 +72,43 @@ describe('PhotosController', () => {
       const photo = { id: PHOTO_ID, filename: file.filename, url: `/storage/${file.filename}` };
       service.savePhoto.mockResolvedValue(photo);
 
-      const result = await controller.upload(file, { itemId: 'item-id' });
+      const result = await controller.upload(file, { itemId: 'item-id' }, undefined, CURRENT_USER);
 
       expect(result).toBe(photo);
-      expect(service.savePhoto).toHaveBeenCalledWith(file, 'item-id', false);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, 'item-id', false, USER_ID);
     });
 
     it('delegates without itemId when not provided', async () => {
       const file = makeMulterFile();
       service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
 
-      await controller.upload(file, {});
+      await controller.upload(file, {}, undefined, CURRENT_USER);
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false, USER_ID);
     });
 
     it('passes analyze=true through to the service when ?analyze=true', async () => {
       const file = makeMulterFile();
       service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
 
-      await controller.upload(file, {}, 'true');
+      await controller.upload(file, {}, 'true', CURRENT_USER);
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, true);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, true, USER_ID);
     });
 
     it('treats any non-"true" value (including missing) as analyze=false', async () => {
       const file = makeMulterFile();
       service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
 
-      await controller.upload(file, {}, 'yes');
+      await controller.upload(file, {}, 'yes', CURRENT_USER);
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false, USER_ID);
     });
 
     it('throws BadRequestException when no file is present (multer rejected it)', () => {
-      expect(() => controller.upload(undefined as unknown as Express.Multer.File, {})).toThrow(
-        BadRequestException,
-      );
+      expect(() =>
+        controller.upload(undefined as unknown as Express.Multer.File, {}, undefined, CURRENT_USER),
+      ).toThrow(BadRequestException);
       expect(service.savePhoto).not.toHaveBeenCalled();
     });
 
@@ -113,9 +116,9 @@ describe('PhotosController', () => {
       const file = makeMulterFile();
       service.savePhoto.mockRejectedValue(new BadRequestException('Item x not found'));
 
-      await expect(controller.upload(file, { itemId: 'missing' })).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(
+        controller.upload(file, { itemId: 'missing' }, undefined, CURRENT_USER),
+      ).rejects.toThrow(BadRequestException);
     });
 
     // =========================================================================

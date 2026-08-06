@@ -16,6 +16,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import { IsOptional, IsUUID } from 'class-validator';
+import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
 import { uploadThrottlerConfig } from '../common/throttle.config';
 import { photoUploadMulterOptions, PayloadTooLargeFilter } from './photo-upload.helpers';
 import { PhotosService } from './photos.service';
@@ -48,12 +49,14 @@ export class PhotosController {
    *   intake form — nothing is auto-created from it.
    *
    * Returns the Photo row plus a public `url` the file is served at.
+   * `uploadedById` is stamped from the caller's session (EVT-14).
    *
    * Rate-limited more strictly than the app-wide default (10/min per IP by
    * default, env-tunable — see `common/throttle.config.ts`) since this
-   * route can trigger a billed Anthropic vision call with no auth guard in
-   * front of it (auth is out of scope — EVT-14/15); see EVT-7 review round
-   * 2, finding 1.
+   * route can trigger a billed Anthropic vision call; this route now also
+   * requires an approved user (EVT-14 global guard), which narrows — but
+   * does not replace — the throttle as a defense against runaway spend; see
+   * EVT-7 review round 2, finding 1.
    */
   @Post('upload')
   @Throttle(uploadThrottlerConfig())
@@ -63,12 +66,13 @@ export class PhotosController {
   upload(
     @UploadedFile() file: Express.Multer.File,
     @Body() body: UploadPhotoDto,
-    @Query('analyze') analyze?: string,
+    @Query('analyze') analyze: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
     if (!file) {
       throw new BadRequestException('file is required');
     }
-    return this.photosService.savePhoto(file, body.itemId, analyze === 'true');
+    return this.photosService.savePhoto(file, body.itemId, analyze === 'true', user.id);
   }
 
   /** GET /api/photos/:id — metadata row. 404 when not found. */

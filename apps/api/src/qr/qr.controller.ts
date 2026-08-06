@@ -1,5 +1,6 @@
 import { Controller, Get, HttpStatus, Param, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
+import { Public } from '../auth/decorators';
 import { QrService } from './qr.service';
 
 @Controller('qr')
@@ -17,7 +18,11 @@ export class QrController {
    * Manual `@Res()` handling (rather than a return value) because the body is
    * a raw binary PNG buffer, not JSON — Nest's default reply serializer would
    * otherwise treat it as a JSON-serializable object.
+   *
+   * `@Public()` (EVT-14) — a native camera app scanning a printed sticker
+   * hits this route with no session cookie at all.
    */
+  @Public()
   @Get(':token')
   async render(
     @Param('token') token: string,

@@ -22,6 +22,9 @@ const THROTTLER_TTL_METADATA_KEY = 'THROTTLER:TTL';
 // ---------------------------------------------------------------------------
 
 const ITEM_ID = '11111111-1111-1111-1111-111111111111';
+const USER_ID = '22222222-2222-2222-2222-222222222222';
+/** Minimal `AuthenticatedUser` stand-in — only `.id` is read by the controller. */
+const CURRENT_USER = { id: USER_ID } as never;
 
 function makeItemServiceMock() {
   return {
@@ -197,8 +200,8 @@ describe('ItemsController', () => {
       service.create.mockResolvedValue(item);
 
       const dto: CreateItemDto = { name: 'Drill' };
-      expect(await controller.create(dto)).toBe(item);
-      expect(service.create).toHaveBeenCalledWith(dto);
+      expect(await controller.create(dto, CURRENT_USER)).toBe(item);
+      expect(service.create).toHaveBeenCalledWith(dto, USER_ID);
     });
   });
 

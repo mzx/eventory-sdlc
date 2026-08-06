@@ -17,6 +17,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
+import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
 import { uploadThrottlerConfig } from '../common/throttle.config';
 import { PayloadTooLargeFilter } from '../photos/photo-upload.helpers';
 import { CreateItemDto } from './create-item.dto';
@@ -103,11 +104,13 @@ export class ItemsController {
    * POST /api/items
    *
    * Create an item. Tags are upserted by name. Returns 201 with the new item.
+   * `createdById` is stamped from the caller's session (EVT-14) — this
+   * route requires an approved user, so `user` is always present here.
    */
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(@Body() dto: CreateItemDto) {
-    return this.itemsService.create(dto);
+  create(@Body() dto: CreateItemDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.itemsService.create(dto, user.id);
   }
 
   /**

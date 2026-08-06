@@ -135,6 +135,27 @@ describe('PhotosService', () => {
       );
     });
 
+    it('EVT-14: stamps uploadedById when provided', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
+
+      await service.savePhoto(makeFile(), undefined, false, 'user-1');
+
+      expect(prismaMock.photo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ uploadedById: 'user-1' }) }),
+      );
+    });
+
+    it('EVT-14: omits uploadedById from the write when not provided', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
+
+      await service.savePhoto(makeFile());
+
+      const createArg = prismaMock.photo.create.mock.calls[0][0];
+      expect(createArg.data).not.toHaveProperty('uploadedById');
+    });
+
     it('degrades to null width/height when sharp metadata read fails for the HEIC/HEIF carve-out', async () => {
       metadataMock.mockRejectedValue(new Error('unsupported image format'));
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.heic' });

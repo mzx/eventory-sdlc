@@ -21,13 +21,15 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test, TestingModule } from '@nestjs/testing';
+import cookieParser from 'cookie-parser';
 import { readdirSync, rmSync } from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
-import supertest from 'supertest';
 import { AppModule } from '../src/app.module';
+import { AuthService } from '../src/auth/auth.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { STORAGE_DIR, STORAGE_URL_PREFIX } from '../src/photos/photos.service';
+import { AuthedHttp, createAuthedHttp } from './e2e-auth-helper';
 
 // ---------------------------------------------------------------------------
 // Test database URL — provided by global-setup.ts via the known container URL
@@ -65,7 +67,8 @@ function makeTestPng(): Promise<Buffer> {
 describe('Photos API (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
-  let http: ReturnType<typeof supertest>;
+  /** Authenticated as an approved admin (EVT-14) — see e2e-auth-helper.ts. */
+  let http: AuthedHttp;
 
   beforeAll(async () => {
     // Must be set BEFORE the NestJS module is compiled so PrismaClient uses
@@ -78,6 +81,9 @@ describe('Photos API (e2e)', () => {
 
     app = moduleFixture.createNestApplication<NestExpressApplication>();
     app.setGlobalPrefix('api');
+    // Mirror src/main.ts's bootstrap() — JwtAuthGuard reads `req.cookies`,
+    // which only exists once this middleware has run (EVT-14).
+    app.use(cookieParser());
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -95,7 +101,8 @@ describe('Photos API (e2e)', () => {
     await app.init();
 
     prisma = moduleFixture.get<PrismaService>(PrismaService);
-    http = supertest(app.getHttpServer());
+    const authService = moduleFixture.get<AuthService>(AuthService);
+    http = await createAuthedHttp(app, prisma, authService);
   });
 
   afterAll(async () => {
