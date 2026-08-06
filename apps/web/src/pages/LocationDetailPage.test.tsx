@@ -126,12 +126,15 @@ describe('LocationDetailPage', () => {
     vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
     vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
 
-    const writeSpy = vi.fn();
+    // Real (jsdom) sub-document, so the DOM-building `handlePrint` in
+    // QrThumb has an actual `document`/`body` to append to.
     const printSpy = vi.fn();
+    const popupDocument = document.implementation.createHTMLDocument('');
     const fakeWindow = {
-      document: { write: writeSpy, close: vi.fn() },
+      document: popupDocument,
       print: printSpy,
-      onload: null,
+      opener: window,
+      onload: null as (() => void) | null,
     };
     vi.spyOn(window, 'open').mockReturnValue(fakeWindow as unknown as Window);
 
@@ -143,9 +146,12 @@ describe('LocationDetailPage', () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Print sticker' }));
 
-    await waitFor(() => expect(writeSpy).toHaveBeenCalled());
-    const html = writeSpy.mock.calls[0][0] as string;
-    expect(html).toContain('qr-shelf-3');
-    expect(html).toContain('garage › shelf-3');
+    await waitFor(() => expect(fakeWindow.opener).toBeNull());
+    expect(popupDocument.title).toBe('garage › shelf-3');
+    expect(popupDocument.querySelector('img')?.getAttribute('src')).toContain('qr-shelf-3');
+    expect(popupDocument.body.textContent).toContain('garage › shelf-3');
+
+    fakeWindow.onload?.();
+    expect(printSpy).toHaveBeenCalled();
   });
 });

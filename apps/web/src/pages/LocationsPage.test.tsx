@@ -133,4 +133,69 @@ describe('LocationsPage', () => {
     const row = screen.getByTestId('location-node-garage');
     expect(within(row).getByRole('button', { name: 'Delete Garage' })).toBeDisabled();
   });
+
+  it('renames a location and invalidates the list', async () => {
+    const fetchLocationsMock = vi
+      .spyOn(api, 'fetchLocations')
+      .mockResolvedValueOnce([loc({ id: 'garage', name: 'Garage', path: 'garage' })])
+      .mockResolvedValue([loc({ id: 'garage', name: 'Garage HQ', path: 'garage-hq' })]);
+    const renameLocationMock = vi
+      .spyOn(api, 'renameLocation')
+      .mockResolvedValue(loc({ id: 'garage', name: 'Garage HQ', path: 'garage-hq' }));
+
+    renderLocationsPage();
+    const user = userEvent.setup();
+
+    await screen.findByText('Garage');
+    await user.click(screen.getByRole('button', { name: 'Rename Garage' }));
+
+    const input = screen.getByRole('textbox', { name: 'Rename Garage' });
+    await user.clear(input);
+    await user.type(input, 'Garage HQ{Enter}');
+
+    await waitFor(() => expect(renameLocationMock).toHaveBeenCalledWith('garage', 'Garage HQ'));
+    await waitFor(() => expect(fetchLocationsMock.mock.calls.length).toBeGreaterThan(1));
+    expect(await screen.findByText('Garage HQ')).toBeInTheDocument();
+  });
+
+  it('reseeds the rename input from the current name on each rename click', async () => {
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      loc({ id: 'garage', name: 'Garage', path: 'garage' }),
+    ]);
+    vi.spyOn(api, 'renameLocation').mockResolvedValue(loc());
+
+    renderLocationsPage();
+    const user = userEvent.setup();
+
+    await screen.findByText('Garage');
+    await user.click(screen.getByRole('button', { name: 'Rename Garage' }));
+    await user.type(screen.getByRole('textbox', { name: 'Rename Garage' }), ' stale{Escape}');
+
+    // Escape cancels without submitting; the underlying name is unchanged.
+    expect(await screen.findByText('Garage')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Rename Garage' }));
+    expect(screen.getByRole('textbox', { name: 'Rename Garage' })).toHaveValue('Garage');
+  });
+
+  it('confirms before deleting and skips the mutation if the user cancels', async () => {
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      loc({ id: 'garage', name: 'Garage', path: 'garage' }),
+    ]);
+    const deleteLocationMock = vi.spyOn(api, 'deleteLocation').mockResolvedValue(undefined);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    renderLocationsPage();
+    const user = userEvent.setup();
+
+    await screen.findByText('Garage');
+    await user.click(screen.getByRole('button', { name: 'Delete Garage' }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(deleteLocationMock).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(screen.getByRole('button', { name: 'Delete Garage' }));
+    await waitFor(() => expect(deleteLocationMock).toHaveBeenCalledWith('garage'));
+  });
 });

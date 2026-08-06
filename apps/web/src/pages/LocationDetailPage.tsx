@@ -128,7 +128,9 @@ export function LocationDetailPage() {
         <Button
           variant="contained"
           startIcon={<AddIcon />}
-          onClick={() => navigate(`/intake?locationId=${location.id}`)}
+          onClick={() =>
+            navigate(`/intake?${new URLSearchParams({ locationId: location.id }).toString()}`)
+          }
         >
           Add item here
         </Button>

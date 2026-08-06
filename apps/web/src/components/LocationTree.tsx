@@ -149,7 +149,10 @@ function LocationTreeRow({ node, depth, onAddChild, onRename, onDelete }: Locati
             <IconButton
               size="small"
               aria-label={`Rename ${node.name}`}
-              onClick={() => setRenaming(true)}
+              onClick={() => {
+                setRenameValue(node.name);
+                setRenaming(true);
+              }}
             >
               <EditOutlinedIcon fontSize="small" />
             </IconButton>
@@ -160,7 +163,11 @@ function LocationTreeRow({ node, depth, onAddChild, onRename, onDelete }: Locati
                 size="small"
                 aria-label={`Delete ${node.name}`}
                 disabled={hasChildren}
-                onClick={() => onDelete(node.id)}
+                onClick={() => {
+                  if (window.confirm(`Delete "${node.name}"? This cannot be undone.`)) {
+                    onDelete(node.id);
+                  }
+                }}
               >
                 <DeleteOutlineIcon fontSize="small" />
               </IconButton>

@@ -17,7 +17,7 @@ export function photoUrl(filename: string): string {
 /** Builds the browser-facing URL for a QR sticker PNG (see apps/api QrController). */
 export function qrImageUrl(token: string, size?: number): string {
   const suffix = size ? `?size=${size}` : '';
-  return `${API_BASE}/qr/${token}${suffix}`;
+  return `${API_BASE}/qr/${encodeURIComponent(token)}${suffix}`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -192,7 +192,7 @@ export async function fetchLocations(): Promise<LocationListItem[]> {
 
 /** GET /api/locations/:id */
 export async function fetchLocation(id: string): Promise<LocationDetail> {
-  return request<LocationDetail>(`/locations/${id}`);
+  return request<LocationDetail>(`/locations/${encodeURIComponent(id)}`);
 }
 
 /** POST /api/locations */
@@ -205,7 +205,7 @@ export async function createLocation(input: CreateLocationInput): Promise<Locati
 
 /** PATCH /api/locations/:id */
 export async function renameLocation(id: string, name: string): Promise<LocationListItem> {
-  return request<LocationListItem>(`/locations/${id}`, {
+  return request<LocationListItem>(`/locations/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify({ name }),
   });
@@ -213,5 +213,5 @@ export async function renameLocation(id: string, name: string): Promise<Location
 
 /** DELETE /api/locations/:id */
 export async function deleteLocation(id: string): Promise<void> {
-  return request<void>(`/locations/${id}`, { method: 'DELETE' });
+  return request<void>(`/locations/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

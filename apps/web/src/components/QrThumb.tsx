@@ -28,14 +28,39 @@ export function QrThumb({ token, label, size = 160 }: QrThumbProps) {
     if (!printWindow) {
       return;
     }
-    printWindow.document.write(
-      `<!doctype html><html><head><title>${label ?? token}</title></head>` +
-        `<body style="text-align:center;font-family:sans-serif;padding:24px">` +
-        `<img src="${printSrc}" alt="QR code" style="width:100%;max-width:320px" />` +
-        (label ? `<p style="font-size:14px">${label}</p>` : '') +
-        `</body></html>`,
-    );
-    printWindow.document.close();
+    // Sever the opener reference so the popup can't reach back into this
+    // window. (`window.open(..., 'noopener')` would do this for us but also
+    // makes the return value null, which we need below to keep scripting
+    // the popup.)
+    printWindow.opener = null;
+
+    // Build the popup document via the DOM API — never interpolate `label`
+    // (or `token`) into an HTML string. `label` is user-influenced (location
+    // names today; this component is shared with free-text item names in
+    // EVT-10), so string interpolation into markup would be a stored-XSS
+    // sink in this origin.
+    const doc = printWindow.document;
+    doc.title = label ?? token;
+
+    const body = doc.body;
+    body.style.textAlign = 'center';
+    body.style.fontFamily = 'sans-serif';
+    body.style.padding = '24px';
+
+    const img = doc.createElement('img');
+    img.src = printSrc;
+    img.alt = 'QR code';
+    img.style.width = '100%';
+    img.style.maxWidth = '320px';
+    body.appendChild(img);
+
+    if (label) {
+      const caption = doc.createElement('p');
+      caption.style.fontSize = '14px';
+      caption.textContent = label;
+      body.appendChild(caption);
+    }
+
     printWindow.onload = () => printWindow.print();
   };
 
