@@ -1,9 +1,10 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
+import { AiService, STUB_ANALYSIS, stubAnalysis } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TagsService } from '../tags/tags.service';
-import { ItemsService } from './items.service';
+import { buildSearchTerms, ItemsService } from './items.service';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -79,6 +80,12 @@ function makeTagsMock() {
   };
 }
 
+function makeAiServiceMock() {
+  return {
+    analyzePhoto: jest.fn(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -87,16 +94,19 @@ describe('ItemsService', () => {
   let service: ItemsService;
   let prismaMock: ReturnType<typeof makePrismaMock>;
   let tagsMock: ReturnType<typeof makeTagsMock>;
+  let aiMock: ReturnType<typeof makeAiServiceMock>;
 
   beforeEach(async () => {
     prismaMock = makePrismaMock();
     tagsMock = makeTagsMock();
+    aiMock = makeAiServiceMock();
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ItemsService,
         { provide: PrismaService, useValue: prismaMock },
         { provide: TagsService, useValue: tagsMock },
+        { provide: AiService, useValue: aiMock },
       ],
     }).compile();
 
@@ -225,6 +235,143 @@ describe('ItemsService', () => {
       const result = await service.list({ locationId: LOC_ID });
       expect(result).toEqual([]);
       expect(prismaMock.item.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
+  // searchByPhoto (EVT-17)
+  // =========================================================================
+
+  describe('searchByPhoto', () => {
+    const FILE_BUFFER = Buffer.from('fake-image-bytes');
+    const MIME_TYPE = 'image/jpeg';
+
+    function analysisWith(overrides: Record<string, unknown> = {}) {
+      return {
+        suggested_name: 'M4 hex bolt',
+        description: '',
+        tags: ['fastener'],
+        color: null,
+        quantity: null,
+        unit: null,
+        properties: {},
+        search_keywords: ['hex bolt', 'M4'],
+        ...overrides,
+      };
+    }
+
+    // AC1: mocked vision output whose keywords match seeded items returns
+    // ranked matches.
+    it('AC1: keywords matching seeded items return ranked matches, most hits first', async () => {
+      const analysis = analysisWith();
+      aiMock.analyzePhoto.mockResolvedValue(analysis);
+
+      // Terms (dedup order): "M4 hex bolt", "hex bolt", "M4", "fastener"
+      // ITEM_ID matches all 4 terms; a second item matches only 1.
+      const OTHER_ID = '66666666-6666-6666-6666-666666666666';
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([{ id: ITEM_ID }]) // "M4 hex bolt"
+        .mockResolvedValueOnce([{ id: ITEM_ID }, { id: OTHER_ID }]) // "hex bolt"
+        .mockResolvedValueOnce([{ id: ITEM_ID }]) // "M4"
+        .mockResolvedValueOnce([{ id: ITEM_ID }]); // "fastener"
+
+      const bestMatch = makeItemRow({ id: ITEM_ID, name: 'M4 Hex Bolt (pack of 50)' });
+      const weakMatch = makeItemRow({ id: OTHER_ID, name: 'Assorted hex bolts' });
+      prismaMock.item.findMany.mockResolvedValue([weakMatch, bestMatch]);
+
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(aiMock.analyzePhoto).toHaveBeenCalledWith(FILE_BUFFER, MIME_TYPE);
+      expect(result.analysis).toBe(analysis);
+      expect(prismaMock.item.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: { in: [ITEM_ID, OTHER_ID] } },
+        }),
+      );
+      expect(result.matches).toHaveLength(2);
+      expect(result.matches[0].id).toBe(ITEM_ID);
+      expect(result.matches[1].id).toBe(OTHER_ID);
+    });
+
+    // AC1: no-match returns empty list, 200 (200 itself is asserted at the
+    // controller/e2e level — this asserts the service-level empty-array
+    // contract the controller passes straight through).
+    it('AC1: no-match returns an empty matches array', async () => {
+      const analysis = analysisWith();
+      aiMock.analyzePhoto.mockResolvedValue(analysis);
+      prismaMock.$queryRaw.mockResolvedValue([]);
+
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(result).toEqual({ analysis, matches: [] });
+      expect(prismaMock.item.findMany).not.toHaveBeenCalled();
+    });
+
+    // Stub AI (no key) → empty keywords → empty matches, analysis echoed.
+    it('stub analysis (no AI key) short-circuits to empty matches without querying', async () => {
+      const stub = stubAnalysis();
+      aiMock.analyzePhoto.mockResolvedValue(stub);
+
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(result).toEqual({ analysis: stub, matches: [] });
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMock.item.findMany).not.toHaveBeenCalled();
+    });
+
+    it('matches item tags via the tag-name join, not just name/description/properties', async () => {
+      const analysis = analysisWith({
+        suggested_name: STUB_ANALYSIS.suggested_name,
+        tags: ['power-tool'],
+        search_keywords: [],
+      });
+      aiMock.analyzePhoto.mockResolvedValue(analysis);
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ id: ITEM_ID }]);
+      prismaMock.item.findMany.mockResolvedValue([makeItemRow()]);
+
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(result.matches).toHaveLength(1);
+    });
+  });
+
+  // =========================================================================
+  // buildSearchTerms (EVT-17)
+  // =========================================================================
+
+  describe('buildSearchTerms', () => {
+    it('combines suggested_name, search_keywords, and tags', () => {
+      const terms = buildSearchTerms({
+        suggested_name: 'M4 hex bolt',
+        description: '',
+        tags: ['fastener'],
+        color: null,
+        quantity: null,
+        unit: null,
+        properties: {},
+        search_keywords: ['hex bolt'],
+      });
+      expect(terms).toEqual(['M4 hex bolt', 'hex bolt', 'fastener']);
+    });
+
+    it('excludes the bare stub suggested_name placeholder', () => {
+      const terms = buildSearchTerms(stubAnalysis());
+      expect(terms).toEqual([]);
+    });
+
+    it('dedupes case-insensitively and trims whitespace', () => {
+      const terms = buildSearchTerms({
+        suggested_name: '  M4 Bolt  ',
+        description: '',
+        tags: ['m4 bolt', 'Fastener'],
+        color: null,
+        quantity: null,
+        unit: null,
+        properties: {},
+        search_keywords: [' ', 'fastener'],
+      });
+      expect(terms).toEqual(['M4 Bolt', 'fastener']);
     });
   });
 

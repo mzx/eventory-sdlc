@@ -5,10 +5,17 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { uploadThrottlerConfig } from '../common/throttle.config';
 import { CreateItemDto } from './create-item.dto';
 import { ItemsController } from './items.controller';
 import { ItemsService } from './items.service';
 import { UpdateItemDto } from './update-item.dto';
+
+// `@nestjs/throttler`'s `@Throttle()` decorator stashes its config under
+// these Reflect metadata keys — see the same pattern in
+// `photos.controller.spec.ts`.
+const THROTTLER_LIMIT_METADATA_KEY = 'THROTTLER:LIMIT';
+const THROTTLER_TTL_METADATA_KEY = 'THROTTLER:TTL';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,6 +31,23 @@ function makeItemServiceMock() {
     create: jest.fn(),
     update: jest.fn(),
     remove: jest.fn(),
+    searchByPhoto: jest.fn(),
+  };
+}
+
+function makeMulterFile(overrides: Partial<Express.Multer.File> = {}): Express.Multer.File {
+  return {
+    fieldname: 'file',
+    originalname: 'photo.png',
+    encoding: '7bit',
+    mimetype: 'image/png',
+    size: 1024,
+    buffer: Buffer.from('fake-image-bytes'),
+    stream: undefined as unknown as Express.Multer.File['stream'],
+    destination: '',
+    filename: '',
+    path: '',
+    ...overrides,
   };
 }
 
@@ -118,6 +142,48 @@ describe('ItemsController', () => {
     it('propagates NotFoundException from service', async () => {
       service.findById.mockRejectedValue(new NotFoundException());
       await expect(controller.findById(ITEM_ID)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // =========================================================================
+  // searchByPhoto (EVT-17)
+  // =========================================================================
+
+  describe('searchByPhoto', () => {
+    it('delegates to ItemsService.searchByPhoto with the file buffer and mimetype', async () => {
+      const file = makeMulterFile();
+      const result = {
+        analysis: { suggested_name: 'M4 hex bolt', tags: [], search_keywords: [] },
+        matches: [{ id: ITEM_ID }],
+      };
+      service.searchByPhoto.mockResolvedValue(result);
+
+      const response = await controller.searchByPhoto(file);
+
+      expect(response).toBe(result);
+      expect(service.searchByPhoto).toHaveBeenCalledWith(file.buffer, file.mimetype);
+    });
+
+    it('throws BadRequestException when no file is present (multer rejected it)', () => {
+      expect(() => controller.searchByPhoto(undefined as unknown as Express.Multer.File)).toThrow(
+        BadRequestException,
+      );
+      expect(service.searchByPhoto).not.toHaveBeenCalled();
+    });
+
+    it('carries the stricter upload throttle config from @Throttle metadata', () => {
+      const expected = uploadThrottlerConfig();
+      const limit = Reflect.getMetadata(
+        THROTTLER_LIMIT_METADATA_KEY + 'default',
+        controller.searchByPhoto,
+      );
+      const ttl = Reflect.getMetadata(
+        THROTTLER_TTL_METADATA_KEY + 'default',
+        controller.searchByPhoto,
+      );
+
+      expect(limit).toBe(expected.default.limit);
+      expect(ttl).toBe(expected.default.ttl);
     });
   });
 
