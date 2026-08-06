@@ -56,7 +56,7 @@ describe('PhotosController', () => {
   // =========================================================================
 
   describe('upload', () => {
-    it('delegates to PhotosService.savePhoto with the file and itemId', async () => {
+    it('delegates to PhotosService.savePhoto with the file and itemId, analyze defaulting to false', async () => {
       const file = makeMulterFile();
       const photo = { id: PHOTO_ID, filename: file.filename, url: `/storage/${file.filename}` };
       service.savePhoto.mockResolvedValue(photo);
@@ -64,7 +64,7 @@ describe('PhotosController', () => {
       const result = await controller.upload(file, { itemId: 'item-id' });
 
       expect(result).toBe(photo);
-      expect(service.savePhoto).toHaveBeenCalledWith(file, 'item-id');
+      expect(service.savePhoto).toHaveBeenCalledWith(file, 'item-id', false);
     });
 
     it('delegates without itemId when not provided', async () => {
@@ -73,7 +73,25 @@ describe('PhotosController', () => {
 
       await controller.upload(file, {});
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false);
+    });
+
+    it('passes analyze=true through to the service when ?analyze=true', async () => {
+      const file = makeMulterFile();
+      service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
+
+      await controller.upload(file, {}, 'true');
+
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, true);
+    });
+
+    it('treats any non-"true" value (including missing) as analyze=false', async () => {
+      const file = makeMulterFile();
+      service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
+
+      await controller.upload(file, {}, 'yes');
+
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false);
     });
 
     it('throws BadRequestException when no file is present (multer rejected it)', () => {

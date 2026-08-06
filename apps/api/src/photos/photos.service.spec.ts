@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Test, TestingModule } from '@nestjs/testing';
+import { AiService, STUB_ANALYSIS } from '../ai/ai.service';
 import { PhotosService, UploadedPhotoFile } from './photos.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -16,7 +17,11 @@ jest.mock('sharp', () => jest.fn(() => ({ metadata: metadataMock })));
 // ---------------------------------------------------------------------------
 
 const unlinkMock = jest.fn();
-jest.mock('fs/promises', () => ({ unlink: (...args: unknown[]) => unlinkMock(...args) }));
+const readFileMock = jest.fn();
+jest.mock('fs/promises', () => ({
+  unlink: (...args: unknown[]) => unlinkMock(...args),
+  readFile: (...args: unknown[]) => readFileMock(...args),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,6 +55,10 @@ function fkViolation(): Prisma.PrismaClientKnownRequestError {
   });
 }
 
+function makeAiServiceMock() {
+  return { analyzePhoto: jest.fn() };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -57,15 +66,23 @@ function fkViolation(): Prisma.PrismaClientKnownRequestError {
 describe('PhotosService', () => {
   let service: PhotosService;
   let prismaMock: ReturnType<typeof makePrismaMock>;
+  let aiServiceMock: ReturnType<typeof makeAiServiceMock>;
 
   beforeEach(async () => {
     prismaMock = makePrismaMock();
+    aiServiceMock = makeAiServiceMock();
     metadataMock.mockReset();
     unlinkMock.mockReset();
     unlinkMock.mockResolvedValue(undefined);
+    readFileMock.mockReset();
+    readFileMock.mockResolvedValue(Buffer.from('fake-bytes'));
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [PhotosService, { provide: PrismaService, useValue: prismaMock }],
+      providers: [
+        PhotosService,
+        { provide: PrismaService, useValue: prismaMock },
+        { provide: AiService, useValue: aiServiceMock },
+      ],
     }).compile();
 
     service = module.get<PhotosService>(PhotosService);
@@ -174,6 +191,64 @@ describe('PhotosService', () => {
       await service.savePhoto(file);
 
       expect(unlinkMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
+  // savePhoto — AI analysis (?analyze=true, EVT-7 AC 2)
+  // =========================================================================
+
+  describe('savePhoto — AI analysis', () => {
+    it('does NOT call AiService and persists aiAnalysis as null when analyze is not requested', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'uuid.png' });
+
+      await service.savePhoto(makeFile());
+
+      expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
+      expect(prismaMock.photo.create).toHaveBeenCalledWith({
+        data: {
+          filename: 'uuid-generated.png',
+          mimeType: 'image/png',
+          sizeBytes: 2048,
+          width: 640,
+          height: 480,
+        },
+      });
+    });
+
+    it('runs AiService.analyzePhoto and persists the result to aiAnalysis when analyze is true', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      const analysis = { suggested_name: 'Cordless Drill', tags: ['power-tools'] };
+      aiServiceMock.analyzePhoto.mockResolvedValue(analysis);
+      prismaMock.photo.create.mockResolvedValue({
+        id: PHOTO_ID,
+        filename: 'uuid.png',
+        aiAnalysis: analysis,
+      });
+
+      const file = makeFile();
+      const result = await service.savePhoto(file, undefined, true);
+
+      const buffer = await readFileMock.mock.results[0].value;
+      expect(readFileMock).toHaveBeenCalledWith(file.path);
+      expect(aiServiceMock.analyzePhoto).toHaveBeenCalledWith(buffer, file.mimetype);
+      expect(prismaMock.photo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ aiAnalysis: analysis }) }),
+      );
+      expect(result.aiAnalysis).toEqual(analysis);
+    });
+
+    it('persists the stub analysis returned by AiService when no key is configured', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      aiServiceMock.analyzePhoto.mockResolvedValue(STUB_ANALYSIS);
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'uuid.png' });
+
+      await service.savePhoto(makeFile(), undefined, true);
+
+      expect(prismaMock.photo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ aiAnalysis: STUB_ANALYSIS }) }),
+      );
     });
   });
 

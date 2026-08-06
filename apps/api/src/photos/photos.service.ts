@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { mkdirSync } from 'fs';
-import { unlink } from 'fs/promises';
+import { readFile, unlink } from 'fs/promises';
 import * as path from 'path';
 import sharp from 'sharp';
+import { AiService } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 // ---------------------------------------------------------------------------
@@ -99,7 +100,12 @@ export interface UploadedPhotoFile {
 
 @Injectable()
 export class PhotosService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(PhotosService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly aiService: AiService,
+  ) {}
 
   // -------------------------------------------------------------------------
   // savePhoto — POST /api/photos/upload
@@ -112,15 +118,26 @@ export class PhotosService {
    * reliably validate (jpeg/png/webp) a decode failure or format mismatch
    * *rejects* the upload (see `readDimensions`), since `fileFilter` only
    * checked the client-supplied `Content-Type` header, not the actual
-   * bytes. `aiAnalysis` is always `null`; EVT-7 fills it in.
+   * bytes.
+   *
+   * When `analyze` is true, runs Claude vision analysis (`AiService`) and
+   * persists the raw structured result to `Photo.aiAnalysis`; otherwise
+   * `aiAnalysis` stays `null`. `AiService.analyzePhoto` never throws (it
+   * degrades to a stub on any failure), so analysis never blocks an
+   * otherwise-valid upload.
    *
    * On any failure past this point — decode rejection or a DB error — the
    * file Multer already wrote to `STORAGE_DIR` is unlinked so rejected /
    * failed uploads don't accumulate as orphaned disk usage.
    */
-  async savePhoto(file: UploadedPhotoFile, itemId?: string) {
+  async savePhoto(file: UploadedPhotoFile, itemId?: string, analyze = false) {
     try {
       const { width, height } = await this.readDimensions(file.path, file.mimetype);
+      // undefined (not null) when `analyze` is false, so the `data` object
+      // below omits the key entirely and the column keeps its schema
+      // default (null) — matching the shape callers/tests rely on when
+      // analysis wasn't requested.
+      const aiAnalysis = analyze ? await this.analyzePhoto(file) : undefined;
       const photo = await this.prisma.photo.create({
         data: {
           filename: file.filename,
@@ -128,6 +145,9 @@ export class PhotosService {
           sizeBytes: file.size,
           width,
           height,
+          ...(aiAnalysis !== undefined && {
+            aiAnalysis: aiAnalysis as unknown as Prisma.InputJsonValue,
+          }),
           ...(itemId && { itemId }),
         },
       });
@@ -159,6 +179,20 @@ export class PhotosService {
 
   private withUrl<T extends { filename: string }>(photo: T): T & { url: string } {
     return { ...photo, url: publicUrlFor(photo.filename) };
+  }
+
+  /**
+   * Reads the file Multer already wrote to disk and runs Claude vision
+   * analysis on it. `AiService.analyzePhoto` never throws (it degrades to
+   * a stub on any internal failure); a `readFile` failure here is the only
+   * way this can reject, which propagates to the same catch in
+   * `savePhoto` that unlinks the file — appropriate, since something is
+   * already wrong with the file on disk at that point.
+   */
+  private async analyzePhoto(file: UploadedPhotoFile) {
+    const buffer = await readFile(file.path);
+    this.logger.log(`Running AI analysis for ${file.filename}`);
+    return this.aiService.analyzePhoto(buffer, file.mimetype);
   }
 
   /**

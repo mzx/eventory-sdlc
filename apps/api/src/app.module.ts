@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AiModule } from './ai/ai.module';
 import { CategoriesModule } from './categories/categories.module';
 import { DbModule } from './db/db.module';
 import { HealthModule } from './health/health.module';
@@ -21,6 +22,7 @@ import { TagsModule } from './tags/tags.module';
     CategoriesModule,
     ItemsModule,
     QrModule,
+    AiModule,
     PhotosModule,
   ],
 })

@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UploadedFile,
   UseFilters,
   UseInterceptors,
@@ -39,8 +40,10 @@ export class PhotosController {
    * immediately). Accepts jpeg/png/webp/heic up to 20 MB.
    * - Wrong mimetype → 415.
    * - Oversized (>20 MB) → 400.
-   * - `?analyze=true` is accepted but ignored — `aiAnalysis` is always
-   *   `null` for now; EVT-7 fills it in.
+   * - `?analyze=true` runs Claude vision analysis and persists the raw
+   *   result to `Photo.aiAnalysis` (see `AiService.analyzePhoto`). Without
+   *   the flag `aiAnalysis` stays `null`. The result is a DRAFT for the
+   *   intake form — nothing is auto-created from it.
    *
    * Returns the Photo row plus a public `url` the file is served at.
    */
@@ -48,14 +51,15 @@ export class PhotosController {
   @HttpCode(HttpStatus.CREATED)
   @UseFilters(PayloadTooLargeFilter)
   @UseInterceptors(FileInterceptor('file', photoUploadMulterOptions))
-  upload(@UploadedFile() file: Express.Multer.File, @Body() body: UploadPhotoDto) {
+  upload(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() body: UploadPhotoDto,
+    @Query('analyze') analyze?: string,
+  ) {
     if (!file) {
       throw new BadRequestException('file is required');
     }
-    // aiAnalysis is null on the created row by default (see Photo schema) —
-    // the `?analyze` query param is accepted (no DTO error) but has no
-    // effect yet; EVT-7 wires up the actual analysis.
-    return this.photosService.savePhoto(file, body.itemId);
+    return this.photosService.savePhoto(file, body.itemId, analyze === 'true');
   }
 
   /** GET /api/photos/:id — metadata row. 404 when not found. */
