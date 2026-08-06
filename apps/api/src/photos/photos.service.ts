@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { mkdirSync } from 'fs';
-import { unlink } from 'fs/promises';
+import { readFile, unlink } from 'fs/promises';
 import * as path from 'path';
 import sharp from 'sharp';
+import { AiAnalysisResult, AiService, stubAnalysis } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,20 @@ export const STORAGE_URL_PREFIX = '/storage';
 
 /** Max accepted upload size: 20 MB. */
 export const MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Max file size, in bytes, eligible for `?analyze=true` Claude vision
+ * analysis — independent of and stricter than `MAX_UPLOAD_SIZE_BYTES`.
+ *
+ * A file at the 20 MB upload ceiling would base64-encode to ~27 MB
+ * (base64 is ~4/3 the input size), and Anthropic rejects base64 image
+ * payloads above ~5 MB anyway. Enforcing this ceiling *before* reading the
+ * file into memory / encoding it avoids paying that cost (and, combined
+ * with finding 1's throttling, narrows the cost-amplification surface of
+ * an unauthenticated `?analyze=true` caller) for a request that would fail
+ * regardless (EVT-7 review round 2, finding 3).
+ */
+export const MAX_ANALYSIS_SIZE_BYTES = 5 * 1024 * 1024;
 
 /** Accepted photo MIME types (jpeg/png/webp/heic per EVT-6 scope). */
 export const ALLOWED_PHOTO_MIME_TYPES = new Set([
@@ -99,7 +114,12 @@ export interface UploadedPhotoFile {
 
 @Injectable()
 export class PhotosService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(PhotosService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly aiService: AiService,
+  ) {}
 
   // -------------------------------------------------------------------------
   // savePhoto — POST /api/photos/upload
@@ -112,15 +132,38 @@ export class PhotosService {
    * reliably validate (jpeg/png/webp) a decode failure or format mismatch
    * *rejects* the upload (see `readDimensions`), since `fileFilter` only
    * checked the client-supplied `Content-Type` header, not the actual
-   * bytes. `aiAnalysis` is always `null`; EVT-7 fills it in.
+   * bytes.
+   *
+   * When `analyze` is true, runs Claude vision analysis (`AiService`) and
+   * persists the raw structured result to `Photo.aiAnalysis`; otherwise
+   * `aiAnalysis` stays `null`. `AiService.analyzePhoto` never throws (it
+   * degrades to a stub on any failure), so analysis never blocks an
+   * otherwise-valid upload.
    *
    * On any failure past this point — decode rejection or a DB error — the
    * file Multer already wrote to `STORAGE_DIR` is unlinked so rejected /
    * failed uploads don't accumulate as orphaned disk usage.
    */
-  async savePhoto(file: UploadedPhotoFile, itemId?: string) {
+  async savePhoto(file: UploadedPhotoFile, itemId?: string, analyze = false) {
     try {
       const { width, height } = await this.readDimensions(file.path, file.mimetype);
+      // Pre-validate itemId before paying for a billed AI call —
+      // `photo.create`'s own FK-violation handling below (P2003 → 400)
+      // remains the source of truth for the final persisted row; this is a
+      // cheap short-circuit for the case this task actually cares about:
+      // `analyze=true` previously ran the vision call before Prisma ever
+      // got a chance to reject an invalid FK (EVT-7 review round 2,
+      // finding 5). Skipped when `analyze` is false since there's no
+      // billed call to protect and `photo.create` already validates the FK
+      // for free in that path.
+      if (analyze && itemId) {
+        await this.assertItemExists(itemId);
+      }
+      // undefined (not null) when `analyze` is false, so the `data` object
+      // below omits the key entirely and the column keeps its schema
+      // default (null) — matching the shape callers/tests rely on when
+      // analysis wasn't requested.
+      const aiAnalysis = analyze ? await this.analyzePhoto(file) : undefined;
       const photo = await this.prisma.photo.create({
         data: {
           filename: file.filename,
@@ -128,6 +171,9 @@ export class PhotosService {
           sizeBytes: file.size,
           width,
           height,
+          ...(aiAnalysis !== undefined && {
+            aiAnalysis: aiAnalysis as unknown as Prisma.InputJsonValue,
+          }),
           ...(itemId && { itemId }),
         },
       });
@@ -159,6 +205,45 @@ export class PhotosService {
 
   private withUrl<T extends { filename: string }>(photo: T): T & { url: string } {
     return { ...photo, url: publicUrlFor(photo.filename) };
+  }
+
+  /**
+   * Reads the file Multer already wrote to disk and runs Claude vision
+   * analysis on it. `AiService.analyzePhoto` never throws (it degrades to
+   * a stub on any internal failure); a `readFile` failure here is the only
+   * way this can reject, which propagates to the same catch in
+   * `savePhoto` that unlinks the file — appropriate, since something is
+   * already wrong with the file on disk at that point.
+   *
+   * Files over `MAX_ANALYSIS_SIZE_BYTES` skip analysis entirely — no
+   * `readFile`, no base64 encode, no `AiService` call — and get the same
+   * "not analyzed" stub signal `AiService` returns for an unsupported MIME
+   * type (EVT-7 review round 2, finding 3).
+   */
+  private async analyzePhoto(file: UploadedPhotoFile): Promise<AiAnalysisResult> {
+    if (file.size > MAX_ANALYSIS_SIZE_BYTES) {
+      this.logger.log(
+        `Skipping AI analysis for ${file.filename} (${file.size} bytes exceeds the ${MAX_ANALYSIS_SIZE_BYTES}-byte analysis ceiling) — returning stub`,
+      );
+      return stubAnalysis('oversized');
+    }
+    const buffer = await readFile(file.path);
+    this.logger.log(`Running AI analysis for ${file.filename}`);
+    return this.aiService.analyzePhoto(buffer, file.mimetype);
+  }
+
+  /**
+   * Cheap `itemId` FK pre-check invoked only from the `analyze && itemId`
+   * branch of `savePhoto` — see the call site for why.
+   */
+  private async assertItemExists(itemId: string): Promise<void> {
+    const item = await this.prisma.item.findUnique({
+      where: { id: itemId },
+      select: { id: true },
+    });
+    if (!item) {
+      throw new BadRequestException(`Item ${itemId} not found`);
+    }
   }
 
   /**

@@ -1,6 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { AiModule } from './ai/ai.module';
 import { CategoriesModule } from './categories/categories.module';
+import { globalThrottlerConfig } from './common/throttle.config';
 import { DbModule } from './db/db.module';
 import { HealthModule } from './health/health.module';
 import { ItemsModule } from './items/items.module';
@@ -13,6 +17,10 @@ import { TagsModule } from './tags/tags.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Global per-IP rate limiting (EVT-7 review round 2, finding 1) — see
+    // `common/throttle.config.ts` for the env-tunable defaults and the
+    // stricter per-route override applied to `POST /api/photos/upload`.
+    ThrottlerModule.forRoot(globalThrottlerConfig()),
     DbModule,
     PrismaModule,
     HealthModule,
@@ -21,7 +29,9 @@ import { TagsModule } from './tags/tags.module';
     CategoriesModule,
     ItemsModule,
     QrModule,
+    AiModule,
     PhotosModule,
   ],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}
