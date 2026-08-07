@@ -134,7 +134,12 @@ export function EditItemPage() {
     mutationFn: (file: File) => uploadPhoto(file, id as string),
     onSuccess: () => {
       setPhotoActionError(null);
-      queryClient.invalidateQueries({ queryKey: ['items', id] });
+      // Invalidate the broader `['items']` prefix (not just `['items', id]`)
+      // so the items LIST — which renders thumbnails from `primaryPhoto` and
+      // is keyed as `['items', { search, tag }]` on ItemsPage — picks up a
+      // newly auto-promoted primary photo (EVT-24 AC1) without a full
+      // reload, matching setPrimaryMutation/removePhotoMutation below.
+      queryClient.invalidateQueries({ queryKey: ['items'] });
     },
     onError: (error: unknown) => handlePhotoActionError(error, 'Failed to upload photo'),
   });
