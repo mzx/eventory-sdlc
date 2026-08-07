@@ -34,6 +34,8 @@ COPY --from=build /workspace/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /workspace/apps/api/dist ./apps/api/dist
 COPY --from=build /workspace/apps/api/prisma ./apps/api/prisma
 COPY --from=build /workspace/apps/api/package.json ./apps/api/package.json
+# Plain JS, no build step needed — used by the docker-compose healthcheck.
+COPY apps/api/healthcheck.js ./apps/api/healthcheck.js
 WORKDIR /workspace/apps/api
 EXPOSE 3001
 # pnpm's symlinked node_modules can trip `npx`; invoke the workspace-local

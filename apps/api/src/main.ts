@@ -4,11 +4,19 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { allowedCorsOrigins, corsOriginValidator } from './common/cors.config';
+import { resolveHttpsOptions } from './common/https-options';
 import { configureTrustProxy } from './common/trust-proxy.config';
 import { STORAGE_DIR, STORAGE_URL_PREFIX } from './photos/photos.service';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // HTTPS via mkcert when apps/api/certs/{cert,key}.pem exist (EVT-18) —
+  // phone cameras and the Google OAuth redirect (EVT-14) need a secure
+  // origin. Falls back to plain HTTP when the certs are absent, so CI and
+  // fresh clones without mkcert still boot. See README.md.
+  const httpsOptions = resolveHttpsOptions();
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    httpsOptions,
+  });
   // Must run before enableCors/ValidationPipe/etc — @nestjs/throttler reads
   // req.ip on every guarded request, and behind Caddy that's meaningless
   // without this (EVT-19 review round 2, finding 2; see trust-proxy.config.ts).
