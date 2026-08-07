@@ -1,0 +1,45 @@
+# Eventory production reverse proxy (EVT-19).
+#
+# Caddy is the single public entrypoint: it terminates TLS, serves the built
+# SPA as static files with an index.html fallback (so a hard-refresh on a
+# client-side route like /items/123 still resolves — AC2), and reverse
+# proxies /api/* and /storage/* to the api service same-origin. Same-origin
+# means the browser never needs CORS for normal traffic; the api's CORS
+# allow-list (WEB_BASE) exists as a defense-in-depth backstop, not the
+# primary mechanism.
+#
+# SITE_ADDRESS defaults to `localhost`, which gets a self-signed cert from
+# Caddy's internal CA (AC1) — browsers will show a trust warning until you
+# install that CA locally, which is expected for a bare `docker compose up`.
+# For a real deployment: set SITE_ADDRESS (see .env.prod.example) to your
+# public domain and delete the `tls internal` line below — Caddy then
+# provisions a real Let's Encrypt certificate automatically, no other
+# changes needed.
+
+{$SITE_ADDRESS:localhost} {
+	tls internal
+
+	encode gzip
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy api:3001
+	}
+
+	@storage path /storage/*
+	handle @storage {
+		reverse_proxy api:3001
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Plain-HTTP requests (port 80) redirect to HTTPS instead of failing outright
+# — useful when a client lands on http://<domain> by habit.
+http://{$SITE_ADDRESS:localhost} {
+	redir https://{host}{uri} permanent
+}
