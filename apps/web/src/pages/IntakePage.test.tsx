@@ -48,9 +48,19 @@ function mockDirectories() {
   vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
 }
 
-function getFileInput(): HTMLInputElement {
-  return document.querySelector('input[type="file"]') as HTMLInputElement;
+/** The camera-capture input — the only one carrying `capture="environment"`. */
+function getCameraInput(): HTMLInputElement {
+  return document.querySelector('input[type="file"][capture]') as HTMLInputElement;
 }
+
+/** The gallery/file-picker input — deliberately WITHOUT the `capture` attribute. */
+function getGalleryInput(): HTMLInputElement {
+  return document.querySelector('input[type="file"]:not([capture])') as HTMLInputElement;
+}
+
+// Existing tests exercise the camera-capture input by default; it is
+// functionally identical to `getCameraInput()`.
+const getFileInput = getCameraInput;
 
 describe('IntakePage', () => {
   afterEach(() => {
@@ -218,5 +228,68 @@ describe('IntakePage', () => {
         expect.objectContaining({ name: 'Hand-entered widget', photoIds: undefined }),
       ),
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC 1 / AC 5 — the capture input still forces the rear camera on mobile.
+  // ---------------------------------------------------------------------------
+  it('AC1/AC5: the camera-capture input carries capture="environment"', async () => {
+    mockDirectories();
+    renderIntakePage();
+
+    expect(getCameraInput()).toHaveAttribute('capture', 'environment');
+    expect(getGalleryInput()).not.toHaveAttribute('capture');
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC 2 / AC 5 — choosing a file via the non-capture "Choose image" input
+  // triggers the identical upload + AI-draft pipeline as camera capture.
+  // ---------------------------------------------------------------------------
+  it('AC2/AC5: choosing an existing image via the gallery input uploads and prefills the draft', async () => {
+    mockDirectories();
+    const uploadMock = vi
+      .spyOn(api, 'uploadPhoto')
+      .mockResolvedValue(uploaded({ aiAnalysis: STUB_ANALYSIS }));
+    const createMock = vi.spyOn(api, 'createItem').mockResolvedValue({
+      id: 'item-5',
+    } as api.ItemDetail);
+
+    renderIntakePage();
+
+    const file = new File(['bytes'], 'existing-photo.jpg', { type: 'image/jpeg' });
+    await userEvent.upload(getGalleryInput(), file);
+
+    expect(await screen.findByLabelText('Name')).toHaveValue('Unknown item');
+    expect(uploadMock).toHaveBeenCalledTimes(1);
+    expect(uploadMock).toHaveBeenCalledWith(file, undefined, true);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(createMock).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'Unknown item', photoIds: ['photo-1'] }),
+      ),
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC 6 — a rejected selection (e.g. non-image / oversized, rejected by the
+  // server) surfaces the existing error UI rather than a blank state, for
+  // both the camera and gallery inputs.
+  // ---------------------------------------------------------------------------
+  it('AC6: a failed upload via the gallery input surfaces the error alert, not a blank state', async () => {
+    mockDirectories();
+    vi.spyOn(api, 'uploadPhoto').mockRejectedValue(
+      new Error('Photo upload failed with status 413'),
+    );
+
+    renderIntakePage();
+
+    const file = new File(['bytes'], 'too-big.jpg', { type: 'image/jpeg' });
+    await userEvent.upload(getGalleryInput(), file);
+
+    expect(await screen.findByText('Photo upload failed with status 413')).toBeInTheDocument();
+    // Still on the photo step — not a blank state.
+    expect(screen.getByRole('button', { name: /choose/i })).toBeInTheDocument();
   });
 });

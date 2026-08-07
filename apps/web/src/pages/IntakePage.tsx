@@ -1,4 +1,5 @@
 import AddIcon from '@mui/icons-material/Add';
+import CollectionsOutlinedIcon from '@mui/icons-material/CollectionsOutlined';
 import PhotoCameraOutlinedIcon from '@mui/icons-material/PhotoCameraOutlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
 import {
@@ -19,7 +20,7 @@ import {
   type SelectChangeEvent,
 } from '@mui/material';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   createItem,
@@ -82,7 +83,8 @@ export function IntakePage() {
   const [uploadedPhoto, setUploadedPhoto] = useState<UploadedPhoto | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [aiDraftApplied, setAiDraftApplied] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -194,6 +196,21 @@ export function IntakePage() {
     },
   });
 
+  /**
+   * Shared handler for both the "Take photo" (camera capture) and "Choose
+   * image" (gallery/file picker) inputs — an existing image flows through
+   * the identical upload → AI draft → confirm pipeline as a captured one,
+   * with no separate code path beyond acquisition (AC 2).
+   */
+  function handleFileSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setUploadError(null);
+    setPreviewUrl(typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : null);
+    uploadMutation.mutate(file);
+  }
+
   function skipPhoto() {
     setUploadedPhoto(null);
     setUploadError(null);
@@ -251,32 +268,43 @@ export function IntakePage() {
 
         {uploadError && <Alert severity="error">{uploadError}</Alert>}
 
+        {/* Camera capture — forces the rear camera on mobile via `capture`. */}
         <input
-          ref={fileInputRef}
+          ref={cameraInputRef}
           type="file"
           accept="image/*"
           capture="environment"
           hidden
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            e.target.value = '';
-            if (!file) return;
-            setUploadError(null);
-            setPreviewUrl(
-              typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : null,
-            );
-            uploadMutation.mutate(file);
-          }}
+          onChange={handleFileSelected}
+        />
+
+        {/* Gallery/file picker — no `capture` attribute, so mobile browsers
+            offer the photo library / file system instead of forcing the
+            camera (AC 1). Feeds the identical upload pipeline (AC 2). */}
+        <input
+          ref={galleryInputRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={handleFileSelected}
         />
 
         <Stack direction="row" spacing={2}>
           <Button
             variant="contained"
             startIcon={<PhotoCameraOutlinedIcon />}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => cameraInputRef.current?.click()}
             disabled={uploadMutation.isPending}
           >
             {previewUrl ? 'Retake photo' : 'Take photo'}
+          </Button>
+          <Button
+            variant="outlined"
+            startIcon={<CollectionsOutlinedIcon />}
+            onClick={() => galleryInputRef.current?.click()}
+            disabled={uploadMutation.isPending}
+          >
+            {previewUrl ? 'Choose different image' : 'Choose image'}
           </Button>
           <Button onClick={skipPhoto} disabled={uploadMutation.isPending}>
             Skip photo
