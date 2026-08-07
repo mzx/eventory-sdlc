@@ -29,5 +29,10 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     css: true,
+    // The userEvent-driven MUI form tests (EditItemPage in particular) take
+    // 300-800ms each locally under `--coverage`; on shared CI runners the
+    // v8-instrumentation slowdown pushes them past vitest's 5000ms default.
+    testTimeout: 20000,
+    hookTimeout: 20000,
   },
 });

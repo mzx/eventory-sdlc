@@ -485,6 +485,62 @@ export async function fetchCategories(): Promise<CategoryListItem[]> {
 }
 
 // ---------------------------------------------------------------------------
+// QR scan resolution (EVT-13)
+// ---------------------------------------------------------------------------
+
+/** `GET /api/items/by-qr/:qr` resolves a scanned token to whichever entity
+ * it belongs to (see apps/api ItemsService.findByQr — item lookup carries
+ * the item table's own `by-qr` route; there is no separate location-scoped
+ * client call since the single endpoint checks both tables). */
+export interface ByQrItemResult {
+  kind: 'item';
+  item: ItemDetail;
+}
+
+export interface ByQrLocationResult {
+  kind: 'location';
+  location: {
+    id: string;
+    name: string;
+    path: string;
+    parentId: string | null;
+    notes: string | null;
+  };
+}
+
+export type ByQrResult = ByQrItemResult | ByQrLocationResult;
+
+/** Thrown by `fetchByQr` when the token matches neither an item nor a
+ * location (404) — distinct from other request failures so `ScanPage` can
+ * show a friendly "Unknown code" screen instead of a generic error. */
+export class QrLookupNotFoundError extends Error {
+  constructor(token: string) {
+    super(`No item or location found for QR token: ${token}`);
+    this.name = 'QrLookupNotFoundError';
+  }
+}
+
+/**
+ * GET /api/items/by-qr/:token
+ *
+ * Deliberately bypasses the shared `request()` helper so a 404 can be
+ * translated into `QrLookupNotFoundError` rather than a generic status-code
+ * message.
+ */
+export async function fetchByQr(token: string): Promise<ByQrResult> {
+  const response = await fetch(`${API_BASE}/items/by-qr/${encodeURIComponent(token)}`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (response.status === 404) {
+    throw new QrLookupNotFoundError(token);
+  }
+  if (!response.ok) {
+    throw new Error(`Request to /items/by-qr/${token} failed with status ${response.status}`);
+  }
+  return (await response.json()) as ByQrResult;
+}
+
+// ---------------------------------------------------------------------------
 // photos (EVT-6)
 // ---------------------------------------------------------------------------
 
