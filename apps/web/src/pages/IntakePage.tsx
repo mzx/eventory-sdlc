@@ -19,7 +19,7 @@ import {
   type SelectChangeEvent,
 } from '@mui/material';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   createItem,
@@ -89,13 +89,42 @@ export function IntakePage() {
   const [quantity, setQuantity] = useState(1);
   const [unit, setUnit] = useState('');
   const [tags, setTags] = useState<string[]>([]);
-  const [locationId, setLocationId] = useState(preselectedLocationId);
+  // Not seeded from `preselectedLocationId` directly — a crafted `?locationId=`
+  // for a location that doesn't exist (or that this user can't see) must not
+  // be silently submitted (MUI Select renders blank for unknown values, so
+  // the user has no visual cue). Seeded only once `locationsQuery` resolves
+  // and the id validates, via the effect below.
+  const [locationId, setLocationId] = useState('');
+  const [locationSeeded, setLocationSeeded] = useState(false);
   const [categoryId, setCategoryId] = useState('');
   const [properties, setProperties] = useState<PropertyRow[]>([]);
 
   const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: fetchTags });
   const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: fetchCategories });
+
+  // Revoke the previous preview object URL whenever it changes (retake) and
+  // on unmount, so we don't leak blob URLs for every photo taken.
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  // Seed `locationId` from `?locationId=` exactly once, and only if it
+  // matches a location the user actually has access to.
+  useEffect(() => {
+    if (locationSeeded) return;
+    if (!preselectedLocationId) {
+      setLocationSeeded(true);
+      return;
+    }
+    if (!locationsQuery.data) return; // wait for locations to load
+    if (locationsQuery.data.some((l) => l.id === preselectedLocationId)) {
+      setLocationId(preselectedLocationId);
+    }
+    setLocationSeeded(true);
+  }, [locationSeeded, preselectedLocationId, locationsQuery.data]);
 
   /**
    * Prefills the form from an AI draft: `suggested_name` → name, `color`
