@@ -32,13 +32,14 @@ const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
   ...overrides,
 });
 
-function renderDetailPage(id = 'item-1') {
+function renderDetailPage(id = 'item-1', options: { state?: { justCreated?: boolean } } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[`/items/${id}`]}>
+      <MemoryRouter initialEntries={[{ pathname: `/items/${id}`, state: options.state }]}>
         <Routes>
           <Route path="/items/:id" element={<ItemDetailPage />} />
+          <Route path="/items/:id/print" element={<div>print page</div>} />
           <Route path="/" element={<div>items list</div>} />
         </Routes>
       </MemoryRouter>
@@ -150,5 +151,30 @@ describe('ItemDetailPage', () => {
 
     await waitFor(() => expect(deleteMock).toHaveBeenCalledWith('item-1'));
     expect(await screen.findByText('items list')).toBeInTheDocument();
+  });
+
+  it('shows the "Print QR" toast when navigated here with justCreated state, and navigates to the print route on click', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderDetailPage('item-1', { state: { justCreated: true } });
+
+    await screen.findByText('Cordless drill');
+    expect(await screen.findByText('Item saved')).toBeInTheDocument();
+    const printButton = screen.getByRole('button', { name: 'Print QR' });
+
+    await user.click(printButton);
+
+    expect(await screen.findByText('print page')).toBeInTheDocument();
+  });
+
+  it('does not show the "Print QR" toast without justCreated navigation state', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+
+    renderDetailPage('item-1');
+
+    await screen.findByText('Cordless drill');
+    expect(screen.queryByText('Item saved')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Print QR' })).not.toBeInTheDocument();
   });
 });

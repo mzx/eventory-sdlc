@@ -14,6 +14,7 @@ import {
   DialogContentText,
   DialogTitle,
   Divider,
+  Snackbar,
   Stack,
   Table,
   TableBody,
@@ -23,7 +24,7 @@ import {
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { deleteItem, fetchItem, photoUrl, type ItemDetail, type PhotoRef } from '../api';
 import { QrThumb } from '../components/QrThumb';
 
@@ -39,9 +40,16 @@ function orderedGallery(item: ItemDetail): PhotoRef[] {
 export function ItemDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Set by IntakePage's `navigate(..., { state: { justCreated: true } })`
+  // after saving a new item — surfaces a "Print QR" shortcut so the user
+  // doesn't have to hunt for the sticker after the signature intake flow.
+  const [justCreatedToastOpen, setJustCreatedToastOpen] = useState(
+    Boolean((location.state as { justCreated?: boolean } | null)?.justCreated),
+  );
 
   const itemQuery = useQuery({
     queryKey: ['items', id],
@@ -246,6 +254,25 @@ export function ItemDetailPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Snackbar
+        open={justCreatedToastOpen}
+        autoHideDuration={6000}
+        onClose={() => setJustCreatedToastOpen(false)}
+        message="Item saved"
+        action={
+          <Button
+            color="inherit"
+            size="small"
+            onClick={() => {
+              setJustCreatedToastOpen(false);
+              navigate(`/items/${item.id}/print`);
+            }}
+          >
+            Print QR
+          </Button>
+        }
+      />
     </Stack>
   );
 }

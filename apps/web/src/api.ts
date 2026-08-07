@@ -176,6 +176,29 @@ export async function fetchItem(id: string): Promise<ItemDetail> {
   return request<ItemDetail>(`/items/${encodeURIComponent(id)}`);
 }
 
+/**
+ * POST /api/items input (see apps/api CreateItemDto). `photoIds`, when
+ * present, are attached to the new item and its first entry becomes the
+ * primary photo — this is how the intake flow (EVT-11) links the freshly
+ * uploaded photo.
+ */
+export interface CreateItemInput {
+  name: string;
+  description?: string;
+  quantity?: number;
+  unit?: string;
+  properties?: Record<string, unknown>;
+  locationId?: string;
+  categoryId?: string;
+  tags?: string[];
+  photoIds?: string[];
+}
+
+/** POST /api/items */
+export async function createItem(input: CreateItemInput): Promise<ItemDetail> {
+  return request<ItemDetail>('/items', { method: 'POST', body: JSON.stringify(input) });
+}
+
 // ---------------------------------------------------------------------------
 // search-by-photo (EVT-17)
 // ---------------------------------------------------------------------------
@@ -547,20 +570,38 @@ export async function fetchByQr(token: string): Promise<ByQrResult> {
 export interface UploadedPhoto extends PhotoRef {
   url: string;
   itemId?: string | null;
+  /**
+   * Present only when the upload was made with `analyze=true` (see
+   * `uploadPhoto`'s `analyze` param). Never `null` when present — the
+   * server always returns a result (real or stub), never a bare failure —
+   * but stays optional here since a plain (non-analyzed) upload omits the
+   * field entirely.
+   */
+  aiAnalysis?: PhotoSearchAnalysis;
 }
 
 /**
- * POST /api/photos/upload — multipart upload, optionally linked to an item.
+ * POST /api/photos/upload — multipart upload, optionally linked to an item
+ * and optionally analyzed (`analyze=true` runs Claude vision analysis
+ * server-side and returns the draft in `aiAnalysis`; see EVT-7/EVT-11).
  *
  * Deliberately bypasses the shared `request()` helper: that helper always
  * sends `Content-Type: application/json`, which would omit the multipart
  * boundary the browser needs to generate for a `FormData` body.
  */
-export async function uploadPhoto(file: File, itemId?: string): Promise<UploadedPhoto> {
+export async function uploadPhoto(
+  file: File,
+  itemId?: string,
+  analyze?: boolean,
+): Promise<UploadedPhoto> {
   const form = new FormData();
   form.append('file', file);
   if (itemId) form.append('itemId', itemId);
-  const response = await fetch(`${API_BASE}/photos/upload`, { method: 'POST', body: form });
+  const suffix = analyze ? '?analyze=true' : '';
+  const response = await fetch(`${API_BASE}/photos/upload${suffix}`, {
+    method: 'POST',
+    body: form,
+  });
   notifyIfAuthFailure(response.status);
   if (!response.ok) {
     throw new Error(`Photo upload failed with status ${response.status}`);
