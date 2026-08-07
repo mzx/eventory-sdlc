@@ -167,7 +167,7 @@ export function ItemsPage() {
         </Alert>
       )}
 
-      {!isPhotoSearchActive && tags.length > 0 && (
+      {!isPhotoSearchActive && (tags.length > 0 || hasActiveFilters) && (
         <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
           {hasActiveFilters && (
             <Chip
