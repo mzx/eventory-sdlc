@@ -1,4 +1,5 @@
 import AddPhotoAlternateOutlinedIcon from '@mui/icons-material/AddPhotoAlternateOutlined';
+import ClearIcon from '@mui/icons-material/Clear';
 import PhotoCameraOutlinedIcon from '@mui/icons-material/PhotoCameraOutlined';
 import SearchIcon from '@mui/icons-material/Search';
 import {
@@ -166,8 +167,20 @@ export function ItemsPage() {
         </Alert>
       )}
 
-      {!isPhotoSearchActive && tags.length > 0 && (
+      {!isPhotoSearchActive && (tags.length > 0 || hasActiveFilters) && (
         <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+          {hasActiveFilters && (
+            <Chip
+              label="Clear filters"
+              icon={<ClearIcon fontSize="small" />}
+              color="error"
+              variant="outlined"
+              onClick={() => {
+                setSearch('');
+                setActiveTag(null);
+              }}
+            />
+          )}
           {tags.map((tag) => (
             <Chip
               key={tag.id}
@@ -177,15 +190,6 @@ export function ItemsPage() {
               variant={activeTag === tag.name ? 'filled' : 'outlined'}
             />
           ))}
-          {hasActiveFilters && (
-            <Chip
-              label="Clear filters"
-              onClick={() => {
-                setSearch('');
-                setActiveTag(null);
-              }}
-            />
-          )}
         </Stack>
       )}
 
