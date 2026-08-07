@@ -31,11 +31,17 @@ services:
       - '3001:3001'
     volumes:
       - eventory-photo-storage:/workspace/apps/api/storage
+      # mkcert dev certs (EVT-18) — bind-mounted read-only so the container
+      # sees whatever the operator generated on the host at apps/api/certs/.
+      # Absent/empty on a fresh clone → API falls back to plain HTTP.
+      - ./apps/api/certs:/workspace/apps/api/certs:ro
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: ['CMD-SHELL', 'node -e "require(''http'').get(''http://localhost:3001/api/health'',r=>process.exit(r.statusCode===200?0:1)).on(''error'',()=>process.exit(1))"']
+      # Probes https first, falls back to http — the API serves whichever
+      # protocol matches cert presence (see apps/api/healthcheck.js, EVT-18).
+      test: ['CMD-SHELL', 'node healthcheck.js']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -46,10 +52,26 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     restart: unless-stopped
-    environment:
-      VITE_API_PROXY_TARGET: http://api:3001
+    # No VITE_API_PROXY_TARGET here on purpose (EVT-18 review): the api
+    # container boots HTTPS-only whenever apps/api/certs/ has both
+    # cert.pem + key.pem, so a hardcoded http:// target breaks the
+    # /api + /storage dev proxy the moment certs show up. vite.config.ts
+    # (resolveApiProxyTarget) picks http vs https at startup by reading the
+    # API's own certs directory directly (mounted below) — see the
+    # apps/web/certs mount comment. Set VITE_API_PROXY_TARGET here only to
+    # force an explicit override (e.g. a non-Docker API host).
     ports:
       - '5173:5173'
+    volumes:
+      # mkcert dev certs (EVT-18) — see apps/api service above.
+      - ./apps/web/certs:/workspace/apps/web/certs:ro
+      # The API's OWN certs dir, mounted read-only into the web container
+      # too (separately from the api service's own mount above — the two
+      # containers don't otherwise share filesystem state). vite.config.ts
+      # reads this to decide whether the /api + /storage dev proxy should
+      # speak https or http to the api container, since the web side's own
+      # cert presence isn't a reliable signal for the API's protocol.
+      - ./apps/api/certs:/workspace/apps/api/certs:ro
     depends_on:
       api:
         condition: service_started

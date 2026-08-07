@@ -66,8 +66,10 @@ describe('EditItemPage', () => {
 
     renderEditPage();
 
+    // The input can render before the async item fetch seeds the form —
+    // await the seeded value instead of asserting it synchronously.
     const nameInput = await screen.findByLabelText('Name');
-    expect(nameInput).toHaveValue('Cordless drill');
+    await waitFor(() => expect(nameInput).toHaveValue('Cordless drill'), { timeout: 10_000 });
 
     await user.clear(nameInput);
     await user.type(nameInput, 'Impact driver');

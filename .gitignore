@@ -12,6 +12,13 @@ build/
 # Prisma
 apps/api/prisma/generated/
 
+# mkcert dev HTTPS certs (EVT-18) — machine-specific, never commit key material
+apps/web/certs/
+apps/api/certs/
+
+# vite-plugin-pwa dev-mode service worker output (EVT-18)
+apps/web/dev-dist/
+
 # Photo upload storage (EVT-6) — Docker volume in prod, local uploads in dev
 apps/api/storage/*
 !apps/api/storage/.gitkeep
