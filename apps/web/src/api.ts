@@ -20,11 +20,37 @@ export function qrImageUrl(token: string, size?: number): string {
   return `${API_BASE}/qr/${encodeURIComponent(token)}${suffix}`;
 }
 
+// ---------------------------------------------------------------------------
+// auth failure notification (EVT-15)
+//
+// A 401/403 from ANY endpoint means the session expired or was rejected
+// server-side (e.g. an admin demoted/rejected the user mid-session). Rather
+// than every page having to know about auth, `AuthContext` registers a
+// listener here once at boot; every response path below (JSON and
+// multipart) calls it so a stale session lands the user back on LoginPage
+// the moment any request fails, not just on the next `/auth/me` poll.
+// ---------------------------------------------------------------------------
+
+type AuthFailureListener = () => void;
+
+let authFailureListener: AuthFailureListener | null = null;
+
+export function setAuthFailureListener(listener: AuthFailureListener | null): void {
+  authFailureListener = listener;
+}
+
+function notifyIfAuthFailure(status: number): void {
+  if (status === 401 || status === 403) {
+    authFailureListener?.();
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   });
+  notifyIfAuthFailure(response.status);
   if (!response.ok) {
     throw new Error(`Request to ${path} failed with status ${response.status}`);
   }
@@ -191,6 +217,7 @@ export async function searchItemsByPhoto(file: File): Promise<PhotoSearchResult>
     method: 'POST',
     body: formData,
   });
+  notifyIfAuthFailure(response.status);
   if (!response.ok) {
     throw new Error(`Request to /items/search-by-photo failed with status ${response.status}`);
   }
@@ -478,6 +505,7 @@ export async function uploadPhoto(file: File, itemId?: string): Promise<Uploaded
   form.append('file', file);
   if (itemId) form.append('itemId', itemId);
   const response = await fetch(`${API_BASE}/photos/upload`, { method: 'POST', body: form });
+  notifyIfAuthFailure(response.status);
   if (!response.ok) {
     throw new Error(`Photo upload failed with status ${response.status}`);
   }
@@ -487,4 +515,78 @@ export async function uploadPhoto(file: File, itemId?: string): Promise<Uploaded
 /** DELETE /api/photos/:id — removes the photo (row + on-disk file). */
 export async function deletePhoto(id: string): Promise<void> {
   return request<void>(`/photos/${id}`, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
+// auth (EVT-14 / EVT-15)
+// ---------------------------------------------------------------------------
+
+export type UserStatus = 'pending' | 'approved' | 'rejected';
+export type UserRole = 'user' | 'admin';
+
+/** Shape returned by `GET /api/auth/me` (see apps/api PublicUser). */
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  status: UserStatus;
+  role: UserRole;
+  createdAt: string;
+}
+
+/**
+ * GET /api/auth/me — always resolves 200, with a literal JSON `null` body
+ * when signed out. Deliberately does NOT go through `notifyIfAuthFailure`
+ * (this route never returns 401/403, see the API's doc comment on `me()`).
+ */
+export async function fetchCurrentUser(): Promise<AuthUser | null> {
+  return request<AuthUser | null>('/auth/me');
+}
+
+/** Full-page-navigation URL that kicks off the Google OAuth redirect. */
+export function authGoogleUrl(): string {
+  return `${API_BASE}/auth/google`;
+}
+
+/** Full-page-navigation URL that clears the session cookie and redirects home. */
+export function authLogoutUrl(): string {
+  return `${API_BASE}/auth/logout`;
+}
+
+// ---------------------------------------------------------------------------
+// admin users (EVT-15)
+// ---------------------------------------------------------------------------
+
+/** Row shape returned by `GET /api/users` (admin-only; see apps/api UsersService.list). */
+export interface AdminUserRow {
+  id: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  status: UserStatus;
+  role: UserRole;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+/** GET /api/users — admin-only, oldest-first. */
+export async function fetchUsers(): Promise<AdminUserRow[]> {
+  return request<AdminUserRow[]>('/users');
+}
+
+/** PATCH /api/users/:id/status — approve/reject/re-pend a user. */
+export async function updateUserStatus(id: string, status: UserStatus): Promise<AdminUserRow> {
+  return request<AdminUserRow>(`/users/${encodeURIComponent(id)}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  });
+}
+
+/** PATCH /api/users/:id/role — promote/demote a user. */
+export async function updateUserRole(id: string, role: UserRole): Promise<AdminUserRow> {
+  return request<AdminUserRow>(`/users/${encodeURIComponent(id)}/role`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role }),
+  });
 }
