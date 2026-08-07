@@ -19,6 +19,7 @@ apps/api/storage/*
 # Env
 .env
 .env.local
+.env.prod
 apps/api/.env
 apps/web/.env
 

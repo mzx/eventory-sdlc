@@ -1,0 +1,78 @@
+# Production image for the API service (EVT-19).
+#
+# Differs from the dev `Dockerfile` in one important way: the runtime stage
+# here installs dependencies with `--prod`, so devDependencies (typescript,
+# @nestjs/cli, eslint, jest, ts-node, ...) never ship in the image (AC3).
+# `prisma` was moved from devDependencies to dependencies in
+# apps/api/package.json specifically so the CLI survives a `--prod` install
+# — `prisma migrate deploy` runs it at container boot, below.
+#
+# Project is pinned to pnpm 10.x (see root package.json "packageManager"),
+# which supports Node >=18; Node 22 is used here to match the API runtime's
+# minimum supported Node version, not a pnpm requirement.
+FROM node:22-bookworm-slim AS base
+WORKDIR /workspace
+# openssl is needed at build time too: `prisma generate` probes it to pick
+# the query-engine binary target; without it, generation falls back to the
+# openssl-1.1 engine, which the (openssl-3) runtime stage cannot load.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
+
+# Full (dev + prod) dependency install — needed to compile TypeScript.
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json ./apps/api/package.json
+COPY apps/web/package.json ./apps/web/package.json
+RUN pnpm install --frozen-lockfile --filter=@eventory/api...
+
+FROM deps AS build
+COPY apps/api ./apps/api
+RUN pnpm --filter=@eventory/api run build
+
+# Production-only dependency install — excludes devDependencies, so no build
+# tooling ends up in the runtime image (AC3). This is a *separate* install
+# from `deps` above (not a prune of it) because pnpm's `--prod` flag only
+# takes effect at install time.
+FROM base AS prod-deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json ./apps/api/package.json
+COPY apps/web/package.json ./apps/web/package.json
+RUN pnpm install --prod --frozen-lockfile --filter=@eventory/api...
+COPY apps/api/prisma ./apps/api/prisma
+# Regenerate the Prisma client against *this* node_modules tree — the
+# `deps`/`build` stages generated a client into a node_modules that also
+# contains devDependencies, and that tree is never copied into the runtime
+# image below.
+RUN pnpm --filter=@eventory/api exec prisma generate
+
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /workspace
+ENV NODE_ENV=production
+# Prisma's schema-engine binary needs libssl at runtime; bookworm-slim omits it.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=prod-deps /workspace/node_modules ./node_modules
+COPY --from=prod-deps /workspace/apps/api/node_modules ./apps/api/node_modules
+COPY --from=build /workspace/apps/api/dist ./apps/api/dist
+COPY --from=prod-deps /workspace/apps/api/prisma ./apps/api/prisma
+COPY --from=build /workspace/apps/api/package.json ./apps/api/package.json
+# Runtime drops privileges to the `node` user baked into the base image
+# (uid/gid 1000) instead of running as root (EVT-19 review round 2, finding
+# 3). `storage/` (photos.service.ts's STORAGE_DIR, and the
+# `eventory-photo-storage` named volume's mount point in
+# docker-compose.prod.yml) must exist and be owned by that user *before*
+# switching USER below and *before* the named volume's first mount — an
+# empty named volume is initialized from the image directory it's mounted
+# over, ownership included, so this chown is what lets the non-root process
+# write uploads to it afterward.
+RUN mkdir -p /workspace/apps/api/storage \
+    && chown -R node:node /workspace/apps/api
+WORKDIR /workspace/apps/api
+USER node
+EXPOSE 3001
+# pnpm's symlinked node_modules can trip `npx`; invoke the workspace-local
+# binary directly instead of `npx prisma` / `pnpm exec prisma`. Migrations
+# run automatically on every boot (AC3) — `migrate deploy` is a no-op when
+# the schema is already up to date, so this is safe on restarts too.
+CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/main.js"]

@@ -25,14 +25,32 @@ export const DEFAULT_WEB_BASE = 'http://localhost:5173';
 export const DEFAULT_JWT_SECRET = 'dev-insecure-jwt-secret-change-me';
 
 /**
+ * `.env.prod.example`'s JWT_SECRET line used to ship this non-empty
+ * placeholder value before EVT-19 review round 2 changed it to ship empty
+ * (so compose's `${JWT_SECRET:?}` fails fast until an operator fills it
+ * in). Rejected here too, alongside `DEFAULT_JWT_SECRET`, so any `.env.prod`
+ * copied from that older example — before the operator got around to
+ * replacing the placeholder — still fails closed in production instead of
+ * signing every session JWT with a secret anyone can read in this repo's
+ * git history.
+ */
+export const REJECTED_PLACEHOLDER_JWT_SECRETS = new Set<string>([
+  DEFAULT_JWT_SECRET,
+  'change-me-to-a-long-random-secret',
+]);
+
+/**
  * Resolves the secret `JwtModule` signs/verifies session cookies with.
  *
- * - `JWT_SECRET` set to anything other than the known default → used as-is.
- * - Otherwise (unset, or explicitly set to the default): allowed in
+ * - `JWT_SECRET` set to anything other than a known placeholder → used
+ *   as-is.
+ * - Otherwise (unset, or explicitly set to a known placeholder — the dev
+ *   default or the historical `.env.prod.example` string): allowed in
  *   dev/test, but throws at bootstrap when `NODE_ENV === 'production'` —
  *   a production deployment that forgot to configure `JWT_SECRET` must
  *   fail to start rather than silently sign every session with a secret
- *   published in this repo's source (EVT-14 review round 2, finding 1).
+ *   published in this repo's source (EVT-14 review round 2, finding 1;
+ *   placeholder reject-list extended EVT-19 review round 2, finding 1).
  *
  * Takes `env` as a parameter (defaulting to `process.env`) so it's a pure,
  * directly-testable function rather than reaching for the global at every
@@ -40,13 +58,13 @@ export const DEFAULT_JWT_SECRET = 'dev-insecure-jwt-secret-change-me';
  */
 export function resolveJwtSecret(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.JWT_SECRET;
-  if (configured && configured !== DEFAULT_JWT_SECRET) {
+  if (configured && !REJECTED_PLACEHOLDER_JWT_SECRETS.has(configured)) {
     return configured;
   }
   if (env.NODE_ENV === 'production') {
     throw new Error(
       'JWT_SECRET must be set to a non-default value when NODE_ENV=production. ' +
-        'Refusing to boot signing sessions with the publicly known dev fallback secret.',
+        'Refusing to boot signing sessions with a publicly known placeholder secret.',
     );
   }
   return DEFAULT_JWT_SECRET;
