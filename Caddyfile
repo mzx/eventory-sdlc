@@ -11,15 +11,35 @@
 # SITE_ADDRESS defaults to `localhost`, which gets a self-signed cert from
 # Caddy's internal CA (AC1) — browsers will show a trust warning until you
 # install that CA locally, which is expected for a bare `docker compose up`.
-# For a real deployment: set SITE_ADDRESS (see .env.prod.example) to your
-# public domain and delete the `tls internal` line below — Caddy then
-# provisions a real Let's Encrypt certificate automatically, no other
-# changes needed.
+# For a real deployment: set SITE_ADDRESS *and* TLS_MODE (see
+# .env.prod.example) to your public domain / ACME contact email — no
+# committed file needs editing (EVT-19 review round 2).
+#
+# `tls {$TLS_MODE:internal}`: `internal` (the default) is Caddy's special
+# keyword for its self-signed internal CA; any other value is treated as an
+# ACME contact email and triggers a real, trusted Let's Encrypt certificate
+# for SITE_ADDRESS instead.
 
 {$SITE_ADDRESS:localhost} {
-	tls internal
+	tls {$TLS_MODE:internal}
 
 	encode gzip
+
+	# Baseline security headers (EVT-19 review round 2). `X-Frame-Options`
+	# and the CSP `frame-ancestors` directive both block this site from
+	# being framed (clickjacking defense-in-depth for the two header
+	# conventions browsers support); `Referrer-Policy` avoids leaking full
+	# URLs (which may contain QR/scan tokens, EVT-13) to third-party
+	# `Link:` targets. `Strict-Transport-Security` only meaningfully takes
+	# effect once SITE_ADDRESS/TLS_MODE point at a real, publicly-trusted
+	# certificate — browsers ignore/warn around HSTS for the default
+	# self-signed `internal` cert, so it's safe to always send.
+	header {
+		X-Frame-Options "DENY"
+		Content-Security-Policy "frame-ancestors 'none'"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
 
 	@api path /api/*
 	handle @api {

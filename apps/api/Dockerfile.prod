@@ -57,7 +57,19 @@ COPY --from=prod-deps /workspace/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /workspace/apps/api/dist ./apps/api/dist
 COPY --from=prod-deps /workspace/apps/api/prisma ./apps/api/prisma
 COPY --from=build /workspace/apps/api/package.json ./apps/api/package.json
+# Runtime drops privileges to the `node` user baked into the base image
+# (uid/gid 1000) instead of running as root (EVT-19 review round 2, finding
+# 3). `storage/` (photos.service.ts's STORAGE_DIR, and the
+# `eventory-photo-storage` named volume's mount point in
+# docker-compose.prod.yml) must exist and be owned by that user *before*
+# switching USER below and *before* the named volume's first mount — an
+# empty named volume is initialized from the image directory it's mounted
+# over, ownership included, so this chown is what lets the non-root process
+# write uploads to it afterward.
+RUN mkdir -p /workspace/apps/api/storage \
+    && chown -R node:node /workspace/apps/api
 WORKDIR /workspace/apps/api
+USER node
 EXPOSE 3001
 # pnpm's symlinked node_modules can trip `npx`; invoke the workspace-local
 # binary directly instead of `npx prisma` / `pnpm exec prisma`. Migrations

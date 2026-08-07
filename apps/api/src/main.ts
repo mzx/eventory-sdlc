@@ -4,10 +4,15 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { allowedCorsOrigins, corsOriginValidator } from './common/cors.config';
+import { configureTrustProxy } from './common/trust-proxy.config';
 import { STORAGE_DIR, STORAGE_URL_PREFIX } from './photos/photos.service';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Must run before enableCors/ValidationPipe/etc — @nestjs/throttler reads
+  // req.ip on every guarded request, and behind Caddy that's meaningless
+  // without this (EVT-19 review round 2, finding 2; see trust-proxy.config.ts).
+  configureTrustProxy(app);
   app.setGlobalPrefix('api');
   // Global JwtAuthGuard (EVT-14) reads the session cookie off `req.cookies`,
   // which only exists once this middleware has parsed the raw `Cookie`

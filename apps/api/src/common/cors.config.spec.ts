@@ -23,24 +23,51 @@ describe('cors.config', () => {
   });
 
   describe('allowedCorsOrigins', () => {
-    it('includes the dev-default WEB_BASE and Vite origins when WEB_BASE is unset', () => {
-      delete process.env.WEB_BASE;
-
-      const origins = allowedCorsOrigins();
+    it('includes the dev-default WEB_BASE and Vite origins when WEB_BASE is unset outside production', () => {
+      const origins = allowedCorsOrigins({ NODE_ENV: 'test' });
 
       expect(origins.has('http://localhost:5173')).toBe(true);
       expect(origins.has('http://127.0.0.1:5173')).toBe(true);
     });
 
-    it('includes a custom WEB_BASE when set', () => {
-      process.env.WEB_BASE = 'https://app.example.com';
-
-      const origins = allowedCorsOrigins();
+    it('includes a custom WEB_BASE alongside dev origins outside production', () => {
+      const origins = allowedCorsOrigins({ WEB_BASE: 'https://app.example.com', NODE_ENV: 'test' });
 
       expect(origins.has('https://app.example.com')).toBe(true);
       // dev origins remain allowed alongside the configured production one
       expect(origins.has('http://localhost:5173')).toBe(true);
       expect(origins.has('http://127.0.0.1:5173')).toBe(true);
+    });
+
+    // EVT-19 review round 2 (minor finding): dev Vite origins must not be
+    // allow-listed for credentialed CORS in production.
+    it('excludes the Vite dev origins when NODE_ENV=production', () => {
+      const origins = allowedCorsOrigins({
+        WEB_BASE: 'https://app.example.com',
+        NODE_ENV: 'production',
+      });
+
+      expect(origins.has('https://app.example.com')).toBe(true);
+      expect(origins.has('http://localhost:5173')).toBe(false);
+      expect(origins.has('http://127.0.0.1:5173')).toBe(false);
+    });
+
+    it('falls back to process.env when no env argument is given', () => {
+      process.env.WEB_BASE = 'https://from-process-env.example.com';
+
+      const origins = allowedCorsOrigins();
+
+      expect(origins.has('https://from-process-env.example.com')).toBe(true);
+    });
+
+    // Fails closed rather than silently falling back to a dev origin: a
+    // production deploy missing WEB_BASE shouldn't happen (compose enforces
+    // it via `${WEB_BASE:?}`), but if it somehow did, no credentialed
+    // origin should be allowed rather than defaulting to localhost:5173.
+    it('allows no origins when WEB_BASE is unset and NODE_ENV=production', () => {
+      const origins = allowedCorsOrigins({ NODE_ENV: 'production' });
+
+      expect(origins.size).toBe(0);
     });
   });
 

@@ -351,6 +351,25 @@ describe('resolveJwtSecret', () => {
       resolveJwtSecret({ JWT_SECRET: 'a-real-production-secret', NODE_ENV: 'production' }),
     ).toBe('a-real-production-secret');
   });
+
+  // EVT-19 review round 2, finding 1: the historical `.env.prod.example`
+  // placeholder must be rejected the same way as DEFAULT_JWT_SECRET, so a
+  // `.env.prod` copied before that example shipped an empty value still
+  // fails closed in production.
+  it('falls back to the dev default when JWT_SECRET is the historical .env.prod.example placeholder outside production', () => {
+    expect(
+      resolveJwtSecret({ JWT_SECRET: 'change-me-to-a-long-random-secret', NODE_ENV: 'test' }),
+    ).toBe(DEFAULT_JWT_SECRET);
+  });
+
+  it('THROWS at bootstrap when JWT_SECRET is the historical .env.prod.example placeholder and NODE_ENV=production', () => {
+    expect(() =>
+      resolveJwtSecret({
+        JWT_SECRET: 'change-me-to-a-long-random-secret',
+        NODE_ENV: 'production',
+      }),
+    ).toThrow(/JWT_SECRET/);
+  });
 });
 
 // ---------------------------------------------------------------------------
