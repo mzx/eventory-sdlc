@@ -3,7 +3,13 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AuthService, DEFAULT_JWT_SECRET, resolveJwtSecret, toPublicUser } from './auth.service';
+import {
+  AuthService,
+  DEFAULT_JWT_SECRET,
+  parseAdminAllowlist,
+  resolveJwtSecret,
+  toPublicUser,
+} from './auth.service';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -94,15 +100,18 @@ describe('AuthService', () => {
   // =========================================================================
 
   describe('upsertFromGoogleProfile', () => {
-    it('creates the FIRST-ever user as admin + approved', async () => {
+    it('creates the FIRST-ever (OAuth) user as admin + approved on an otherwise-empty table (AC5)', async () => {
       prisma.user.findUnique.mockResolvedValue(null); // neither googleId nor email match
       prisma.user.count.mockResolvedValue(0);
       const created = makeUser({ role: UserRole.admin, status: UserStatus.approved });
       prisma.user.create.mockResolvedValue(created);
 
-      const result = await service.upsertFromGoogleProfile(makeProfile());
+      const result = await service.upsertFromGoogleProfile(makeProfile(), {});
 
       expect(prisma.$transaction).toHaveBeenCalled();
+      // AC2: the first-user count only counts rows that have signed in via
+      // Google (have a googleId) — never a bare row count.
+      expect(prisma.user.count).toHaveBeenCalledWith({ where: { googleId: { not: null } } });
       expect(prisma.user.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -113,6 +122,43 @@ describe('AuthService', () => {
         }),
       );
       expect(result).toEqual(created);
+    });
+
+    it('AC5: a seeded row with NO googleId does not count as "first user" — a real OAuth sign-in still gets promoted', async () => {
+      prisma.user.findUnique.mockResolvedValue(null); // no match by googleId or email
+      // Simulates a table that already has one row (the seeded fixture with
+      // no googleId), but the googleId-scoped count still sees zero real
+      // OAuth sign-ins.
+      prisma.user.count.mockResolvedValue(0);
+      const created = makeUser({ role: UserRole.admin, status: UserStatus.approved });
+      prisma.user.create.mockResolvedValue(created);
+
+      await service.upsertFromGoogleProfile(makeProfile(), {});
+
+      expect(prisma.user.count).toHaveBeenCalledWith({ where: { googleId: { not: null } } });
+      expect(prisma.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ role: UserRole.admin, status: UserStatus.approved }),
+        }),
+      );
+    });
+
+    it('AC5: a non-allowlisted first (OAuth) user on an empty table still gets first-user promotion', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.count.mockResolvedValue(0);
+      const created = makeUser({ role: UserRole.admin, status: UserStatus.approved });
+      prisma.user.create.mockResolvedValue(created);
+
+      await service.upsertFromGoogleProfile(
+        makeProfile({ email: 'not-on-the-allowlist@example.com' }),
+        { EVENTORY_ADMIN_EMAILS: 'someone-else@example.com' },
+      );
+
+      expect(prisma.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ role: UserRole.admin, status: UserStatus.approved }),
+        }),
+      );
     });
 
     it('creates the SECOND user as a plain pending user (no auto-approval)', async () => {
@@ -198,6 +244,134 @@ describe('AuthService', () => {
 
       expect(prisma.user.update).not.toHaveBeenCalled();
       expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    // =======================================================================
+    // EVENTORY_ADMIN_EMAILS bootstrap allowlist (EVT-20 AC1 / AC5)
+    // =======================================================================
+
+    it('AC1/AC5: an allowlisted email becomes admin + approved on FIRST creation even with pre-existing rows', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      // Pre-existing rows already consumed the count-based "first user"
+      // slot — the allowlist must still win.
+      prisma.user.count.mockResolvedValue(3);
+      const created = makeUser({
+        email: 'operator@example.com',
+        role: UserRole.admin,
+        status: UserStatus.approved,
+      });
+      prisma.user.create.mockResolvedValue(created);
+
+      const result = await service.upsertFromGoogleProfile(
+        makeProfile({ email: 'operator@example.com' }),
+        { EVENTORY_ADMIN_EMAILS: 'someone@example.com, Operator@Example.com ' },
+      );
+
+      expect(prisma.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            role: UserRole.admin,
+            status: UserStatus.approved,
+            approvedAt: expect.any(Date),
+          }),
+        }),
+      );
+      expect(result).toEqual(created);
+    });
+
+    it('AC1: retroactively promotes an allowlisted email matched by googleId that is still pending', async () => {
+      const existing = makeUser({
+        email: 'operator@example.com',
+        status: UserStatus.pending,
+        role: UserRole.user,
+      });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+      prisma.user.update.mockResolvedValue({
+        ...existing,
+        role: UserRole.admin,
+        status: UserStatus.approved,
+      });
+
+      await service.upsertFromGoogleProfile(makeProfile({ email: 'operator@example.com' }), {
+        EVENTORY_ADMIN_EMAILS: 'operator@example.com',
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: existing.id },
+          data: expect.objectContaining({
+            role: UserRole.admin,
+            status: UserStatus.approved,
+            approvedAt: expect.any(Date),
+          }),
+        }),
+      );
+    });
+
+    it('AC1: retroactively promotes an allowlisted email matched by email (no googleId yet) that is still pending', async () => {
+      const existing = makeUser({
+        email: 'operator@example.com',
+        googleId: null as unknown as string,
+        status: UserStatus.pending,
+        role: UserRole.user,
+      });
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // no match by googleId
+        .mockResolvedValueOnce(existing); // matched by email
+      prisma.user.update.mockResolvedValue({
+        ...existing,
+        googleId: 'fresh-google-id',
+        role: UserRole.admin,
+        status: UserStatus.approved,
+      });
+
+      await service.upsertFromGoogleProfile(
+        makeProfile({ email: 'operator@example.com', googleId: 'fresh-google-id' }),
+        { EVENTORY_ADMIN_EMAILS: 'operator@example.com' },
+      );
+
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: existing.id },
+          data: expect.objectContaining({
+            googleId: 'fresh-google-id',
+            role: UserRole.admin,
+            status: UserStatus.approved,
+            approvedAt: expect.any(Date),
+          }),
+        }),
+      );
+    });
+
+    it('AC1: does NOT re-stamp approvedAt / touch role/status for an allowlisted email that is already admin + approved', async () => {
+      const existing = makeUser({
+        email: 'operator@example.com',
+        status: UserStatus.approved,
+        role: UserRole.admin,
+      });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+      prisma.user.update.mockResolvedValue({ ...existing, lastLoginAt: new Date() });
+
+      await service.upsertFromGoogleProfile(makeProfile({ email: 'operator@example.com' }), {
+        EVENTORY_ADMIN_EMAILS: 'operator@example.com',
+      });
+
+      const updateArg = prisma.user.update.mock.calls[0][0];
+      expect(updateArg.data.approvedAt).toBeUndefined();
+      expect(updateArg.data.role).toBeUndefined();
+      expect(updateArg.data.status).toBeUndefined();
+    });
+
+    it('leaves a non-allowlisted, non-first, returning user’s role/status untouched', async () => {
+      const existing = makeUser({ status: UserStatus.pending, role: UserRole.user });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+      prisma.user.update.mockResolvedValue({ ...existing, lastLoginAt: new Date() });
+
+      await service.upsertFromGoogleProfile(makeProfile(), {});
+
+      const updateArg = prisma.user.update.mock.calls[0][0];
+      expect(updateArg.data.role).toBeUndefined();
+      expect(updateArg.data.status).toBeUndefined();
     });
   });
 
@@ -369,6 +543,30 @@ describe('resolveJwtSecret', () => {
         NODE_ENV: 'production',
       }),
     ).toThrow(/JWT_SECRET/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAdminAllowlist
+// ---------------------------------------------------------------------------
+
+describe('parseAdminAllowlist', () => {
+  it('returns an empty set when unset', () => {
+    expect(parseAdminAllowlist(undefined)).toEqual(new Set());
+  });
+
+  it('returns an empty set for an empty string', () => {
+    expect(parseAdminAllowlist('')).toEqual(new Set());
+  });
+
+  it('splits on commas, trims whitespace, and lowercases', () => {
+    expect(parseAdminAllowlist(' Alice@Example.com, bob@example.com ,charlie@example.com')).toEqual(
+      new Set(['alice@example.com', 'bob@example.com', 'charlie@example.com']),
+    );
+  });
+
+  it('ignores empty entries from trailing/double commas', () => {
+    expect(parseAdminAllowlist('alice@example.com,,')).toEqual(new Set(['alice@example.com']));
   });
 });
 

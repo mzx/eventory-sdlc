@@ -36,7 +36,12 @@ model User {
   email        String     @unique
   name         String?
   picture      String?
-  googleId     String     @unique
+  /// Nullable so a row can exist (e.g. a manually-seeded/dev fixture, or a
+  /// bootstrap placeholder) without ever having signed in via Google — such
+  /// a row must NOT count towards the first-user auto-promotion check (see
+  /// `AuthService.upsertFromGoogleProfile`, EVT-20). Real OAuth sign-ins
+  /// always populate this.
+  googleId     String?    @unique
   status       UserStatus @default(pending)
   role         UserRole   @default(user)
   approvedAt   DateTime?
