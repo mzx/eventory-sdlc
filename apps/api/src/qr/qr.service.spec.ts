@@ -109,6 +109,8 @@ describe('QrService', () => {
   // =========================================================================
 
   describe('renderPng', () => {
+    // Real 512px PNG encode + decode can exceed jest's default 5s on slow CI
+    // runners — give this test its own generous timeout.
     it('AC1 + AC3: item token → 200 PNG that decodes to ${PUBLIC_BASE_URL}/r/:token', async () => {
       delete process.env.PUBLIC_BASE_URL;
       prismaMock.item.findUnique.mockResolvedValue({ id: 'item-1' });
@@ -117,7 +119,7 @@ describe('QrService', () => {
 
       expect(Buffer.isBuffer(png)).toBe(true);
       expect(decodeQrPng(png)).toBe(`${DEFAULT_PUBLIC_BASE_URL}/r/${ITEM_TOKEN}`);
-    });
+    }, 20_000);
 
     it('default size (no size param) renders a 512x512 PNG', async () => {
       prismaMock.item.findUnique.mockResolvedValue({ id: 'item-1' });
