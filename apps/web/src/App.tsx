@@ -1,7 +1,12 @@
 import AddIcon from '@mui/icons-material/Add';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import { AppBar, Button, Container, Toolbar, Typography } from '@mui/material';
-import { Link as RouterLink, Route, Routes } from 'react-router-dom';
+import type { ReactNode } from 'react';
+import { Link as RouterLink, Navigate, Route, Routes } from 'react-router-dom';
+import { AuthGate } from './auth/AuthGate';
+import { useAuth } from './auth/AuthContext';
+import { UserMenu } from './components/UserMenu';
+import { AdminUsersPage } from './pages/AdminUsersPage';
 import { EditItemPage } from './pages/EditItemPage';
 import { ItemDetailPage } from './pages/ItemDetailPage';
 import { ItemPrintPage } from './pages/ItemPrintPage';
@@ -14,19 +19,39 @@ import { ProjectsPage } from './pages/ProjectsPage';
 
 /** Top-level router: the QR sticker print view is deliberately rendered
  * outside `AppShell` (no AppBar, no Container chrome) since it must produce
- * only the sticker + item name when printed — see `ItemPrintPage`. */
+ * only the sticker + item name when printed — see `ItemPrintPage`.
+ *
+ * `AuthGate` wraps everything (including the print route) so a signed-out
+ * visit to ANY path — print view included — resolves to `LoginPage` rather
+ * than briefly rendering app content (EVT-15 AC1). */
 export function App() {
   return (
-    <Routes>
-      <Route path="/items/:id/print" element={<ItemPrintPage />} />
-      <Route path="/*" element={<AppShell />} />
-    </Routes>
+    <AuthGate>
+      <Routes>
+        <Route path="/items/:id/print" element={<ItemPrintPage />} />
+        <Route path="/*" element={<AppShell />} />
+      </Routes>
+    </AuthGate>
   );
 }
 
-/** App shell: top AppBar (title + nav + primary "Add item" action) wrapping
- * the routed page content in a responsive, phone-first container. */
+/** Redirects non-admins away from `/admin/*` — AC3. `AuthGate` has already
+ * guaranteed `user` is non-null and approved by the time `AppShell` mounts. */
+function RequireAdmin({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  if (user?.role !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
+/** App shell: top AppBar (title + nav + primary "Add item" action + user
+ * menu) wrapping the routed page content in a responsive, phone-first
+ * container. Only ever mounted for an approved, signed-in user — `AuthGate`
+ * renders LoginPage/PendingPage/RejectedPage instead otherwise. */
 function AppShell() {
+  const { user } = useAuth();
+
   return (
     <>
       <AppBar position="sticky" color="primary" enableColorOnDark>
@@ -62,6 +87,7 @@ function AppShell() {
           >
             Add item
           </Button>
+          {user && <UserMenu user={user} />}
         </Toolbar>
       </AppBar>
       <Container maxWidth="lg" sx={{ py: 2, px: { xs: 1, sm: 2 } }}>
@@ -74,6 +100,14 @@ function AppShell() {
           <Route path="/locations/:id" element={<LocationDetailPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:id" element={<ProjectDetailPage />} />
+          <Route
+            path="/admin/users"
+            element={
+              <RequireAdmin>
+                <AdminUsersPage />
+              </RequireAdmin>
+            }
+          />
         </Routes>
       </Container>
     </>
