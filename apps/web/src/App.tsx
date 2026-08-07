@@ -1,10 +1,13 @@
 import AddIcon from '@mui/icons-material/Add';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
+import QrCodeScannerOutlinedIcon from '@mui/icons-material/QrCodeScannerOutlined';
 import { AppBar, Button, Container, Toolbar, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
+import { useState } from 'react';
 import { Link as RouterLink, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthGate } from './auth/AuthGate';
 import { useAuth } from './auth/AuthContext';
+import { ScannerDialog } from './components/ScannerDialog';
 import { UserMenu } from './components/UserMenu';
 import { AdminUsersPage } from './pages/AdminUsersPage';
 import { EditItemPage } from './pages/EditItemPage';
@@ -16,6 +19,7 @@ import { LocationDetailPage } from './pages/LocationDetailPage';
 import { LocationsPage } from './pages/LocationsPage';
 import { ProjectDetailPage } from './pages/ProjectDetailPage';
 import { ProjectsPage } from './pages/ProjectsPage';
+import { ScanPage } from './pages/ScanPage';
 
 /** Top-level router: the QR sticker print view is deliberately rendered
  * outside `AppShell` (no AppBar, no Container chrome) since it must produce
@@ -51,6 +55,7 @@ function RequireAdmin({ children }: { children: ReactNode }) {
  * renders LoginPage/PendingPage/RejectedPage instead otherwise. */
 function AppShell() {
   const { user } = useAuth();
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   return (
     <>
@@ -64,6 +69,14 @@ function AppShell() {
           >
             Eventory
           </Typography>
+          <Button
+            color="inherit"
+            variant="text"
+            startIcon={<QrCodeScannerOutlinedIcon />}
+            onClick={() => setScannerOpen(true)}
+          >
+            Scan
+          </Button>
           <Button component={RouterLink} to="/projects" color="inherit">
             Projects
           </Button>
@@ -90,6 +103,7 @@ function AppShell() {
           {user && <UserMenu user={user} />}
         </Toolbar>
       </AppBar>
+      <ScannerDialog open={scannerOpen} onClose={() => setScannerOpen(false)} />
       <Container maxWidth="lg" sx={{ py: 2, px: { xs: 1, sm: 2 } }}>
         <Routes>
           <Route path="/" element={<ItemsPage />} />
@@ -108,6 +122,7 @@ function AppShell() {
               </RequireAdmin>
             }
           />
+          <Route path="/r/:token" element={<ScanPage />} />
         </Routes>
       </Container>
     </>
