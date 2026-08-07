@@ -39,9 +39,11 @@ export function ScanPage() {
         <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 360 }}>
           {notFound
             ? "This QR code doesn't match anything in your inventory. It may be damaged, mistyped, or from a different Eventory instance."
-            : query.error instanceof Error
-              ? query.error.message
-              : 'Failed to resolve this code.'}
+            : /* Deliberately static rather than rendering `query.error.message`,
+               * which would otherwise echo the raw scanned token (from the URL
+               * path, not user-typed input, but still untrusted external data)
+               * back onto the page. */
+              'We could not check this code right now. Please try again in a moment.'}
         </Typography>
         <Button component={RouterLink} to="/" variant="contained">
           Go home

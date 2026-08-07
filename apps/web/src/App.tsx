@@ -3,7 +3,7 @@ import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import QrCodeScannerOutlinedIcon from '@mui/icons-material/QrCodeScannerOutlined';
 import { AppBar, Button, Container, Toolbar, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Link as RouterLink, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthGate } from './auth/AuthGate';
 import { useAuth } from './auth/AuthContext';
@@ -56,6 +56,7 @@ function RequireAdmin({ children }: { children: ReactNode }) {
 function AppShell() {
   const { user } = useAuth();
   const [scannerOpen, setScannerOpen] = useState(false);
+  const closeScanner = useCallback(() => setScannerOpen(false), []);
 
   return (
     <>
@@ -103,7 +104,7 @@ function AppShell() {
           {user && <UserMenu user={user} />}
         </Toolbar>
       </AppBar>
-      <ScannerDialog open={scannerOpen} onClose={() => setScannerOpen(false)} />
+      <ScannerDialog open={scannerOpen} onClose={closeScanner} />
       <Container maxWidth="lg" sx={{ py: 2, px: { xs: 1, sm: 2 } }}>
         <Routes>
           <Route path="/" element={<ItemsPage />} />

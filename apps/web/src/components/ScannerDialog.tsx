@@ -24,6 +24,15 @@ interface ScannerDialogProps {
  * and navigates to the decoded `/r/:token` route as soon as a recognizable
  * Eventory code is found, so users can scan a sticker without leaving the
  * app (no native-camera-app + share-to-browser round trip).
+ *
+ * Note: `@zxing/library`'s `package.json` declares `engines.node >= 24`,
+ * ahead of this workspace's `>=20` (and the `node:22-bookworm-slim` web
+ * Dockerfile base). This is purely a browser-side, bundled runtime
+ * dependency — it never executes under the Node.js server process — so the
+ * mismatch has no observed build/runtime effect (`pnpm install` has no
+ * `engine-strict` config in this repo) and is documented here rather than
+ * "fixed", since there's no lower version of `@zxing/library` compatible
+ * with the pinned `@zxing/browser@0.2.1` to downgrade to.
  */
 export function ScannerDialog({ open, onClose }: ScannerDialogProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -60,6 +69,19 @@ export function ScannerDialog({ open, onClose }: ScannerDialogProps) {
         controls.stop();
         onClose();
         navigate(path);
+      })
+      .then((controls) => {
+        // `decodeFromVideoDevice` resolves with the same `controls` the
+        // per-frame callback above receives, but that resolution can land
+        // *before* the first frame callback fires (e.g. while the camera
+        // permission prompt is still pending). Without this branch, closing
+        // the dialog during that window leaves `stop` unset and the camera
+        // track keeps recording after the dialog unmounts.
+        if (cancelled) {
+          controls.stop();
+        } else {
+          stop = controls.stop.bind(controls);
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {

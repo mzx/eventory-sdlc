@@ -81,17 +81,18 @@ describe('ScanPage', () => {
     expect(homeLink).toHaveAttribute('href', '/');
   });
 
-  it('shows a generic error screen for non-404 failures', async () => {
+  it('shows a generic, static error screen for non-404 failures (does not echo the raw error message/token)', async () => {
     vi.spyOn(api, 'fetchByQr').mockRejectedValue(
-      new Error('Request to /items/by-qr/x failed with status 500'),
+      new Error('Request to /items/by-qr/server-error-token failed with status 500'),
     );
 
     renderScanPage('server-error-token');
 
     expect(await screen.findByText('Something went wrong')).toBeInTheDocument();
     expect(
-      screen.getByText('Request to /items/by-qr/x failed with status 500'),
+      screen.getByText('We could not check this code right now. Please try again in a moment.'),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/server-error-token/)).not.toBeInTheDocument();
   });
 
   it('shows a loading state before the lookup resolves', () => {
