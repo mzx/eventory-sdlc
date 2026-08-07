@@ -18,6 +18,44 @@ Without mkcert certs (see below), both `api` and `web` boot over plain HTTP — 
 default for a fresh clone and for CI. Camera capture, service-worker install, and the
 Google OAuth redirect all require HTTPS, so for real phone testing set up certs first.
 
+### Live dev source — plain `up` reflects your edits (EVT-21)
+
+`docker-compose.yml` (dev only — **not** `docker-compose.prod.yml`) bind-mounts `apps/` and
+the root manifests (`package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`) into both the
+`api` and `web` containers, and each container runs the real dev server against that
+mounted source:
+
+- `api` runs `nest start --watch` (not the built `dist/`) — it recompiles and restarts on
+  every save.
+- `web` runs `vite --host 0.0.0.0` — Vite's HMR pushes updates over the mounted source with
+  no restart.
+
+`git pull && pnpm dev` (or even a plain `docker compose up` on an already-running stack)
+now reflects the code on disk — **no manual rebuild needed to pick up source changes.**
+`node_modules` is deliberately excluded from the bind mount (it lives on named Docker
+volumes instead — `eventory-api-node-modules` etc., see `docker volume ls`) so the
+container's own pnpm-installed tree, with native bindings built for the container's
+platform, is never shadowed by whatever is (or isn't) in the host's `node_modules/`.
+
+**When `pnpm-lock.yaml` changes** (e.g. after `git pull` merges a dependency bump), each
+container detects the change automatically at startup/restart (a hash of the lockfile is
+stamped into that container's `node_modules` volume) and reinstalls before starting the dev
+server. If the reinstall itself fails (e.g. a broken lockfile), the container exits with a
+clear `[dev] ERROR: pnpm install failed for ...` message in `pnpm logs` / `docker compose
+logs <service>` instead of silently starting against a stale or missing dependency tree —
+fix the lockfile, then `docker compose restart api` (or `web`).
+
+**You still need a rebuild** (`pnpm dev`, which always runs `docker compose up --build`, or
+explicitly `docker compose build api web`) when you change something baked into the
+*image* rather than the source tree: `apps/api/Dockerfile` / `apps/web/Dockerfile`, the
+base Node image/version, or an `apt-get` package. Editing application source, adding a
+dependency to `package.json`, or updating `pnpm-lock.yaml` does **not** require a rebuild —
+the running containers pick those up on their own (source instantly, lockfile changes on
+next container start/restart, per above).
+
+To fully reset the installed-dependency volumes (equivalent to deleting `node_modules`
+locally): `docker compose down -v`.
+
 ## Phone-on-LAN dev setup (HTTPS via mkcert)
 
 Both dev servers can serve HTTPS using locally-trusted certificates from
