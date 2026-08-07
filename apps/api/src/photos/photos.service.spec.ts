@@ -38,6 +38,7 @@ function makePrismaMock() {
     },
     item: {
       findUnique: jest.fn(),
+      updateMany: jest.fn(),
     },
   };
 }
@@ -134,6 +135,62 @@ describe('PhotosService', () => {
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ itemId: 'item-1' }) }),
       );
+    });
+
+    // =======================================================================
+    // EVT-24 AC1/AC2 — first upload becomes primary, subsequent uploads don't
+    // steal it
+    // =======================================================================
+
+    it('EVT-24 AC1: auto-promotes the uploaded photo to primary when the item has none yet', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
+      prismaMock.item.updateMany.mockResolvedValue({ count: 1 });
+
+      await service.savePhoto(makeFile(), 'item-1');
+
+      expect(prismaMock.item.updateMany).toHaveBeenCalledWith({
+        where: { id: 'item-1', primaryPhotoId: null },
+        data: { primaryPhotoId: PHOTO_ID },
+      });
+    });
+
+    it('EVT-24 AC2: does not steal an existing primary — updateMany matches zero rows when primaryPhotoId is already set', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'second.png' });
+      // `updateMany`'s `where: { primaryPhotoId: null }` is what actually
+      // enforces AC2 against the real DB; here we assert the call shape and
+      // that a zero-row match (simulated via `count: 0`) doesn't throw or
+      // otherwise change behavior.
+      prismaMock.item.updateMany.mockResolvedValue({ count: 0 });
+
+      await service.savePhoto(makeFile(), 'item-1');
+
+      expect(prismaMock.item.updateMany).toHaveBeenCalledWith({
+        where: { id: 'item-1', primaryPhotoId: null },
+        data: { primaryPhotoId: PHOTO_ID },
+      });
+    });
+
+    it('EVT-24: does not touch primaryPhotoId when itemId is not provided', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'unlinked.png' });
+
+      await service.savePhoto(makeFile());
+
+      expect(prismaMock.item.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('EVT-24: logs and swallows a failure promoting to primary rather than unwinding the upload', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      const created = { id: PHOTO_ID, filename: 'x.png' };
+      prismaMock.photo.create.mockResolvedValue(created);
+      prismaMock.item.updateMany.mockRejectedValue(new Error('connection lost'));
+
+      const result = await service.savePhoto(makeFile(), 'item-1');
+
+      expect(result).toEqual({ ...created, url: '/storage/x.png' });
+      expect(unlinkMock).not.toHaveBeenCalled();
     });
 
     it('EVT-14: stamps uploadedById when provided', async () => {

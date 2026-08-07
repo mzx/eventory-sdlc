@@ -146,6 +146,11 @@ export class PhotosService {
    *
    * `uploadedById` (EVT-14) is optional so this remains callable without a
    * caller in scope (e.g. seed scripts, tests predating auth).
+   *
+   * When `itemId` is provided and that item has no `primaryPhotoId` yet,
+   * this photo automatically becomes the primary (EVT-24 AC1) — see
+   * `promoteToPrimaryIfNone`. Does not touch an item that already has a
+   * primary (AC2).
    */
   async savePhoto(
     file: UploadedPhotoFile,
@@ -186,6 +191,9 @@ export class PhotosService {
           ...(uploadedById && { uploadedById }),
         },
       });
+      if (itemId) {
+        await this.promoteToPrimaryIfNone(itemId, photo.id);
+      }
       return this.withUrl(photo);
     } catch (err) {
       await this.unlinkQuietly(file.path);
@@ -218,6 +226,12 @@ export class PhotosService {
    * If the photo was an item's `primaryPhotoId`, the schema's
    * `onDelete: SetNull` on the `Item.primaryPhoto` relation clears that
    * reference automatically — no extra query needed here.
+   *
+   * EVT-24 AC3: deliberately does NOT auto-promote a remaining photo to
+   * primary after this clears it — the item goes back to imageless-in-list
+   * until a manual "set primary" or a fresh upload (which will now
+   * auto-promote per `promoteToPrimaryIfNone`, since `primaryPhotoId` is
+   * `null` again at that point).
    *
    * 404 when the photo does not exist.
    */
@@ -261,6 +275,40 @@ export class PhotosService {
     const buffer = await readFile(file.path);
     this.logger.log(`Running AI analysis for ${file.filename}`);
     return this.aiService.analyzePhoto(buffer, file.mimetype);
+  }
+
+  /**
+   * When a photo is uploaded to an item that has no `primaryPhotoId` yet, it
+   * automatically becomes the primary — EVT-24 AC1. Without this, the items
+   * LIST (which renders thumbnails exclusively from `primaryPhoto`) stays
+   * imageless forever for an item created without a photo, even after one is
+   * uploaded on the edit page — the photo was only ever visible on
+   * detail/edit.
+   *
+   * Implemented as a single `updateMany` with `primaryPhotoId: null` in the
+   * `where` clause rather than a read-then-write, so it's atomic and
+   * race-safe: it only ever touches a row that is still primary-less at the
+   * moment this write lands, and never overwrites an already-set primary
+   * (AC2) — concurrent uploads to the same item can't both "win" and
+   * clobber each other.
+   *
+   * Best-effort: the Photo row (and its `itemId` link) is already committed
+   * by the time this runs, so a failure here is logged and swallowed rather
+   * than unwinding the whole upload — the worst case is the item stays
+   * imageless in the list until a manual "set primary" or another upload,
+   * not a corrupted/orphaned Photo row.
+   */
+  private async promoteToPrimaryIfNone(itemId: string, photoId: string): Promise<void> {
+    try {
+      await this.prisma.item.updateMany({
+        where: { id: itemId, primaryPhotoId: null },
+        data: { primaryPhotoId: photoId },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to auto-promote photo ${photoId} to primary for item ${itemId}: ${err}`,
+      );
+    }
   }
 
   /**

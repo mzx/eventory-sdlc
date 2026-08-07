@@ -29,8 +29,9 @@ const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
   ...overrides,
 });
 
-function renderEditPage() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderEditPage(
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={['/items/item-1/edit']}>
@@ -106,6 +107,43 @@ describe('EditItemPage', () => {
     await user.upload(input, file);
 
     await waitFor(() => expect(uploadMock).toHaveBeenCalledWith(file, 'item-1'));
+  });
+
+  // ---------------------------------------------------------------------------
+  // EVT-24 AC4/AC5: an upload on the edit page must invalidate the items LIST
+  // query too (not just item detail), so the list's thumbnail reflects a
+  // freshly auto-promoted primary photo without a full reload.
+  // ---------------------------------------------------------------------------
+
+  it('invalidates the items list query (not just item detail) after a successful upload', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    vi.spyOn(api, 'uploadPhoto').mockResolvedValue({
+      id: 'photo-2',
+      filename: 'second.jpg',
+      mimeType: 'image/jpeg',
+      url: '/storage/second.jpg',
+    });
+    const user = userEvent.setup();
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    // Seed the same list query key ItemsPage uses, as if the list had
+    // already been visited and cached before navigating to the edit page.
+    const listQueryKey = ['items', { search: '', tag: null }];
+    queryClient.setQueryData(listQueryKey, []);
+
+    renderEditPage(queryClient);
+    await screen.findByLabelText('Name');
+
+    expect(queryClient.getQueryState(listQueryKey)?.isInvalidated).toBe(false);
+
+    const file = new File(['bytes'], 'second.jpg', { type: 'image/jpeg' });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, file);
+
+    await waitFor(() => expect(queryClient.getQueryState(listQueryKey)?.isInvalidated).toBe(true));
   });
 
   it('sets a photo as primary via PATCH photoIds', async () => {
