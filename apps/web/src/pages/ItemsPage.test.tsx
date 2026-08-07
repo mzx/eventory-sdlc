@@ -87,6 +87,103 @@ describe('ItemsPage', () => {
   });
 
   // =========================================================================
+  // "Clear filters" chip (EVT-23)
+  // =========================================================================
+
+  describe('clear filters chip', () => {
+    it('is absent when no filter is active', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([item()]);
+
+      renderItemsPage();
+
+      await screen.findByText('power-tools (1)');
+      expect(screen.queryByText('Clear filters')).not.toBeInTheDocument();
+    });
+
+    it('AC1: renders as the first chip in the row, before all tag chips, once a tag filter is active', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([item()]);
+      const user = userEvent.setup();
+
+      renderItemsPage();
+
+      const tagChip = await screen.findByText('power-tools (1)');
+      await user.click(tagChip);
+
+      const clearChip = await screen.findByText('Clear filters');
+      const row = clearChip.closest('div[class*="MuiStack-root"]');
+      expect(row).not.toBeNull();
+      const chipLabels = Array.from(row!.querySelectorAll('.MuiChip-label')).map(
+        (el) => el.textContent,
+      );
+      expect(chipLabels[0]).toBe('Clear filters');
+      expect(chipLabels).toContain('power-tools (1)');
+    });
+
+    it('AC1: renders as the first chip in the row once a text search is active', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([item()]);
+      const user = userEvent.setup();
+
+      renderItemsPage();
+
+      await screen.findByText('power-tools (1)');
+      const searchBox = screen.getByRole('textbox', { name: /search items/i });
+      await user.type(searchBox, 'drill');
+
+      const clearChip = await screen.findByText('Clear filters');
+      const row = clearChip.closest('div[class*="MuiStack-root"]');
+      const chipLabels = Array.from(row!.querySelectorAll('.MuiChip-label')).map(
+        (el) => el.textContent,
+      );
+      expect(chipLabels[0]).toBe('Clear filters');
+    });
+
+    it('AC2: renders an X icon and a color/variant combination no tag chip uses', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([item()]);
+      const user = userEvent.setup();
+
+      renderItemsPage();
+
+      const tagChip = await screen.findByText('power-tools (1)');
+      await user.click(tagChip);
+
+      const clearChip = (await screen.findByText('Clear filters')).closest('.MuiChip-root');
+      expect(clearChip).not.toBeNull();
+      expect(clearChip!.querySelector('svg')).toBeInTheDocument();
+      expect(clearChip).toHaveClass('MuiChip-colorError');
+      expect(clearChip).toHaveClass('MuiChip-outlinedError');
+
+      // Sanity check: the tag chip's own color/variant classes never overlap
+      // with the clear chip's (error/outlined is unused by any tag state).
+      const activeTagChip = screen.getByText('power-tools (1)').closest('.MuiChip-root');
+      expect(activeTagChip).not.toHaveClass('MuiChip-colorError');
+    });
+
+    it('AC3: clicking it clears both the text search and the active tag', async () => {
+      const fetchItemsMock = vi.spyOn(api, 'fetchItems').mockResolvedValue([item()]);
+      const user = userEvent.setup();
+
+      renderItemsPage();
+
+      const tagChip = await screen.findByText('power-tools (1)');
+      await user.click(tagChip);
+
+      const searchBox = screen.getByRole('textbox', { name: /search items/i });
+      await user.type(searchBox, 'drill');
+
+      await waitFor(() =>
+        expect(fetchItemsMock).toHaveBeenLastCalledWith({ search: 'drill', tag: 'power-tools' }),
+      );
+
+      const clearChip = await screen.findByText('Clear filters');
+      await user.click(clearChip);
+
+      expect(searchBox).toHaveValue('');
+      await waitFor(() => expect(fetchItemsMock).toHaveBeenLastCalledWith({}));
+      expect(screen.queryByText('Clear filters')).not.toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
   // Photo search (EVT-17)
   // =========================================================================
 
