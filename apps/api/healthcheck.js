@@ -19,6 +19,12 @@ function probeHttp() {
 }
 
 https
+  // rejectUnauthorized: false — loopback-only rationale: this probe always
+  // hits a hardcoded https://localhost inside the container, and mkcert
+  // certs can't be chain-validated there (the mkcert root CA isn't in
+  // Node's trust store inside the image). Safe ONLY because the target is
+  // hardcoded to localhost and never operator/network-supplied — do NOT
+  // copy this pattern into any app HTTP client that calls a remote host.
   .get('https://localhost:3001/api/health', { rejectUnauthorized: false }, (res) =>
     exit(res.statusCode === 200),
   )

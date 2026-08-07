@@ -8,3 +8,7 @@ node_modules
 **/.env
 **/.env.*
 apps/api/storage
+# mkcert-generated dev private keys (EVT-18) — gitignored on the host too
+# (see apps/web/.gitignore, apps/api/.gitignore); never bake these into an
+# image layer via the whole-directory COPY steps in apps/*/Dockerfile.
+apps/*/certs/

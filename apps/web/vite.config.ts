@@ -1,27 +1,25 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
+import { resolveApiProxyTarget, resolveHttpsOptions } from './vite-config/https-options';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // mkcert-generated dev certs (see README.md "Phone-on-LAN dev setup" and
 // apps/api/src/common/https-options.ts, which does the equivalent for the
 // API). `apps/web/certs/` is gitignored — CI and fresh clones without
-// mkcert fall back to plain HTTP automatically.
-function resolveHttpsOptions(): { cert: Buffer; key: Buffer } | undefined {
-  const certPath = path.join(dirname, 'certs', 'cert.pem');
-  const keyPath = path.join(dirname, 'certs', 'key.pem');
-  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-    return undefined;
-  }
-  return {
-    cert: fs.readFileSync(certPath),
-    key: fs.readFileSync(keyPath),
-  };
-}
+// mkcert fall back to plain HTTP automatically. See ./vite-config/https-options.ts
+// for the implementation + tests.
+const webCertsDir = path.join(dirname, 'certs');
+// The API's OWN certs directory — in Docker this is bind-mounted read-only
+// into the web container alongside its own certs/ (see docker-compose.yml
+// `web` service); outside Docker it's the real sibling directory on the
+// host. Used to pick the /api + /storage proxy scheme — see
+// resolveApiProxyTarget's docstring for why we can't infer this from the
+// web side's own cert presence.
+const apiCertsDir = path.join(dirname, '..', 'api', 'certs');
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -64,7 +62,11 @@ export default defineConfig({
             options: {
               cacheName: 'eventory-storage-images',
               expiration: { maxEntries: 300, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
+              // statuses: [200] only — same-origin responses are never
+              // opaque (status 0), so there's nothing unvalidatable to
+              // guard against; narrowing avoids caching an opaque body for
+              // 30 days on the off chance one shows up.
+              cacheableResponse: { statuses: [200] },
             },
           },
           {
@@ -87,18 +89,26 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
     strictPort: true,
-    https: resolveHttpsOptions(),
+    https: resolveHttpsOptions(webCertsDir),
     proxy: {
       // API routes (items, tags, locations, photos, health, ...).
       '/api': {
-        target: process.env.VITE_API_PROXY_TARGET ?? 'http://api:3001',
+        target: resolveApiProxyTarget(apiCertsDir),
         changeOrigin: true,
+        // Accept the mkcert-issued upstream cert without chain validation
+        // when proxying https://api:3001 — Node's proxy client doesn't
+        // have mkcert's local CA in its trust store inside the container.
+        // Dev-only; the target is always the trusted docker-compose `api`
+        // service or an explicit operator override, never an
+        // operator/network-supplied host.
+        secure: false,
       },
       // Uploaded photo files, served by the API outside the /api prefix
       // (see apps/api/src/main.ts `useStaticAssets`).
       '/storage': {
-        target: process.env.VITE_API_PROXY_TARGET ?? 'http://api:3001',
+        target: resolveApiProxyTarget(apiCertsDir),
         changeOrigin: true,
+        secure: false,
       },
     },
   },

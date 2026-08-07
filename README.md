@@ -97,6 +97,17 @@ pnpm --filter @eventory/web dev         # https://localhost:5173 (or LAN origin)
 pnpm dev
 ```
 
+The web dev server's `/api` and `/storage` proxy (`apps/web/vite.config.ts`,
+`resolveApiProxyTarget` in `apps/web/vite-config/https-options.ts`) automatically matches
+whatever protocol the `api` container is actually serving: it checks the API's own
+`apps/api/certs/` directory (bind-mounted read-only into the `web` container too, purely
+for this check) and proxies `https://api:3001` when both `cert.pem` + `key.pem` are
+present there, `http://api:3001` otherwise. This stays correct even if only one of
+`apps/web/certs/` / `apps/api/certs/` has been generated — run step 3 above for both apps
+together to avoid that split state. Set `VITE_API_PROXY_TARGET` in the `web` service's
+`environment:` to override this (e.g. pointing at a non-Docker API host) if you ever need
+to.
+
 ### 6. Verify
 
 ```bash
