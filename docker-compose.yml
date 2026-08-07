@@ -22,7 +22,15 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      # Dev container stops at `build` (not `runtime`): that stage already
+      # has devDependencies (@nestjs/cli, for `start:dev` below) AND a
+      # generated Prisma client (its `pnpm run build` step runs
+      # `prisma generate && nest build` — we don't need the `nest build`
+      # output, but we do need the generated client that comes bundled
+      # with it) — see the node_modules volumes below (EVT-21).
+      target: build
     restart: unless-stopped
+    working_dir: /workspace/apps/api
     environment:
       DATABASE_URL: postgresql://eventory:eventory@db:5432/eventory?schema=public
       PORT: 3001
@@ -31,10 +39,48 @@ services:
       - '3001:3001'
     volumes:
       - eventory-photo-storage:/workspace/apps/api/storage
+      # Live dev source (EVT-21): bind-mount the workspace source + root
+      # manifests so `nest start --watch` (below) picks up host edits with
+      # no image rebuild. node_modules is deliberately NOT part of this
+      # bind — it stays on the named volumes below so the image's
+      # pnpm-installed tree (native bindings for prisma/sharp built for
+      # *this* container, plus the generated Prisma client) isn't shadowed
+      # by whatever is (or isn't) in the equivalent host directory.
+      - ./apps:/workspace/apps
+      - ./package.json:/workspace/package.json:ro
+      - ./pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
+      - ./pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro
+      - eventory-api-root-node-modules:/workspace/node_modules
+      - eventory-api-node-modules:/workspace/apps/api/node_modules
       # mkcert dev certs (EVT-18) — bind-mounted read-only so the container
       # sees whatever the operator generated on the host at apps/api/certs/.
-      # Absent/empty on a fresh clone → API falls back to plain HTTP.
+      # Absent/empty on a fresh clone → API falls back to plain HTTP. Nested
+      # under the broader ./apps bind above; listed after it so this more
+      # specific (read-only) mount wins for this one path.
       - ./apps/api/certs:/workspace/apps/api/certs:ro
+    # Starts the real Nest watch server (`start:dev`, not the baked
+    # `dist/main.js`) so edits under the bind mount above hot-restart the
+    # process. Before that: if pnpm-lock.yaml changed since this
+    # node_modules volume was last populated (hash stamped into the volume
+    # itself), reinstall automatically; a failed install fails loudly
+    # instead of silently running against a stale/missing dependency tree
+    # (EVT-21 AC2).
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        HASH_FILE=/workspace/apps/api/node_modules/.pnpm-lock.sha256
+        NEW_HASH=$$(sha256sum /workspace/pnpm-lock.yaml | cut -d' ' -f1)
+        if [ ! -f "$$HASH_FILE" ] || [ "$$(cat "$$HASH_FILE")" != "$$NEW_HASH" ]; then
+          echo "[dev] pnpm-lock.yaml changed - reinstalling api dependencies..."
+          if ! pnpm install --frozen-lockfile --filter=@eventory/api...; then
+            echo "[dev] ERROR: pnpm install failed for @eventory/api - fix pnpm-lock.yaml/package.json, then restart this container (docker compose restart api)." >&2
+            exit 1
+          fi
+          echo "$$NEW_HASH" > "$$HASH_FILE"
+        fi
+        exec pnpm --filter=@eventory/api run start:dev
     depends_on:
       db:
         condition: service_healthy
@@ -63,7 +109,20 @@ services:
     ports:
       - '5173:5173'
     volumes:
-      # mkcert dev certs (EVT-18) — see apps/api service above.
+      # Live dev source (EVT-21): bind-mount the workspace source + root
+      # manifests so Vite's dev server (with HMR) picks up host edits with
+      # no image rebuild. node_modules stays on the named volumes below,
+      # off the bind — see the api service's node_modules comment above for
+      # why.
+      - ./apps:/workspace/apps
+      - ./package.json:/workspace/package.json:ro
+      - ./pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
+      - ./pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro
+      - eventory-web-root-node-modules:/workspace/node_modules
+      - eventory-web-node-modules:/workspace/apps/web/node_modules
+      # mkcert dev certs (EVT-18) — see apps/api service above. Nested under
+      # the broader ./apps bind above; listed after it so this more
+      # specific (read-only) mount wins for this one path.
       - ./apps/web/certs:/workspace/apps/web/certs:ro
       # The API's OWN certs dir, mounted read-only into the web container
       # too (separately from the api service's own mount above — the two
@@ -72,10 +131,41 @@ services:
       # speak https or http to the api container, since the web side's own
       # cert presence isn't a reliable signal for the API's protocol.
       - ./apps/api/certs:/workspace/apps/api/certs:ro
+    # Same auto-reinstall-or-fail-loudly contract as the api service above
+    # (EVT-21 AC2), then starts the real `vite --host 0.0.0.0` dev server
+    # (apps/web/package.json's `dev` script) so HMR picks up the bind
+    # mount above.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        HASH_FILE=/workspace/apps/web/node_modules/.pnpm-lock.sha256
+        NEW_HASH=$$(sha256sum /workspace/pnpm-lock.yaml | cut -d' ' -f1)
+        if [ ! -f "$$HASH_FILE" ] || [ "$$(cat "$$HASH_FILE")" != "$$NEW_HASH" ]; then
+          echo "[dev] pnpm-lock.yaml changed - reinstalling web dependencies..."
+          if ! pnpm install --frozen-lockfile --filter=@eventory/web...; then
+            echo "[dev] ERROR: pnpm install failed for @eventory/web - fix pnpm-lock.yaml/package.json, then restart this container (docker compose restart web)." >&2
+            exit 1
+          fi
+          echo "$$NEW_HASH" > "$$HASH_FILE"
+        fi
+        exec pnpm run dev
     depends_on:
       api:
         condition: service_started
 
 volumes:
   eventory-db-data:
+  # node_modules for the dev containers (EVT-21) — deliberately named (not
+  # anonymous) so they survive `docker compose down` / restarts and are
+  # easy to find with `docker volume ls`. One pair per service: each
+  # service's image installs a different --filter subset, so their
+  # node_modules trees (root-hoisted AND the package-local one) differ.
+  # `docker compose down -v` clears them, forcing a full reinstall on next
+  # `up` — the same escape hatch as deleting node_modules locally.
+  eventory-api-root-node-modules:
+  eventory-api-node-modules:
+  eventory-web-root-node-modules:
+  eventory-web-node-modules:
   eventory-photo-storage:
