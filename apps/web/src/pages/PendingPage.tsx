@@ -43,6 +43,11 @@ export function PendingPage() {
             {user?.email ?? 'Your account'} is signed in but hasn&apos;t been approved by a
             household admin yet.
           </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Setting this up for the first time and expected to land here as the admin? Ask whoever
+            manages this instance to add your email to the <code>EVENTORY_ADMIN_EMAILS</code>{' '}
+            environment variable (see the README), then sign in again.
+          </Typography>
           <Stack direction="row" spacing={2}>
             <Button
               variant="contained"

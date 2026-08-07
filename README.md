@@ -174,6 +174,29 @@ DevTools → Application → Cache Storage — only `eventory-storage-images` sh
 (never an API-response cache), and Network tab requests to `/api/*` should show `(from
 disk cache)`/`(from ServiceWorker)` **never** appearing for API calls.
 
+## Auth: admin bootstrap and recovery (EVT-20)
+
+Google sign-in (`apps/api/src/auth/auth.service.ts`) auto-promotes the FIRST-ever user to
+`admin` + `approved`, so the household is never locked out waiting for an admin to approve
+the very first admin. "First" only counts rows that have actually signed in via Google
+(have a `googleId`) — a manually-seeded/dev row with no `googleId` never consumes this slot.
+
+That said, the count-based check can still be defeated by any pre-existing row that *does*
+have a `googleId` (e.g. a persisted-volume leftover from earlier testing). For a guaranteed
+bootstrap, or to recover an already-stuck instance, set `EVENTORY_ADMIN_EMAILS` (see
+`apps/api/.env.example`) — a comma-separated allowlist of Google account emails that
+**always** land `admin` + `approved` on sign-in, independent of the table's row count:
+
+```bash
+# apps/api/.env
+EVENTORY_ADMIN_EMAILS=you@example.com
+```
+
+Then sign in (or sign in again, if you're already stuck on the "pending" page) with that
+Google account — no manual SQL required. This works both for a brand-new deployment and for
+recovering an instance where someone else's row already consumed the first-user slot; the
+promotion is applied retroactively on sign-in even if the row already exists as `pending`.
+
 ## Other useful commands
 
 ```bash

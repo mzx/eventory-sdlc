@@ -74,6 +74,34 @@ export function resolveJwtSecret(env: NodeJS.ProcessEnv = process.env): string {
 const TOKEN_EXPIRY = '30d';
 const COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * Parses `EVENTORY_ADMIN_EMAILS` — a comma-separated allowlist of emails
+ * that ALWAYS land `admin` + `approved` on sign-in (see
+ * `upsertFromGoogleProfile`), independent of the `User` table's row count.
+ *
+ * This is the operator bootstrap mechanism (EVT-20): the count-based
+ * first-user auto-promotion below can be defeated by any pre-existing row
+ * (e.g. a seeded/dev fixture, or a stale row left over in a persisted
+ * Docker volume) consuming the "first user" slot before the real operator
+ * ever signs in. Setting this env var to the operator's own Google account
+ * email guarantees they get promoted on sign-in regardless of what else is
+ * in the table — and doubles as the recovery path for an already-stuck
+ * instance: set the var, then sign in (or sign in again) with that account.
+ *
+ * Case-insensitive, trims whitespace, ignores empty entries.
+ */
+export function parseAdminAllowlist(raw: string | undefined): Set<string> {
+  if (!raw) {
+    return new Set();
+  }
+  return new Set(
+    raw
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter((email) => email.length > 0),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -124,20 +152,39 @@ export class AuthService {
    *   check, which is the other half of this defense) would otherwise
    *   hijack whatever existing row — including an approved admin's — has
    *   that email (EVT-14 review round 2, finding 2).
-   * - The FIRST user ever created is auto-promoted to `admin` + `approved`
-   *   so the household is never locked out waiting for an admin to approve
-   *   the very first admin. The count-then-create is wrapped in an
-   *   interactive transaction so two concurrent first sign-ins can't both
-   *   observe `count() === 0` and both become admin (EVT-14 review round
-   *   2, finding 5).
+   * - The FIRST user to EVER sign in via Google is auto-promoted to `admin`
+   *   + `approved` so the household is never locked out waiting for an
+   *   admin to approve the very first admin. "First" only counts rows that
+   *   have a `googleId` bound (EVT-20 AC2) — a seeded/dev/placeholder row
+   *   created directly in the DB, with no `googleId`, must not consume this
+   *   slot before a real operator ever signs in. The count-then-create is
+   *   wrapped in an interactive transaction so two concurrent first
+   *   sign-ins can't both observe `count() === 0` and both become admin
+   *   (EVT-14 review round 2, finding 5).
+   * - `EVENTORY_ADMIN_EMAILS` (see `parseAdminAllowlist`) is the reliable
+   *   operator bootstrap mechanism: any email on that allowlist ALWAYS lands
+   *   `admin` + `approved` on sign-in — on first creation, and retroactively
+   *   promoted on a later sign-in if they already exist as `pending` /
+   *   `rejected` / plain `user` — independent of the first-user count
+   *   (EVT-20 AC1). This is what recovers an already-stuck instance: set
+   *   the env var, then have the operator sign in (again).
    * - Every sign-in (new or returning) stamps `lastLoginAt`.
    */
-  async upsertFromGoogleProfile(profile: GoogleProfile): Promise<User> {
+  async upsertFromGoogleProfile(
+    profile: GoogleProfile,
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<User> {
+    const adminAllowlist = parseAdminAllowlist(env.EVENTORY_ADMIN_EMAILS);
+    const isAllowlistedAdmin = adminAllowlist.has(profile.email.toLowerCase());
+
     const byGoogleId = await this.prisma.user.findUnique({
       where: { googleId: profile.googleId },
     });
 
     if (byGoogleId) {
+      const needsPromotion =
+        isAllowlistedAdmin &&
+        !(byGoogleId.role === UserRole.admin && byGoogleId.status === UserStatus.approved);
       return this.prisma.user.update({
         where: { id: byGoogleId.id },
         data: {
@@ -145,6 +192,11 @@ export class AuthService {
           name: profile.name,
           picture: profile.picture,
           lastLoginAt: new Date(),
+          ...(needsPromotion && {
+            role: UserRole.admin,
+            status: UserStatus.approved,
+            approvedAt: new Date(),
+          }),
         },
       });
     }
@@ -160,6 +212,9 @@ export class AuthService {
           'This email address is already linked to a different Google account.',
         );
       }
+      const needsPromotion =
+        isAllowlistedAdmin &&
+        !(byEmail.role === UserRole.admin && byEmail.status === UserStatus.approved);
       return this.prisma.user.update({
         where: { id: byEmail.id },
         data: {
@@ -167,12 +222,18 @@ export class AuthService {
           name: profile.name,
           picture: profile.picture,
           lastLoginAt: new Date(),
+          ...(needsPromotion && {
+            role: UserRole.admin,
+            status: UserStatus.approved,
+            approvedAt: new Date(),
+          }),
         },
       });
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const isFirstUser = (await tx.user.count()) === 0;
+      const isFirstOAuthUser = (await tx.user.count({ where: { googleId: { not: null } } })) === 0;
+      const promote = isFirstOAuthUser || isAllowlistedAdmin;
 
       return tx.user.create({
         data: {
@@ -181,7 +242,7 @@ export class AuthService {
           name: profile.name,
           picture: profile.picture,
           lastLoginAt: new Date(),
-          ...(isFirstUser && {
+          ...(promote && {
             role: UserRole.admin,
             status: UserStatus.approved,
             approvedAt: new Date(),
