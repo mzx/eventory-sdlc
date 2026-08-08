@@ -1,0 +1,43 @@
+{
+  "projectId": "79be4a32-a8ec-4cd1-a1e0-70eeaaf336a3",
+  "shape": "storybook",
+  "pkg": "@eventory/web",
+  "globalName": "EventoryWeb",
+  "entry": "apps/web/ds.entry.ts",
+  "storybookStatic": ".design-sync/sb-reference",
+  "storybookConfigDir": "apps/web/.storybook",
+  "readmeHeader": ".design-sync/conventions.md",
+  "buildCmd": "cd apps/web && rm -rf ds-types && npx tsc ds.entry.ts src/vite-env.d.ts --declaration --emitDeclarationOnly --outDir ds-types --target ES2020 --lib ES2020,DOM,DOM.Iterable --jsx react-jsx --module ESNext --moduleResolution bundler --strict --skipLibCheck",
+  "provider": {
+    "component": "ThemeProvider",
+    "props": { "theme": { "$ref": "theme" } },
+    "inner": {
+      "component": "CssBaseline",
+      "inner": { "component": "MemoryRouter" }
+    }
+  },
+  "storyImports": {
+    "shim": ["@mui/material"]
+  },
+  "overrides": {
+    "ItemCard": {
+      "skip": ["components-itemcard--with-photo"],
+      "primaryStory": "PhotoPlaceholder"
+    },
+    "QrThumb": {
+      "skip": [
+        "components-qrthumb--default",
+        "components-qrthumb--small",
+        "components-qrthumb--no-label"
+      ]
+    },
+    "ScannerDialog": {
+      "cardMode": "single",
+      "primaryStory": "Scanning"
+    },
+    "UserMenu": {
+      "skip": ["components-usermenu--open-admin", "components-usermenu--open-member"],
+      "primaryStory": "Closed"
+    }
+  }
+}
