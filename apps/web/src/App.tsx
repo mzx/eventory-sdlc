@@ -94,8 +94,8 @@ function AppShell() {
           <Button
             component={RouterLink}
             to="/intake"
-            color="inherit"
-            variant="outlined"
+            color="primary"
+            variant="contained"
             startIcon={<AddIcon />}
             sx={{ ml: 1 }}
           >
