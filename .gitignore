@@ -40,3 +40,15 @@ npm-debug.log*
 # Claude Code local (machine-specific) settings
 .claude/settings.local.json
 docker-compose.override.yml
+
+*storybook.log
+storybook-static
+
+# design-sync (claude.ai/design) transient state — durable inputs in .design-sync/ stay committed
+.design-sync/sb-reference/
+.design-sync/learnings/
+.design-sync/.cache/
+.design-sync/node_modules
+.ds-sync/
+ds-bundle/
+apps/web/ds-types/

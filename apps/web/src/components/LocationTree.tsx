@@ -25,6 +25,8 @@ interface LocationTreeProps {
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   depth?: number;
+  /** Render every row with children initially expanded (deep links, previews). */
+  defaultExpanded?: boolean;
 }
 
 /** Recursive, collapsible location tree with inline add-child/rename/delete actions. */
@@ -34,6 +36,7 @@ export function LocationTree({
   onRename,
   onDelete,
   depth = 0,
+  defaultExpanded = false,
 }: LocationTreeProps) {
   return (
     <List dense disablePadding={depth > 0}>
@@ -45,6 +48,7 @@ export function LocationTree({
           onAddChild={onAddChild}
           onRename={onRename}
           onDelete={onDelete}
+          defaultExpanded={defaultExpanded}
         />
       ))}
     </List>
@@ -57,10 +61,18 @@ interface LocationTreeRowProps {
   onAddChild: (parentId: string | null, name: string) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
+  defaultExpanded: boolean;
 }
 
-function LocationTreeRow({ node, depth, onAddChild, onRename, onDelete }: LocationTreeRowProps) {
-  const [expanded, setExpanded] = useState(false);
+function LocationTreeRow({
+  node,
+  depth,
+  onAddChild,
+  onRename,
+  onDelete,
+  defaultExpanded,
+}: LocationTreeRowProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [addingChild, setAddingChild] = useState(false);
   const [childName, setChildName] = useState('');
   const [renaming, setRenaming] = useState(false);
@@ -208,6 +220,7 @@ function LocationTreeRow({ node, depth, onAddChild, onRename, onDelete }: Locati
               onRename={onRename}
               onDelete={onDelete}
               depth={depth + 1}
+              defaultExpanded={defaultExpanded}
             />
           </Box>
         </Collapse>

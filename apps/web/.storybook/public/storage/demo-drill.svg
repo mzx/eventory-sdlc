@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eceff1"/>
+      <stop offset="1" stop-color="#cfd8dc"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="300" fill="url(#bg)"/>
+  <!-- workbench surface -->
+  <rect y="230" width="400" height="70" fill="#a1887f"/>
+  <rect y="230" width="400" height="8" fill="#8d6e63"/>
+  <!-- drill body -->
+  <g transform="translate(90,90)">
+    <rect x="0" y="30" width="150" height="52" rx="10" fill="#2e7d32"/>
+    <rect x="150" y="38" width="52" height="36" rx="6" fill="#455a64"/>
+    <rect x="202" y="48" width="26" height="16" rx="4" fill="#90a4ae"/>
+    <!-- handle -->
+    <rect x="34" y="76" width="40" height="80" rx="10" fill="#2e7d32"/>
+    <!-- battery -->
+    <rect x="24" y="146" width="64" height="26" rx="6" fill="#37474f"/>
+    <!-- trigger -->
+    <rect x="76" y="84" width="14" height="24" rx="5" fill="#ffb300"/>
+    <!-- vents -->
+    <rect x="18" y="42" width="6" height="28" rx="3" fill="#1b5e20"/>
+    <rect x="30" y="42" width="6" height="28" rx="3" fill="#1b5e20"/>
+    <rect x="42" y="42" width="6" height="28" rx="3" fill="#1b5e20"/>
+  </g>
+</svg>
