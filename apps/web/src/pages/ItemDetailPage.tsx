@@ -138,7 +138,9 @@ export function ItemDetailPage() {
         <Box
           sx={{
             height: 150,
-            bgcolor: 'grey.100',
+            bgcolor: 'background.default',
+            boxShadow:
+              'inset 3px 3px 7px rgba(0, 0, 0, 0.5), inset -2px -2px 5px rgba(255, 255, 255, 0.03)',
             borderRadius: 1,
             display: 'flex',
             alignItems: 'center',

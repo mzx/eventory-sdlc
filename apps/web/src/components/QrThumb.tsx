@@ -81,7 +81,19 @@ export function QrThumb({ token, label, printHref, size = 160 }: QrThumbProps) {
         component="img"
         src={thumbSrc}
         alt={label ? `QR code for ${label}` : 'QR code'}
-        sx={{ width: size, height: size, bgcolor: 'grey.50', border: 1, borderColor: 'divider' }}
+        sx={{
+          width: size,
+          height: size,
+          // Deliberate light "sticker": the served QR PNG is white-backed and a
+          // printed code must sit on light ground to stay scannable — keep
+          // this surface white inside the dark UI.
+          boxSizing: 'content-box',
+          p: 1,
+          bgcolor: '#ffffff',
+          borderRadius: '10px',
+          border: '1px solid rgba(255, 255, 255, 0.16)',
+          boxShadow: '6px 6px 14px rgba(0, 0, 0, 0.45), -4px -4px 10px rgba(255, 255, 255, 0.045)',
+        }}
       />
       {label && (
         <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center' }}>
