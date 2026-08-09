@@ -18,6 +18,7 @@ import {
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { frostedPanel } from '../theme';
 import {
   fetchUsers,
   updateUserRole,
@@ -162,44 +163,46 @@ export function AdminUsersPage() {
       )}
 
       {usersQuery.isSuccess && (
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>User</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Role</TableCell>
-              <TableCell>Last login</TableCell>
-              <TableCell align="right">Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.id} data-testid="admin-user-row">
-                <TableCell>
-                  <Stack direction="row" spacing={1.5} alignItems="center">
-                    <Avatar src={row.picture ?? undefined} sx={{ width: 28, height: 28 }}>
-                      {(row.name ?? row.email).charAt(0).toUpperCase()}
-                    </Avatar>
-                    <Box>
-                      <Typography variant="body2">{row.name ?? row.email}</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {row.email}
-                      </Typography>
-                    </Box>
-                  </Stack>
-                </TableCell>
-                <TableCell>
-                  <Chip size="small" label={row.status} color={STATUS_COLOR[row.status]} />
-                </TableCell>
-                <TableCell>{row.role}</TableCell>
-                <TableCell>{formatDate(row.lastLoginAt)}</TableCell>
-                <TableCell align="right">
-                  <UserRowActions row={row} isSelf={row.id === currentUser?.id} />
-                </TableCell>
+        <Box sx={{ ...frostedPanel, overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>User</TableCell>
+                <TableCell>Status</TableCell>
+                <TableCell>Role</TableCell>
+                <TableCell>Last login</TableCell>
+                <TableCell align="right">Actions</TableCell>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHead>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow key={row.id} data-testid="admin-user-row">
+                  <TableCell>
+                    <Stack direction="row" spacing={1.5} alignItems="center">
+                      <Avatar src={row.picture ?? undefined} sx={{ width: 28, height: 28 }}>
+                        {(row.name ?? row.email).charAt(0).toUpperCase()}
+                      </Avatar>
+                      <Box>
+                        <Typography variant="body2">{row.name ?? row.email}</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {row.email}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </TableCell>
+                  <TableCell>
+                    <Chip size="small" label={row.status} color={STATUS_COLOR[row.status]} />
+                  </TableCell>
+                  <TableCell>{row.role}</TableCell>
+                  <TableCell>{formatDate(row.lastLoginAt)}</TableCell>
+                  <TableCell align="right">
+                    <UserRowActions row={row} isSelf={row.id === currentUser?.id} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Box>
       )}
     </Stack>
   );

@@ -2,12 +2,11 @@ import { createTheme } from '@mui/material';
 import type { Shadows } from '@mui/material/styles';
 
 /**
- * Black-neomorphism theme — near-black canvas, soft-extruded charcoal
- * surfaces. Depth comes from a dual shadow (dark drop bottom-right + faint
- * light sheen top-left), ~145deg surface gradients, and hairline light
- * borders — never from color. The single accent is Eventory's workshop
- * green, re-lit luminous for dark surfaces; everything else is grayscale so
- * the one color always reads as "the action".
+ * Blueprint theme — the app as a workshop technical drawing. Deep Prussian
+ * blue drafting paper with a minor/major grid, panels drawn with 1px line
+ * borders instead of shadows (line work carries ALL depth — the elevation
+ * ramp is flat), monospace annotations for headings/labels, and a single
+ * cyan accent for actions and focus.
  *
  * Phone-first constraints kept from the original theme: this app is used
  * standing in a garage, often one-handed/gloved — tap targets stay >= 44px
@@ -15,116 +14,124 @@ import type { Shadows } from '@mui/material/styles';
  * glare).
  */
 
-// --- Gray ramp anchors ------------------------------------------------------
-const CANVAS = '#141418'; // page background
-const SURFACE = '#1e1e23'; // paper base
-const SUNKEN = '#17171b'; // inset wells (inputs, media wells)
-const HAIRLINE = 'rgba(255, 255, 255, 0.07)';
+// --- Drafting paper ---------------------------------------------------------
+const CANVAS = '#0b2138'; // deep blueprint paper
+const PANEL = '#0f2a46'; // drawn panels (cards, menus, dialogs)
+const PANEL_HIGH = '#123152'; // hover/raised panel tone
+const APPBAR = '#081b30'; // title block bar
 
-// --- Accent: workshop green, re-lit for dark --------------------------------
-// ~7.9:1 as text on SURFACE; near-black ink on green fills is ~8.9:1.
-const ACCENT = '#7ac47f';
-const ACCENT_INK = '#0e1810';
+// --- Line work --------------------------------------------------------------
+const LINE = 'rgba(159, 198, 232, 0.32)'; // standard drawn line
+const LINE_FAINT = 'rgba(159, 198, 232, 0.16)';
+const LINE_STRONG = 'rgba(159, 198, 232, 0.55)';
 
-// --- Neumorphic recipe ------------------------------------------------------
-const SURFACE_GRADIENT = 'linear-gradient(145deg, #232329 0%, #1a1a1f 100%)';
-const SURFACE_GRADIENT_HIGH = 'linear-gradient(145deg, #26262c 0%, #1b1b21 100%)';
+// --- Ink & accent -----------------------------------------------------------
+const INK = '#e8f2fb'; // primary text, ~13:1 on PANEL
+const INK_DIM = '#a9c4dc'; // annotations, ~7:1 on PANEL
+const ACCENT = '#64d2ff'; // cyan — actions, focus, "live" lines
+const ACCENT_INK = '#062036'; // text on cyan fills, ~9:1
 
-/** Raised tile: dark drop shadow bottom-right + faint light sheen top-left. */
-const RAISED = '6px 6px 14px rgba(0, 0, 0, 0.45), -4px -4px 10px rgba(255, 255, 255, 0.045)';
-const RAISED_SM = '3px 3px 8px rgba(0, 0, 0, 0.4), -2px -2px 6px rgba(255, 255, 255, 0.04)';
-/** Pressed control: inset dual shadow. */
-const PRESSED =
-  'inset 4px 4px 9px rgba(0, 0, 0, 0.55), inset -3px -3px 7px rgba(255, 255, 255, 0.035)';
-/** Sunken field well (inputs) — shallower inset. */
-const WELL = 'inset 3px 3px 7px rgba(0, 0, 0, 0.5), inset -2px -2px 5px rgba(255, 255, 255, 0.03)';
-/** Keyboard-focus ring + soft green bloom — visible on any charcoal surface. */
-const FOCUS_RING = '0 0 0 2px rgba(122, 196, 127, 0.55), 0 0 12px 2px rgba(122, 196, 127, 0.22)';
+// Drafting annotations (headings, buttons, captions) are monospace; body
+// copy stays on the system sans stack for reading comfort.
+const MONO = '"SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace';
 
-/** Regenerated elevation ramp: every MUI elevation keeps the dual-source language. */
-const neuShadows = [
-  'none',
-  ...Array.from({ length: 24 }, (_, i) => {
-    const drop = Math.min(i + 2, 16);
-    const blur = drop * 2 + 6;
-    const sheen = Math.max(2, Math.round(drop * 0.6));
-    return (
-      `${drop}px ${drop}px ${blur}px rgba(0, 0, 0, 0.45), ` +
-      `-${sheen}px -${sheen}px ${Math.round(blur * 0.75)}px rgba(255, 255, 255, 0.04)`
-    );
-  }),
-] as unknown as Shadows;
+/** Dashed drafting focus indicator — unmistakable on any panel tone. */
+const FOCUS_OUTLINE = {
+  outline: '2px dashed rgba(100, 210, 255, 0.9)',
+  outlineOffset: '2px',
+} as const;
+
+/** Blueprint is flat line work: every MUI elevation renders no shadow. */
+const flatShadows = Array(25).fill('none') as unknown as Shadows;
+
+/**
+ * Frosted drawing panel for list/tree surfaces: translucent fill with a
+ * backdrop blur, so the drafting grid shows through softly instead of
+ * running hard behind row text. Use on CONTAINER panels (a tree, a table),
+ * never per-row/per-card — backdrop-filter is GPU-expensive when repeated.
+ */
+export const frostedPanel = {
+  bgcolor: 'rgba(15, 42, 70, 0.55)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  border: `1px solid ${LINE}`,
+  borderRadius: '2px',
+} as const;
 
 export const theme = createTheme({
   palette: {
     mode: 'dark',
-    // Workshop green survives the redesign, desaturated + luminous for dark.
-    primary: { main: ACCENT, light: '#9ad39e', dark: '#5aa763', contrastText: ACCENT_INK },
-    // Kept (not dropped) so `color="secondary"` API keeps working, but muted
-    // to ember so the field stays essentially monochrome.
-    secondary: { main: '#cf9a62', light: '#e0b285', dark: '#b07f4c', contrastText: '#1c1207' },
-    // Severity stays chromatic on purpose — safety signal, not brand accent.
-    error: { main: '#e57373' },
-    warning: { main: '#ffb74d' },
-    info: { main: '#7dbcd8' },
-    success: { main: '#81c784' },
-    background: { default: CANVAS, paper: SURFACE },
-    divider: 'rgba(255, 255, 255, 0.08)',
+    // Cyan accent: the "live" line on the drawing — actions, focus, links.
+    primary: { main: ACCENT, light: '#8fdfff', dark: '#3ba9d6', contrastText: ACCENT_INK },
+    // Draftsman's red-pencil markup, muted; keeps color="secondary" API alive.
+    secondary: { main: '#e8927c', light: '#f2ac99', dark: '#c76f5a', contrastText: '#2a0f08' },
+    // Severity stays chromatic — safety signal, not drawing style.
+    error: { main: '#ef8a80' },
+    warning: { main: '#ffc66e' },
+    info: { main: '#7dc4e8' },
+    success: { main: '#8fd6a0' },
+    background: { default: CANVAS, paper: PANEL },
+    divider: LINE,
     text: {
-      primary: '#ececf1', // ~14:1 on SURFACE
-      secondary: '#a9a9b4', // ~7:1 on SURFACE — survives the gradient's light stop
-      disabled: 'rgba(236, 236, 241, 0.45)',
+      primary: INK,
+      secondary: INK_DIM,
+      disabled: 'rgba(232, 242, 251, 0.42)',
     },
-    // Ramp re-centered for the dark UI so existing component tokens resolve
-    // correctly with zero edits: grey.900 stays near-black (ScannerDialog
-    // video well), grey.400/500 are legible mid-gray icon tones (ItemCard,
+    // Ramp re-centered on blueprint tones so existing component tokens
+    // resolve with zero edits: grey.900 stays near-black-navy (ScannerDialog
+    // video well), grey.400/500 are legible line-blue icon tones (ItemCard,
     // ItemsPage, ProjectsPage, PendingPage placeholder icons).
     grey: {
-      50: '#f4f4f6',
-      100: '#e8e8ec',
-      200: '#d4d4da',
-      300: '#b7b7c0',
-      400: '#8f8f9a', // ~5:1 on the canvas — decorative 48px icons stay visible
-      500: '#84848f',
-      600: '#54545e',
-      700: '#3a3a42',
-      800: '#26262b',
-      900: '#17171b',
-      A100: '#e8e8ec',
-      A200: '#d4d4da',
-      A400: '#8f8f9a',
-      A700: '#3a3a42',
+      50: '#eef5fb',
+      100: '#dce9f5',
+      200: '#bcd6ec',
+      300: '#9fc6e8',
+      400: '#7fa5c8', // ~5:1 on CANVAS — decorative 48px icons stay visible
+      500: '#6f95b8',
+      600: '#41648a',
+      700: '#28496e',
+      800: '#123152',
+      900: '#081726',
+      A100: '#dce9f5',
+      A200: '#bcd6ec',
+      A400: '#7fa5c8',
+      A700: '#28496e',
     },
     action: {
-      active: '#c9c9d2',
-      hover: 'rgba(255, 255, 255, 0.06)',
-      selected: 'rgba(255, 255, 255, 0.09)',
-      disabled: 'rgba(236, 236, 241, 0.32)',
-      disabledBackground: 'rgba(255, 255, 255, 0.06)',
-      focus: 'rgba(122, 196, 127, 0.24)',
+      active: '#bcd6ec',
+      hover: 'rgba(159, 198, 232, 0.08)',
+      selected: 'rgba(159, 198, 232, 0.14)',
+      disabled: 'rgba(232, 242, 251, 0.3)',
+      disabledBackground: 'rgba(159, 198, 232, 0.12)',
+      focus: 'rgba(100, 210, 255, 0.24)',
     },
   },
-  // Generous rounding is part of the neumorphic language (was 8).
-  shape: { borderRadius: 14 },
-  shadows: neuShadows,
+  // Drafting corners are sharp.
+  shape: { borderRadius: 2 },
+  shadows: flatShadows,
   typography: {
-    button: { textTransform: 'none', fontWeight: 600, letterSpacing: 0.2 },
-    subtitle1: { fontWeight: 600 },
-    h5: { fontWeight: 600 },
-    h6: { fontWeight: 600 },
+    button: { fontFamily: MONO, textTransform: 'uppercase', fontWeight: 600, letterSpacing: 1 },
+    h5: { fontFamily: MONO, fontWeight: 600, letterSpacing: 0.5 },
+    h6: { fontFamily: MONO, fontWeight: 600, letterSpacing: 0.5 },
+    subtitle1: { fontFamily: MONO, fontWeight: 600 },
+    caption: { fontFamily: MONO, letterSpacing: 0.4 }, // breadcrumbs read as annotations
+    overline: { fontFamily: MONO, letterSpacing: 1.5 },
   },
   components: {
     MuiCssBaseline: {
       styleOverrides: {
         html: { colorScheme: 'dark' },
+        // The drafting paper: minor 8px grid + major 40px grid.
         body: {
           backgroundColor: CANVAS,
-          // Barely-there vignette so the canvas isn't a flat void.
-          backgroundImage: 'radial-gradient(1100px 700px at 15% -10%, #1b1b20 0%, #141418 60%)',
-          backgroundAttachment: 'fixed',
+          backgroundImage:
+            `linear-gradient(${'rgba(159,198,232,0.022)'} 1px, transparent 1px), ` +
+            `linear-gradient(90deg, ${'rgba(159,198,232,0.022)'} 1px, transparent 1px), ` +
+            `linear-gradient(${'rgba(159,198,232,0.04)'} 1px, transparent 1px), ` +
+            `linear-gradient(90deg, ${'rgba(159,198,232,0.04)'} 1px, transparent 1px)`,
+          backgroundSize: '8px 8px, 8px 8px, 40px 40px, 40px 40px',
         },
-        // Printers drop dark backgrounds, which would leave near-white UI
-        // text invisible on paper — force ink-on-white for print output so
+        // Printers drop dark backgrounds — force ink-on-white for print so
         // the QR sticker routes (ItemPrintPage) stay legible.
         '@media print': {
           body: { backgroundColor: '#ffffff', backgroundImage: 'none', color: '#000000' },
@@ -139,35 +146,33 @@ export const theme = createTheme({
     },
     MuiPaper: {
       styleOverrides: {
-        // Kill MUI's dark-mode elevation overlay, then paint our own
-        // top-left-lit surface gradient per variant below.
+        // Panels are drawn, not lit: solid fill + line border, no overlay.
         root: {
           backgroundImage: 'none',
-          border: `1px solid ${HAIRLINE}`,
+          border: `1px solid ${LINE}`,
         },
-        elevation: { backgroundImage: SURFACE_GRADIENT },
-        // `variant="outlined"` Paper (ItemCard's Card, LoginPage) reads as a
-        // raised tile, not a flat outline — outlined papers have no elevation
-        // shadow unless we add one here.
-        outlined: { backgroundImage: SURFACE_GRADIENT, boxShadow: RAISED },
+        outlined: { borderColor: LINE },
       },
     },
     MuiCard: {
       styleOverrides: {
         root: {
-          borderRadius: 18,
-          overflow: 'hidden', // square media (ItemCard photo well) follows the big radius
-          backgroundImage: SURFACE_GRADIENT,
-          border: `1px solid ${HAIRLINE}`,
-          boxShadow: RAISED,
+          borderRadius: 2,
+          overflow: 'hidden',
+          border: `1px solid ${LINE}`,
+          backgroundColor: PANEL,
+          transition: 'border-color 120ms ease, background-color 120ms ease',
+          '&:hover': { borderColor: LINE_STRONG },
         },
       },
     },
     MuiCardActionArea: {
       styleOverrides: {
         root: {
-          // Inset ring survives the card's overflow:hidden clipping.
-          '&.Mui-focusVisible': { boxShadow: 'inset 0 0 0 2px rgba(122, 196, 127, 0.6)' },
+          '&.Mui-focusVisible': {
+            outline: '2px dashed rgba(100, 210, 255, 0.9)',
+            outlineOffset: '-4px',
+          },
         },
       },
     },
@@ -176,75 +181,54 @@ export const theme = createTheme({
       styleOverrides: {
         root: {
           minHeight: 44, // gloved-thumb tap target, all sizes incl. size="small"
-          borderRadius: 12,
-          transition: 'box-shadow 120ms ease, background-color 120ms ease, transform 120ms ease',
-          '&.Mui-focusVisible': { boxShadow: FOCUS_RING },
+          borderRadius: 2,
+          transition: 'border-color 120ms ease, background-color 120ms ease',
+          '&.Mui-focusVisible': FOCUS_OUTLINE,
         },
-        // Neutral contained buttons are raised charcoal tiles that press in.
+        // Neutral contained buttons: filled panel with a drawn border.
         contained: {
-          backgroundColor: '#202025',
-          backgroundImage: SURFACE_GRADIENT_HIGH,
-          border: `1px solid ${HAIRLINE}`,
-          boxShadow: RAISED_SM,
-          '&:hover': { boxShadow: RAISED, backgroundColor: '#232329' },
-          '&:active': { boxShadow: PRESSED, transform: 'translateY(1px)' },
-          '&.Mui-focusVisible': { boxShadow: `${FOCUS_RING}, ${RAISED_SM}` },
-          '&.Mui-disabled': { backgroundImage: 'none', boxShadow: 'none' },
+          backgroundColor: PANEL_HIGH,
+          border: `1px solid ${LINE}`,
+          color: INK,
+          '&:hover': { backgroundColor: '#16395f', borderColor: LINE_STRONG },
+          '&:active': { backgroundColor: '#0d2743' },
         },
-        // The one loud element: luminous workshop-green CTA with a soft bloom
-        // — the inspiration's glowing accent, in brand color.
+        // The one loud element: solid cyan CTA — the "live" line made a block.
         containedPrimary: {
-          color: ACCENT_INK,
           backgroundColor: ACCENT,
-          backgroundImage: 'linear-gradient(145deg, #8ccf92 0%, #67b16e 100%)',
-          border: '1px solid rgba(255, 255, 255, 0.14)',
-          boxShadow:
-            '5px 5px 12px rgba(0, 0, 0, 0.5), -3px -3px 8px rgba(255, 255, 255, 0.05), 0 0 14px rgba(122, 196, 127, 0.22)',
-          '&:hover': {
-            backgroundColor: '#86cb8c',
-            backgroundImage: 'linear-gradient(145deg, #97d69c 0%, #6fb976 100%)',
-          },
-          '&:active': {
-            backgroundImage: 'linear-gradient(145deg, #67b16e 0%, #8ccf92 100%)',
-            boxShadow:
-              'inset 4px 4px 8px rgba(0, 0, 0, 0.35), inset -2px -2px 6px rgba(255, 255, 255, 0.15)',
-          },
+          border: '1px solid rgba(255, 255, 255, 0.25)',
+          color: ACCENT_INK,
+          '&:hover': { backgroundColor: '#8fdfff' },
+          '&:active': { backgroundColor: '#3ba9d6' },
         },
         containedSecondary: {
-          color: '#1c1207',
-          backgroundImage: 'linear-gradient(145deg, #daa771 0%, #bf8a52 100%)',
-          border: '1px solid rgba(255, 255, 255, 0.12)',
-          boxShadow: RAISED_SM,
-          '&:active': { boxShadow: 'inset 3px 3px 7px rgba(0, 0, 0, 0.3)' },
+          backgroundColor: '#e8927c',
+          border: '1px solid rgba(255, 255, 255, 0.2)',
+          color: '#2a0f08',
+          '&:hover': { backgroundColor: '#f2ac99' },
         },
         outlined: {
-          borderColor: 'rgba(255, 255, 255, 0.16)',
-          backgroundColor: 'rgba(255, 255, 255, 0.02)',
-          backgroundImage: SURFACE_GRADIENT,
-          boxShadow: RAISED_SM,
-          '&:hover': {
-            borderColor: 'rgba(255, 255, 255, 0.28)',
-            backgroundColor: 'rgba(255, 255, 255, 0.04)',
-          },
-          '&:active': { boxShadow: PRESSED },
+          borderColor: LINE_STRONG,
+          color: INK,
+          backgroundColor: 'transparent',
+          '&:hover': { borderColor: ACCENT, backgroundColor: 'rgba(100, 210, 255, 0.08)' },
+          '&:active': { backgroundColor: 'rgba(100, 210, 255, 0.14)' },
         },
-        // Deliberately flat (AppBar nav, dialog actions) — raising every text
-        // button would be noise; hover/pressed still unmistakable.
+        outlinedPrimary: { borderColor: 'rgba(100, 210, 255, 0.6)', color: ACCENT },
         text: {
-          '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.07)' },
-          '&:active': { backgroundColor: 'rgba(0, 0, 0, 0.28)', boxShadow: PRESSED },
+          color: INK_DIM,
+          '&:hover': { backgroundColor: 'rgba(159, 198, 232, 0.1)', color: INK },
         },
       },
     },
     MuiIconButton: {
       styleOverrides: {
         root: {
-          color: '#a9a9b4',
-          transition: 'box-shadow 120ms ease, background-color 120ms ease',
-          '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.07)' },
-          '&:active': { boxShadow: PRESSED },
-          '&.Mui-focusVisible': { boxShadow: FOCUS_RING },
-          '&.Mui-disabled': { color: 'rgba(255, 255, 255, 0.26)' },
+          color: INK_DIM,
+          borderRadius: 2,
+          '&:hover': { backgroundColor: 'rgba(159, 198, 232, 0.1)', color: INK },
+          '&.Mui-focusVisible': FOCUS_OUTLINE,
+          '&.Mui-disabled': { color: 'rgba(232, 242, 251, 0.24)' },
         },
         sizeSmall: {
           // Keep the compact visual (LocationTree row density) but extend the
@@ -257,118 +241,124 @@ export const theme = createTheme({
     },
     MuiChip: {
       styleOverrides: {
-        root: { fontWeight: 500 },
-        // Raised badge chips — the inspiration's tiny "+33%" pills.
+        // Tags read as drawn labels: line box, mono text, sharp corners.
+        root: {
+          fontFamily: MONO,
+          fontWeight: 500,
+          borderRadius: 2,
+          letterSpacing: 0.3,
+        },
         filled: {
-          backgroundColor: '#26262b',
-          backgroundImage: 'linear-gradient(145deg, #2b2b31 0%, #202025 100%)',
-          border: `1px solid ${HAIRLINE}`,
-          color: '#d6d6de',
-          boxShadow: '2px 2px 5px rgba(0, 0, 0, 0.35), -1px -1px 3px rgba(255, 255, 255, 0.04)',
+          backgroundColor: 'rgba(159, 198, 232, 0.12)',
+          border: `1px solid ${LINE}`,
+          color: '#cfe2f3',
         },
-        // Chips-of-interest: quiet green glow instead of a solid fill.
         colorPrimary: {
-          backgroundColor: 'rgba(122, 196, 127, 0.16)',
-          backgroundImage: 'none',
-          border: '1px solid rgba(122, 196, 127, 0.35)',
-          color: '#9ad39e',
+          backgroundColor: 'rgba(100, 210, 255, 0.14)',
+          border: '1px solid rgba(100, 210, 255, 0.45)',
+          color: ACCENT,
         },
-        // Count badges (LocationTree) read as quietly sunken, not raised.
+        // Count badges (LocationTree): quiet dotted-line boxes.
         outlined: {
-          borderColor: 'rgba(255, 255, 255, 0.14)',
-          backgroundColor: SUNKEN,
-          boxShadow: 'inset 2px 2px 4px rgba(0, 0, 0, 0.35)',
-          color: '#c9c9d2',
+          borderStyle: 'dashed',
+          borderColor: LINE,
+          backgroundColor: 'transparent',
+          color: INK_DIM,
         },
         deleteIcon: {
-          color: 'rgba(255, 255, 255, 0.4)',
-          '&:hover': { color: 'rgba(255, 255, 255, 0.7)' },
+          color: 'rgba(232, 242, 251, 0.4)',
+          '&:hover': { color: 'rgba(232, 242, 251, 0.75)' },
         },
       },
     },
     MuiOutlinedInput: {
       styleOverrides: {
-        // Fields read as sunken/engraved wells — the inverse of raised tiles.
+        // Fields are drawn boxes on the paper — transparent fill, line border.
         root: {
-          backgroundColor: SUNKEN,
-          borderRadius: 12,
-          boxShadow: WELL,
+          backgroundColor: 'rgba(8, 23, 38, 0.5)',
+          borderRadius: 2,
           '&.MuiInputBase-sizeSmall': { minHeight: 44 }, // LocationTree inline editors
-          '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255, 255, 255, 0.08)' },
-          '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255, 255, 255, 0.16)' },
-          '&.Mui-focused': { boxShadow: `${WELL}, 0 0 0 3px rgba(122, 196, 127, 0.18)` },
+          '& .MuiOutlinedInput-notchedOutline': { borderColor: LINE },
+          '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: LINE_STRONG },
           '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-            borderColor: 'rgba(122, 196, 127, 0.6)',
+            borderColor: ACCENT,
             borderWidth: 1,
           },
-          '&.Mui-error .MuiOutlinedInput-notchedOutline': { borderColor: '#e57373' },
+          '&.Mui-error .MuiOutlinedInput-notchedOutline': { borderColor: '#ef8a80' },
         },
         input: {
-          '&::placeholder': { color: '#8f8f9a', opacity: 1 }, // ~5:1 on SUNKEN
+          '&::placeholder': { color: '#7fa5c8', opacity: 1 }, // ~4.9:1 on the well
         },
       },
     },
     MuiInputLabel: {
       styleOverrides: {
         root: {
-          color: '#a9a9b4',
-          '&.Mui-focused': { color: '#9ad39e' },
+          fontFamily: MONO,
+          color: INK_DIM,
+          '&.Mui-focused': { color: ACCENT },
         },
       },
     },
     MuiDialog: {
       styleOverrides: {
+        // Detail view: a drawn panel with a heavier outer construction line.
         paper: {
-          borderRadius: 20,
-          backgroundImage: SURFACE_GRADIENT_HIGH,
-          border: '1px solid rgba(255, 255, 255, 0.08)',
-          boxShadow: '14px 14px 36px rgba(0, 0, 0, 0.6), -6px -6px 18px rgba(255, 255, 255, 0.04)',
+          borderRadius: 2,
+          backgroundColor: PANEL,
+          border: `1px solid ${LINE_STRONG}`,
+          boxShadow: `0 0 0 4px rgba(159, 198, 232, 0.08)`,
         },
+      },
+    },
+    MuiDialogTitle: {
+      styleOverrides: {
+        root: { fontFamily: MONO, fontWeight: 600, letterSpacing: 0.5 },
       },
     },
     MuiBackdrop: {
       styleOverrides: {
-        root: { backgroundColor: 'rgba(10, 10, 13, 0.72)' },
+        root: { backgroundColor: 'rgba(4, 14, 26, 0.72)' },
         invisible: { backgroundColor: 'transparent' },
       },
     },
     MuiAppBar: {
       styleOverrides: {
+        // The drawing's title block: darkest band, double rule underneath.
         root: {
+          backgroundImage: 'none',
           border: 'none',
-          borderBottom: '1px solid rgba(122, 196, 127, 0.22)', // brand hairline
+          borderBottom: `1px solid ${LINE_STRONG}`,
           borderRadius: 0,
-          backgroundImage: 'linear-gradient(180deg, #1e1e24 0%, #17171c 100%)',
-          // Sticky bar needs separation from scrolling dark content — soft
-          // drop + bottom sheen (replaces the old boxShadow: 'none').
-          boxShadow: '0 8px 20px rgba(0, 0, 0, 0.35), inset 0 -1px 0 rgba(255, 255, 255, 0.05)',
+          boxShadow: '0 4px 0 -3px rgba(159, 198, 232, 0.22)',
         },
-        // App.tsx mounts <AppBar color="primary" enableColorOnDark>; force the
-        // charcoal surface at theme level instead of editing the component.
-        colorPrimary: { backgroundColor: '#17171c', color: '#ececf1' },
+        colorPrimary: { backgroundColor: APPBAR, color: INK },
       },
     },
     MuiMenu: {
       styleOverrides: {
+        // Frosted: the dropdown floats over the grid, blurring it beneath.
         paper: {
-          borderRadius: 14,
-          backgroundImage: SURFACE_GRADIENT_HIGH,
-          border: `1px solid ${HAIRLINE}`,
-          boxShadow: '8px 8px 22px rgba(0, 0, 0, 0.55), -4px -4px 12px rgba(255, 255, 255, 0.035)',
-          marginTop: 6,
+          borderRadius: 2,
+          backgroundColor: 'rgba(15, 42, 70, 0.72)',
+          backdropFilter: 'blur(10px)',
+          WebkitBackdropFilter: 'blur(10px)',
+          border: `1px solid ${LINE_STRONG}`,
+          boxShadow: '0 0 0 4px rgba(159, 198, 232, 0.08)',
+          marginTop: 4,
         },
-        list: { padding: 6 },
+        list: { padding: 4 },
       },
     },
     MuiMenuItem: {
       styleOverrides: {
         root: {
           minHeight: 44, // thumb-sized menu rows (UserMenu)
-          borderRadius: 10,
-          margin: '2px 4px',
-          '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.06)' },
-          '&.Mui-focusVisible': { backgroundColor: 'rgba(122, 196, 127, 0.12)' },
-          '&.Mui-selected': { backgroundColor: 'rgba(255, 255, 255, 0.09)' },
+          borderRadius: 2,
+          margin: '1px 2px',
+          '&:hover': { backgroundColor: 'rgba(159, 198, 232, 0.1)' },
+          '&.Mui-focusVisible': { backgroundColor: 'rgba(100, 210, 255, 0.14)' },
+          '&.Mui-selected': { backgroundColor: 'rgba(159, 198, 232, 0.14)' },
         },
       },
     },
@@ -376,45 +366,58 @@ export const theme = createTheme({
       styleOverrides: {
         root: {
           minHeight: 44,
-          borderRadius: 10,
-          '&:hover': { backgroundColor: 'rgba(255, 255, 255, 0.06)' },
-          '&.Mui-focusVisible': { boxShadow: `inset ${FOCUS_RING}` },
-          '&.Mui-selected': { backgroundImage: SURFACE_GRADIENT, boxShadow: RAISED_SM },
+          borderRadius: 2,
+          '&:hover': { backgroundColor: 'rgba(159, 198, 232, 0.08)' },
+          '&.Mui-focusVisible': {
+            outline: '2px dashed rgba(100, 210, 255, 0.9)',
+            outlineOffset: '-2px',
+          },
+          '&.Mui-selected': {
+            backgroundColor: 'rgba(100, 210, 255, 0.1)',
+            borderLeft: `2px solid ${ACCENT}`,
+          },
         },
       },
     },
     MuiTooltip: {
       styleOverrides: {
+        // Callout annotations.
         tooltip: {
-          backgroundColor: '#2a2a30',
-          color: '#ececf1',
-          border: `1px solid ${HAIRLINE}`,
-          boxShadow: '4px 4px 10px rgba(0, 0, 0, 0.5)',
-          fontSize: '0.75rem',
+          fontFamily: MONO,
+          backgroundColor: '#0d2743',
+          color: INK,
+          border: `1px solid ${LINE_STRONG}`,
+          borderRadius: 2,
+          fontSize: '0.72rem',
+          letterSpacing: 0.3,
         },
-        arrow: { color: '#2a2a30' },
+        arrow: { color: '#0d2743' },
       },
     },
     MuiAlert: {
       styleOverrides: {
+        // Keep severity tints readable on the drawing; just square it off.
         root: {
-          // Alert extends Paper and carries the MuiPaper-elevation class —
-          // drop the inherited opaque surface gradient so severity tints
-          // (ScannerDialog errors, page-level alerts) stay visible.
           backgroundImage: 'none',
           boxShadow: 'none',
-          border: '1px solid rgba(255, 255, 255, 0.06)',
-          borderRadius: 12,
+          border: `1px solid ${LINE_FAINT}`,
+          borderRadius: 2,
         },
       },
     },
     MuiAvatar: {
       styleOverrides: {
         colorDefault: {
-          backgroundColor: '#2e2e35',
-          color: '#ececf1',
-          border: `1px solid ${HAIRLINE}`,
+          backgroundColor: '#173a5f',
+          color: INK,
+          border: `1px solid ${LINE}`,
+          fontFamily: MONO,
         },
+      },
+    },
+    MuiLinearProgress: {
+      styleOverrides: {
+        root: { backgroundColor: 'rgba(159, 198, 232, 0.15)', borderRadius: 0 },
       },
     },
   },
