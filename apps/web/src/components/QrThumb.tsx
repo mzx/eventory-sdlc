@@ -90,9 +90,9 @@ export function QrThumb({ token, label, printHref, size = 160 }: QrThumbProps) {
           boxSizing: 'content-box',
           p: 1,
           bgcolor: '#ffffff',
-          borderRadius: '10px',
-          border: '1px solid rgba(255, 255, 255, 0.16)',
-          boxShadow: '6px 6px 14px rgba(0, 0, 0, 0.45), -4px -4px 10px rgba(255, 255, 255, 0.045)',
+          borderRadius: '2px',
+          // Affixed label on the drawing: flat white sticker, drawn edge.
+          border: '1px solid rgba(159, 198, 232, 0.55)',
         }}
       />
       {label && (

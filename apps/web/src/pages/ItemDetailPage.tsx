@@ -139,8 +139,11 @@ export function ItemDetailPage() {
           sx={{
             height: 150,
             bgcolor: 'background.default',
-            boxShadow:
-              'inset 3px 3px 7px rgba(0, 0, 0, 0.5), inset -2px -2px 5px rgba(255, 255, 255, 0.03)',
+            // Empty drafting area: diagonal hatch until a photo is drawn in.
+            backgroundImage:
+              'repeating-linear-gradient(45deg, rgba(159, 198, 232, 0.07) 0 1px, transparent 1px 9px)',
+            border: 1,
+            borderColor: 'divider',
             borderRadius: 1,
             display: 'flex',
             alignItems: 'center',

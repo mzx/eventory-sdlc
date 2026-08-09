@@ -18,6 +18,7 @@ import {
 import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import type { LocationNode } from '../lib/locationTree';
+import { frostedPanel } from '../theme';
 
 interface LocationTreeProps {
   nodes: LocationNode[];
@@ -38,7 +39,7 @@ export function LocationTree({
   depth = 0,
   defaultExpanded = false,
 }: LocationTreeProps) {
-  return (
+  const list = (
     <List dense disablePadding={depth > 0}>
       {nodes.map((node) => (
         <LocationTreeRow
@@ -53,6 +54,13 @@ export function LocationTree({
       ))}
     </List>
   );
+
+  // Root level only: the tree sits on a frosted drawing panel so the grid
+  // blurs behind row text; nested levels render inside the same panel.
+  if (depth > 0) {
+    return list;
+  }
+  return <Box sx={{ ...frostedPanel, px: 1.5, py: 0.5 }}>{list}</Box>;
 }
 
 interface LocationTreeRowProps {
