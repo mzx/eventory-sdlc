@@ -35,6 +35,16 @@ services:
       DATABASE_URL: postgresql://eventory:eventory@db:5432/eventory?schema=public
       PORT: 3001
       PUBLIC_BASE_URL: https://localhost:5173
+      # Secrets interpolated from the gitignored root .env file (empty
+      # defaults keep the stack bootable on a fresh clone without one).
+      EVENTORY_ANTHROPIC_KEY: ${EVENTORY_ANTHROPIC_KEY:-}
+      EVENTORY_ANTHROPIC_MODEL: ${EVENTORY_ANTHROPIC_MODEL:-}
+      EVENTORY_ADMIN_EMAILS: ${EVENTORY_ADMIN_EMAILS:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:3001/api/auth/google/callback}
+      JWT_SECRET: ${JWT_SECRET:-}
+      WEB_BASE: ${WEB_BASE:-http://localhost:5173}
     ports:
       - '3001:3001'
     volumes:

@@ -2,6 +2,11 @@
 .ai-sdlc/state.db
 .ai-sdlc/state/
 .ai-sdlc/audit.jsonl
+.ai-sdlc/dispatch/
+.ai-sdlc/transcripts/
+.ai-sdlc/verdicts/
+.ai-sdlc/branch-protection-body.json
+artifacts/
 
 # Node / build artifacts
 node_modules/
@@ -34,8 +39,12 @@ apps/web/.env
 npm-debug.log*
 *.log
 
-# OS
+# OS / IDE
 .DS_Store
+.idea/
+
+# Test coverage output
+coverage/
 
 # Claude Code local (machine-specific) settings
 .claude/settings.local.json
