@@ -94,20 +94,51 @@ export function ItemDetailPage() {
 
   return (
     <Stack spacing={3}>
-      <Stack direction="row" spacing={1} justifyContent="flex-end">
-        <Button startIcon={<EditOutlinedIcon />} onClick={() => navigate(`/items/${item.id}/edit`)}>
-          Edit
-        </Button>
-        <Button
-          color="error"
-          startIcon={<DeleteOutlineIcon />}
-          onClick={() => {
-            setDeleteError(null);
-            setConfirmOpen(true);
-          }}
-        >
-          Delete
-        </Button>
+      {/* Header: title grouped with its primary (Edit) and subordinate
+          (Delete) actions, so Edit reads as anchored to the item it edits
+          rather than floating alone at the page top (gh-issue-34). Wraps to
+          a second line on phone widths so both actions stay reachable. */}
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="flex-start"
+        flexWrap="wrap"
+        gap={2}
+      >
+        <Box>
+          <Typography variant="h5" component="h1" gutterBottom>
+            {item.name}
+          </Typography>
+          <Typography variant="body1" color="text.secondary">
+            Qty: {item.quantity}
+            {item.unit ? ` ${item.unit}` : ''}
+          </Typography>
+          {item.description && (
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              {item.description}
+            </Typography>
+          )}
+        </Box>
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            startIcon={<EditOutlinedIcon />}
+            onClick={() => navigate(`/items/${item.id}/edit`)}
+          >
+            Edit
+          </Button>
+          <Button
+            variant="outlined"
+            color="error"
+            startIcon={<DeleteOutlineIcon />}
+            onClick={() => {
+              setDeleteError(null);
+              setConfirmOpen(true);
+            }}
+          >
+            Delete
+          </Button>
+        </Stack>
       </Stack>
 
       {gallery.length > 0 ? (
@@ -153,21 +184,6 @@ export function ItemDetailPage() {
           <Inventory2OutlinedIcon sx={{ fontSize: 48, color: 'grey.400' }} />
         </Box>
       )}
-
-      <Box>
-        <Typography variant="h5" component="h1" gutterBottom>
-          {item.name}
-        </Typography>
-        <Typography variant="body1" color="text.secondary">
-          Qty: {item.quantity}
-          {item.unit ? ` ${item.unit}` : ''}
-        </Typography>
-        {item.description && (
-          <Typography variant="body2" sx={{ mt: 1 }}>
-            {item.description}
-          </Typography>
-        )}
-      </Box>
 
       {item.tags.length > 0 && (
         <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
