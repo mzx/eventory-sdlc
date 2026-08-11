@@ -39,6 +39,7 @@ function renderDetailPage(id = 'item-1', options: { state?: { justCreated?: bool
       <MemoryRouter initialEntries={[{ pathname: `/items/${id}`, state: options.state }]}>
         <Routes>
           <Route path="/items/:id" element={<ItemDetailPage />} />
+          <Route path="/items/:id/edit" element={<div>edit page</div>} />
           <Route path="/items/:id/print" element={<div>print page</div>} />
           <Route path="/" element={<div>items list</div>} />
         </Routes>
@@ -67,6 +68,32 @@ describe('ItemDetailPage', () => {
     expect(screen.getByText('18V')).toBeInTheDocument();
     expect(screen.getByText('brand')).toBeInTheDocument();
     expect(screen.getByText('Bosch')).toBeInTheDocument();
+  });
+
+  it('renders Edit as the visually primary action, grouped with the item title, and navigates to the edit route on click (gh-issue-34)', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderDetailPage();
+
+    await screen.findByText('Cordless drill');
+    const heading = screen.getByRole('heading', { name: 'Cordless drill' });
+    const editButton = screen.getByRole('button', { name: /edit/i });
+    const deleteButton = screen.getByRole('button', { name: /delete/i });
+
+    // Edit is grouped in the same header row as the item title, rather than
+    // floating alone at the top of the page.
+    const header = heading.closest('div')?.parentElement;
+    expect(header).not.toBeNull();
+    expect(header).toContainElement(editButton);
+
+    // Edit reads as the primary action (filled/contained); Delete stays
+    // available but visually subordinate (outlined, not filled).
+    expect(editButton.className).toContain('MuiButton-contained');
+    expect(deleteButton.className).toContain('MuiButton-outlined');
+
+    await user.click(editButton);
+    expect(await screen.findByText('edit page')).toBeInTheDocument();
   });
 
   it('renders the QR sticker image using the item qrCode', async () => {
