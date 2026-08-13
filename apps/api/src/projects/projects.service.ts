@@ -76,6 +76,64 @@ export interface BackflushPreview {
   lines: BackflushPreviewLine[];
 }
 
+// ---------------------------------------------------------------------------
+// availability — clear-to-build check + kitting pick list (EVT-29)
+// ---------------------------------------------------------------------------
+
+/** Per-line status computed by `availability()` — see that method's doc comment. */
+export type AvailabilityStatus = 'ok' | 'short' | 'untracked';
+
+/** Denormalized location summary embedded on an availability line, for the pick list (AC 3). */
+export interface AvailabilityLocationRef {
+  id: string;
+  name: string;
+  path: string;
+}
+
+/** One BOM line as shown on the "Can I build this?" panel / pick list. */
+export interface AvailabilityLine {
+  lineId: string;
+  itemId: string | null;
+  name: string;
+  /** BOM line quantity (required). */
+  quantity: number;
+  unit: string | null;
+  /** Current on-hand for the linked item; `null` for a free-text (untracked) line. */
+  onHand: number | null;
+  /** Where the linked item is stored; `null` for untracked lines or an unlocated item. */
+  location: AvailabilityLocationRef | null;
+  /**
+   * `ok` (on-hand >= plan, after aggregating demand from earlier BOM lines
+   * that reference the same item), `short` (insufficient after aggregation),
+   * or `untracked` (free-text, no itemId). See `availability()`'s doc
+   * comment for the multi-line-same-item allocation order.
+   */
+  status: AvailabilityStatus;
+  /** Kitting pick-list check-off state (AC 3). Always `false` for untracked lines. */
+  picked: boolean;
+}
+
+export interface AvailabilityCounts {
+  ok: number;
+  short: number;
+  untracked: number;
+}
+
+export interface ProjectAvailability {
+  projectId: string;
+  /**
+   * Point-in-time read timestamp (EVT-29 risk): the backflush confirmation
+   * (EVT-28) remains the source of truth at consume time, so this can go
+   * stale between reads — labeling it lets the UI show its data's age
+   * rather than implying a live reservation.
+   */
+  asOf: string;
+  /** `true` when every TRACKED (item-linked) line is `ok` — untracked lines never block this (AC 1). */
+  clearToBuild: boolean;
+  counts: AvailabilityCounts;
+  lines: AvailabilityLine[];
+}
+
 /** One line actually written by a `backflush()` call. */
 export interface BackflushConsumedLine {
   lineId: string;
@@ -264,6 +322,7 @@ export class ProjectsService {
         ...(dto.quantity !== undefined && { quantity: dto.quantity }),
         ...(dto.unit !== undefined && { unit: dto.unit }),
         ...(dto.notes !== undefined && { notes: dto.notes }),
+        ...(dto.picked !== undefined && { picked: dto.picked }),
       },
       include: { item: { select: LINKED_ITEM_SELECT } },
     });
@@ -276,6 +335,116 @@ export class ProjectsService {
   async removeBomLine(projectId: string, lineId: string): Promise<void> {
     await this.assertBomLineExists(projectId, lineId);
     await this.prisma.bomLine.delete({ where: { id: lineId } });
+  }
+
+  // -------------------------------------------------------------------------
+  // availability — GET /api/projects/:id/availability (EVT-29)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Clear-to-build check (AC 1, AC 2): every BOM line annotated with its
+   * current on-hand, storage location, and a status —
+   *
+   * - `ok`        — item-linked, and the item's on-hand can cover this
+   *                 line's plan quantity ONCE demand from any earlier BOM
+   *                 lines that reference the same item has already been
+   *                 deducted (see allocation order below).
+   * - `short`     — item-linked, but the item's on-hand — after that same
+   *                 deduction — is insufficient for this line.
+   * - `untracked` — free-text (no `itemId`); not verifiable against
+   *                 inventory at all, so it's counted SEPARATELY from a
+   *                 shortage rather than folded into it (AC 1) and never
+   *                 blocks `clearToBuild` (AC 1/2 — "green all-clear when
+   *                 every TRACKED line is ok").
+   *
+   * Multi-line-same-item aggregation: two or more BOM lines may link the
+   * SAME item (e.g. a shared fastener used in two sub-assemblies). Each
+   * line's on-hand cannot be evaluated in isolation against the item's raw
+   * `quantity` — that double-counts stock. Instead we walk the lines in
+   * their query order (`createdAt asc`, i.e. the order they were added to
+   * the BOM) and greedily allocate the item's on-hand: the first line to
+   * need it gets first claim, decrementing a running "remaining" balance
+   * for that item; a later line for the same item is evaluated against
+   * whatever balance is left. This gives a deterministic, explainable
+   * answer ("earlier lines are cleared first") rather than splitting stock
+   * proportionally. `onHand` on each line still reports the item's actual
+   * total on-hand (not the post-allocation remainder) so the number shown
+   * to the user always matches inventory; `status` is what reflects the
+   * allocation outcome.
+   *
+   * Read-only, point-in-time — see `ProjectAvailability.asOf`'s doc comment
+   * for the staleness contract (EVT-29 risk).
+   */
+  async availability(id: string): Promise<ProjectAvailability> {
+    const project = await this.prisma.project.findUnique({
+      where: { id },
+      include: {
+        bomLines: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            item: {
+              select: {
+                id: true,
+                quantity: true,
+                location: { select: { id: true, name: true, path: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!project) {
+      throw new NotFoundException(`Project ${id} not found`);
+    }
+
+    const counts: AvailabilityCounts = { ok: 0, short: 0, untracked: 0 };
+
+    // Running on-hand balance per itemId, allocated greedily across BOM
+    // lines in createdAt-asc order (see doc comment above).
+    const remainingByItemId = new Map<string, number>();
+
+    const lines: AvailabilityLine[] = project.bomLines.map((line) => {
+      if (!line.item) {
+        counts.untracked += 1;
+        return {
+          lineId: line.id,
+          itemId: null,
+          name: line.name,
+          quantity: line.quantity,
+          unit: line.unit,
+          onHand: null,
+          location: null,
+          status: 'untracked',
+          picked: line.picked,
+        };
+      }
+
+      const onHand = line.item.quantity;
+      const remaining = remainingByItemId.get(line.item.id) ?? onHand;
+      const status: AvailabilityStatus = remaining >= line.quantity ? 'ok' : 'short';
+      remainingByItemId.set(line.item.id, remaining - line.quantity);
+      counts[status] += 1;
+
+      return {
+        lineId: line.id,
+        itemId: line.item.id,
+        name: line.name,
+        quantity: line.quantity,
+        unit: line.unit,
+        onHand,
+        location: line.item.location,
+        status,
+        picked: line.picked,
+      };
+    });
+
+    return {
+      projectId: id,
+      asOf: new Date().toISOString(),
+      clearToBuild: counts.short === 0,
+      counts,
+      lines,
+    };
   }
 
   // -------------------------------------------------------------------------

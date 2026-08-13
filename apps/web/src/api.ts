@@ -536,6 +536,8 @@ export interface BomLine {
   quantity: number;
   unit: string | null;
   notes: string | null;
+  /** Kitting pick-list check-off state (EVT-29 AC 3) — informational only. */
+  picked: boolean;
   createdAt: string;
   updatedAt: string;
   item: BomLineItemRef | null;
@@ -639,6 +641,8 @@ export async function addBomLine(projectId: string, input: CreateBomLineInput): 
 export type UpdateBomLineInput = Partial<Omit<CreateBomLineInput, 'itemId'>> & {
   /** Pass `null` to unlink the line from its inventory item. */
   itemId?: string | null;
+  /** Pick-list check-off state (EVT-29 AC 3). */
+  picked?: boolean;
 };
 
 /** PATCH /api/projects/:id/bom/:lineId */
@@ -662,6 +666,56 @@ export async function deleteBomLine(projectId: string, lineId: string): Promise<
     `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
     { method: 'DELETE' },
   );
+}
+
+// ---------------------------------------------------------------------------
+// availability — clear-to-build check + kitting pick list (EVT-29)
+// ---------------------------------------------------------------------------
+
+export type AvailabilityStatus = 'ok' | 'short' | 'untracked';
+
+/** Denormalized location summary embedded on an availability line, for the pick list (AC 3). */
+export interface AvailabilityLocationRef {
+  id: string;
+  name: string;
+  path: string;
+}
+
+/** One BOM line as shown on the "Can I build this?" panel / pick list. */
+export interface AvailabilityLine {
+  lineId: string;
+  itemId: string | null;
+  name: string;
+  quantity: number;
+  unit: string | null;
+  /** Current on-hand for the linked item; `null` for a free-text (untracked) line. */
+  onHand: number | null;
+  /** Where the linked item is stored; `null` for untracked lines or an unlocated item. */
+  location: AvailabilityLocationRef | null;
+  status: AvailabilityStatus;
+  picked: boolean;
+}
+
+export interface AvailabilityCounts {
+  ok: number;
+  short: number;
+  untracked: number;
+}
+
+/** Response shape of `GET /api/projects/:id/availability`. */
+export interface ProjectAvailability {
+  projectId: string;
+  /** Point-in-time read timestamp (EVT-29 risk) — this can go stale. */
+  asOf: string;
+  /** `true` when every tracked (item-linked) line is `ok`. */
+  clearToBuild: boolean;
+  counts: AvailabilityCounts;
+  lines: AvailabilityLine[];
+}
+
+/** GET /api/projects/:id/availability */
+export async function fetchProjectAvailability(projectId: string): Promise<ProjectAvailability> {
+  return request<ProjectAvailability>(`/projects/${encodeURIComponent(projectId)}/availability`);
 }
 
 // ---------------------------------------------------------------------------

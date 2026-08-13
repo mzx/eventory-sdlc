@@ -1,4 +1,13 @@
-import { IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
+import {
+  IsBoolean,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 /**
  * All fields are optional for PATCH semantics.
@@ -38,4 +47,13 @@ export class UpdateBomLineDto {
   @IsString()
   @MaxLength(2000)
   notes?: string;
+
+  /**
+   * Pick-list check-off state (EVT-29 AC 3) — informational only, not a
+   * stock reservation. Persisted so a paused pick session resumes across
+   * reloads.
+   */
+  @IsOptional()
+  @IsBoolean()
+  picked?: boolean;
 }

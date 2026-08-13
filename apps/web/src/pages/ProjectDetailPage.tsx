@@ -36,8 +36,11 @@ import {
   fetchBackflushPreview,
   fetchItems,
   fetchProject,
+  fetchProjectAvailability,
+  markRunningLow,
   updateBomLine,
   updateProject,
+  type AvailabilityStatus,
   type BackflushPreview,
   type BackflushPreviewLine,
   type BomLine,
@@ -53,6 +56,15 @@ const STATUS_LABEL: Record<ProjectStatus, string> = {
   archived: 'Archived',
 };
 const STATUS_OPTIONS: ProjectStatus[] = ['planned', 'in_progress', 'completed', 'archived'];
+
+const AVAILABILITY_CHIP: Record<
+  AvailabilityStatus,
+  { label: string; color: 'success' | 'warning' | 'default' }
+> = {
+  ok: { label: 'OK', color: 'success' },
+  short: { label: 'Short', color: 'warning' },
+  untracked: { label: 'Untracked', color: 'default' },
+};
 
 /** Debounces a fast-changing value; returns the value once it has settled. */
 function useDebouncedValue<T>(value: T, delayMs: number): T {
@@ -237,6 +249,134 @@ function AddBomLineRow({ projectId }: { projectId: string }) {
         </TableRow>
       )}
     </>
+  );
+}
+
+/**
+ * "Can I build this?" panel (EVT-29 AC 1, AC 2) — the clear-to-build check.
+ * Shows an all-clear/short/untracked summary plus a per-line breakdown
+ * (linked item, required qty, on-hand, location, status), and a one-tap "Add
+ * to shopping list" action on shortage lines (AC 4, reuses EVT-26's
+ * idempotent `POST /api/shopping-list`). Links to the kitting pick list (AC
+ * 3). Read-only, point-in-time — see `availability.asOf` (EVT-29 risk).
+ */
+function AvailabilityPanel({ projectId }: { projectId: string }) {
+  const queryClient = useQueryClient();
+  const availabilityQuery = useQuery({
+    queryKey: ['projects', projectId, 'availability'],
+    queryFn: () => fetchProjectAvailability(projectId),
+  });
+
+  const addToShoppingListMutation = useMutation({
+    mutationFn: (itemId: string) => markRunningLow(itemId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shopping-list'] }),
+  });
+
+  if (availabilityQuery.isLoading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
+        <CircularProgress size={24} />
+      </Box>
+    );
+  }
+
+  if (availabilityQuery.isError || !availabilityQuery.data) {
+    return (
+      <Alert severity="error">
+        {availabilityQuery.error instanceof Error
+          ? availabilityQuery.error.message
+          : 'Failed to load availability'}
+      </Alert>
+    );
+  }
+
+  const availability = availabilityQuery.data;
+  const { counts, lines } = availability;
+
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const summaryParts: string[] = [];
+  if (counts.short > 0) summaryParts.push(`${counts.short} short`);
+  if (counts.untracked > 0) summaryParts.push(`${counts.untracked} untracked`);
+
+  return (
+    <Box>
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="center"
+        flexWrap="wrap"
+        gap={1}
+      >
+        <Typography variant="h6">Can I build this?</Typography>
+        <Button component={RouterLink} to={`/projects/${projectId}/pick-list`} size="small">
+          Pick list
+        </Button>
+      </Stack>
+
+      <Alert severity={availability.clearToBuild ? 'success' : 'warning'} sx={{ mt: 1 }}>
+        {availability.clearToBuild
+          ? 'All clear — every tracked part is on hand.'
+          : summaryParts.join(', ')}
+      </Alert>
+
+      <Table size="small" sx={{ mt: 2 }}>
+        <TableHead>
+          <TableRow>
+            <TableCell>Line</TableCell>
+            <TableCell align="right">Required</TableCell>
+            <TableCell align="right">On hand</TableCell>
+            <TableCell>Location</TableCell>
+            <TableCell>Status</TableCell>
+            <TableCell align="right" />
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {lines.map((line) => (
+            <TableRow key={line.lineId}>
+              <TableCell>{line.name}</TableCell>
+              <TableCell align="right">
+                {line.quantity} {line.unit ?? ''}
+              </TableCell>
+              <TableCell align="right">{line.onHand ?? '—'}</TableCell>
+              <TableCell>{line.location?.path ?? '—'}</TableCell>
+              <TableCell>
+                <Chip
+                  size="small"
+                  label={AVAILABILITY_CHIP[line.status].label}
+                  color={AVAILABILITY_CHIP[line.status].color}
+                />
+              </TableCell>
+              <TableCell align="right">
+                {line.status === 'short' && line.itemId && (
+                  <Button
+                    size="small"
+                    onClick={() => addToShoppingListMutation.mutate(line.itemId as string)}
+                    disabled={addToShoppingListMutation.isPending}
+                  >
+                    Add to shopping list
+                  </Button>
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+
+      {addToShoppingListMutation.isError && (
+        <Alert severity="error" sx={{ mt: 1 }}>
+          {addToShoppingListMutation.error instanceof Error
+            ? addToShoppingListMutation.error.message
+            : 'Failed to add to shopping list'}
+        </Alert>
+      )}
+
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+        As of {new Date(availability.asOf).toLocaleString()}
+      </Typography>
+    </Box>
   );
 }
 
@@ -586,6 +726,8 @@ export function ProjectDetailPage() {
           needed.
         </Alert>
       )}
+
+      <AvailabilityPanel projectId={project.id} />
 
       <Box>
         <Typography variant="h6" gutterBottom>

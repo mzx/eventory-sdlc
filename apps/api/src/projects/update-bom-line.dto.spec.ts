@@ -37,4 +37,20 @@ describe('UpdateBomLineDto validation (ValidationPipe, matches main.ts config)',
     expect(result.quantity).toBe(6);
     expect(result.itemId).toBeUndefined();
   });
+
+  // ── picked — kitting pick-list check-off state (EVT-29 AC 3) ────────────
+
+  it('accepts picked: true', async () => {
+    const result = await pipe.transform({ picked: true }, metadata);
+    expect(result.picked).toBe(true);
+  });
+
+  it('accepts picked: false', async () => {
+    const result = await pipe.transform({ picked: false }, metadata);
+    expect(result.picked).toBe(false);
+  });
+
+  it('rejects a non-boolean picked value', async () => {
+    await expect(pipe.transform({ picked: 'yes' }, metadata)).rejects.toThrow();
+  });
 });

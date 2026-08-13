@@ -20,23 +20,26 @@ import { IntakePage } from './pages/IntakePage';
 import { ItemsPage } from './pages/ItemsPage';
 import { LocationDetailPage } from './pages/LocationDetailPage';
 import { LocationsPage } from './pages/LocationsPage';
+import { PickListPage } from './pages/PickListPage';
 import { ProjectDetailPage } from './pages/ProjectDetailPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { ScanPage } from './pages/ScanPage';
 import { ShoppingListPage } from './pages/ShoppingListPage';
 
-/** Top-level router: the QR sticker print view is deliberately rendered
- * outside `AppShell` (no AppBar, no Container chrome) since it must produce
- * only the sticker + item name when printed — see `ItemPrintPage`.
+/** Top-level router: the QR sticker print view and the kitting pick list are
+ * deliberately rendered outside `AppShell` (no AppBar, no Container chrome)
+ * since they must produce only their own content when printed — see
+ * `ItemPrintPage` and `PickListPage` (EVT-29 AC 5).
  *
- * `AuthGate` wraps everything (including the print route) so a signed-out
- * visit to ANY path — print view included — resolves to `LoginPage` rather
- * than briefly rendering app content (EVT-15 AC1). */
+ * `AuthGate` wraps everything (including these print-friendly routes) so a
+ * signed-out visit to ANY path resolves to `LoginPage` rather than briefly
+ * rendering app content (EVT-15 AC1). */
 export function App() {
   return (
     <AuthGate>
       <Routes>
         <Route path="/items/:id/print" element={<ItemPrintPage />} />
+        <Route path="/projects/:id/pick-list" element={<PickListPage />} />
         <Route path="/*" element={<AppShell />} />
       </Routes>
     </AuthGate>
