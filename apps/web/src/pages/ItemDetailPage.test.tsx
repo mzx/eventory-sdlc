@@ -279,6 +279,28 @@ describe('ItemDetailPage', () => {
       expect(within(history).getByText('just now')).toBeInTheDocument();
     });
 
+    it('review round 2, finding 4: a negative-delta "build" movement reads "Consumed in build", not "Built -2"', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({
+          data: [
+            movementRow({
+              kind: 'build',
+              delta: -2,
+              project: { id: 'proj-1', name: 'Garage Shelving' },
+            }),
+          ],
+          total: 1,
+        }),
+      );
+
+      renderDetailPage();
+
+      const history = await screen.findByLabelText('item movement history');
+      expect(within(history).getByText('Consumed in build -2')).toBeInTheDocument();
+      expect(within(history).queryByText(/^Built/)).not.toBeInTheDocument();
+    });
+
     it('renders a negative delta for a shrinking "adjust" movement', async () => {
       vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
       vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(

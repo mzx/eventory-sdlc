@@ -32,11 +32,17 @@ export interface RecordMovementInput {
   itemId: string;
   kind: StockMovementKind;
   /**
-   * Signed change applied to `Item.quantity`. Positive for `add`/`build`,
-   * negative for `consume`, either sign for `adjust`. Typically `0` for a
-   * pure `move` (this task never moves a partial quantity — see EVT-25
-   * non-goals) but the field always exists so a future partial-quantity
-   * move doesn't need a schema change.
+   * Signed change applied to `Item.quantity`. Positive for `add`, negative
+   * for `consume` and `build` (EVT-28 BOM backflush consumption — see the
+   * `StockMovementKind` schema doc comment), either sign for `adjust`.
+   * Typically `0` for a pure `move` (this task never moves a partial
+   * quantity — see EVT-25 non-goals) but the field always exists so a
+   * future partial-quantity move doesn't need a schema change.
+   *
+   * For a *consuming* write where the caller doesn't already know a
+   * safe-to-apply amount (e.g. it needs to clamp to current on-hand), use
+   * `recordConsumption` below instead — a blind `{ increment: delta }` here
+   * is not race-safe against concurrent consumers of the same item.
    */
   delta: number;
   /** Set only for `kind: 'move'`. */
@@ -47,6 +53,24 @@ export interface RecordMovementInput {
   note?: string | null;
   createdById?: string | null;
 }
+
+export interface RecordConsumptionInput {
+  itemId: string;
+  kind: StockMovementKind;
+  /**
+   * The upper bound the caller wants to consume — NOT a signed delta.
+   * `recordConsumption` computes and atomically applies whatever amount
+   * (up to this bound, down to 0) the item's current on-hand actually
+   * supports; see the method's doc comment.
+   */
+  requestedQuantity: number;
+  projectId?: string | null;
+  note?: string | null;
+  createdById?: string | null;
+}
+
+/** Bounds `recordConsumption`'s retry loop — see its doc comment. */
+const MAX_CONSUME_RETRIES = 5;
 
 @Injectable()
 export class StockMovementsService {
@@ -72,6 +96,10 @@ export class StockMovementsService {
    * writing other item fields in the same transaction — and this method
    * simply rides along without nesting a second transaction, which Prisma's
    * interactive transactions don't support).
+   *
+   * `recordConsumption` (below) is the race-safe sibling for a
+   * consume-down-to-on-hand write — together the two methods are the ONLY
+   * places `Item.quantity` should ever be written from application code.
    *
    * `itemInclude`, when provided, is forwarded to the `Item` update so the
    * caller gets back the item shape it needs (e.g. `ITEM_DETAIL_INCLUDE`)
@@ -135,6 +163,79 @@ export class StockMovementsService {
       return client.$transaction((tx) => run(tx));
     }
     return run(client);
+  }
+
+  // -------------------------------------------------------------------------
+  // recordConsumption — race-safe consume-down-to-on-hand (EVT-28)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Race-safe, down-only sibling of `recordMovement`, used by
+   * `ProjectsService.backflush()` (EVT-28 review round 2, finding 1). The
+   * shape `recordMovement` uses for a consuming write — read current
+   * on-hand, clamp in application code, then apply a blind
+   * `{ increment: -n }` — leaves a race window: two concurrent callers can
+   * both read the same stale on-hand, both clamp against it, and both
+   * apply their own decrement, compounding past zero (violates "quantity
+   * never goes negative" even though each individual clamp looked safe).
+   *
+   * This method closes that window by making the "is there enough on
+   * hand" check and the decrement ONE atomic database statement — a
+   * conditional `updateMany`: `data: { quantity: { decrement: n } }`
+   * guarded by `where: { quantity: { gte: n } }`. Two concurrent calls
+   * against the same item can't both observe the same on-hand and both
+   * succeed past it; whichever the database serializes first "wins" that
+   * amount, and the loser sees `count === 0` and must re-clamp.
+   *
+   * On `count === 0` (not enough on hand for the current attempt — either
+   * the caller asked for more than exists, or a concurrent consumer won
+   * the race since our last read), the current on-hand is re-read and the
+   * attempt is clamped down to it, then retried — bounded by
+   * `MAX_CONSUME_RETRIES` so pathological, continuous concurrent writes to
+   * the same item can't spin this loop forever. If on-hand is (or becomes)
+   * `0`, or the retry bound is hit, `null` is returned: nothing was
+   * consumed and no movement was written — the caller treats this the
+   * same as its own `requestedQuantity <= 0` skip.
+   *
+   * Unlike `recordMovement`, this method only accepts an already-open
+   * `Prisma.TransactionClient` — every current caller (`backflush`) is
+   * already inside one, and the conditional-decrement retry loop needs
+   * that same transaction's atomicity for the movement row it writes on
+   * success.
+   */
+  async recordConsumption(
+    tx: Prisma.TransactionClient,
+    input: RecordConsumptionInput,
+  ): Promise<{ movement: StockMovement; consumedQuantity: number } | null> {
+    let attempt = Math.max(0, Math.trunc(input.requestedQuantity));
+
+    for (let i = 0; attempt > 0 && i < MAX_CONSUME_RETRIES; i++) {
+      const result = await tx.item.updateMany({
+        where: { id: input.itemId, quantity: { gte: attempt } },
+        data: { quantity: { decrement: attempt } },
+      });
+      if (result.count > 0) {
+        const movement = await tx.stockMovement.create({
+          data: {
+            itemId: input.itemId,
+            kind: input.kind,
+            delta: -attempt,
+            projectId: input.projectId ?? null,
+            note: input.note ?? null,
+            createdById: input.createdById ?? null,
+          },
+        });
+        return { movement, consumedQuantity: attempt };
+      }
+
+      const current = await tx.item.findUnique({
+        where: { id: input.itemId },
+        select: { quantity: true },
+      });
+      attempt = Math.min(attempt, Math.max(0, current?.quantity ?? 0));
+    }
+
+    return null;
   }
 
   // -------------------------------------------------------------------------

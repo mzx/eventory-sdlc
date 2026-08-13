@@ -458,6 +458,18 @@ export interface BomLine {
   item: BomLineItemRef | null;
 }
 
+/** One backflush `build` movement, as embedded in `ProjectDetail.consumed` (EVT-28 AC 5). */
+export interface ConsumedMovement {
+  id: string;
+  itemId: string;
+  kind: StockMovementKind;
+  delta: number;
+  projectId: string | null;
+  note: string | null;
+  createdAt: string;
+  item: BomLineItemRef | null;
+}
+
 /** Full detail shape returned by `GET /api/projects/:id` — BOM lines instead of a count. */
 export interface ProjectDetail {
   id: string;
@@ -470,6 +482,8 @@ export interface ProjectDetail {
   createdAt: string;
   updatedAt: string;
   bomLines: BomLine[];
+  /** Backflush consumption history (EVT-28), newest first — empty until first backflushed. */
+  consumed: ConsumedMovement[];
 }
 
 export interface ListProjectsParams {
@@ -565,6 +579,79 @@ export async function deleteBomLine(projectId: string, lineId: string): Promise<
     `/projects/${encodeURIComponent(projectId)}/bom/${encodeURIComponent(lineId)}`,
     { method: 'DELETE' },
   );
+}
+
+// ---------------------------------------------------------------------------
+// backflush — build completion consumes BOM stock (EVT-28)
+// ---------------------------------------------------------------------------
+
+/** One BOM line as shown on the pre-confirmation backflush screen. */
+export interface BackflushPreviewLine {
+  lineId: string;
+  itemId: string | null;
+  name: string;
+  /** BOM line quantity (the plan). */
+  quantity: number;
+  unit: string | null;
+  /** Current on-hand for the linked item; `null` for a free-text (skipped) line. */
+  onHand: number | null;
+  /** `min(quantity, onHand)` — the default consume quantity to preselect. */
+  suggestedConsumeQuantity: number;
+  /** `true` when `onHand < quantity` — highlight this line. */
+  shortage: boolean;
+  /** `true` for a free-text (no `itemId`) line — "not tracked, skipped". */
+  skipped: boolean;
+}
+
+/** Response shape of `GET /api/projects/:id/backflush-preview`. */
+export interface BackflushPreview {
+  projectId: string;
+  /** `true` when this project already has recorded `build` movements (idempotency guard). */
+  alreadyBackflushed: boolean;
+  lines: BackflushPreviewLine[];
+}
+
+/** GET /api/projects/:id/backflush-preview */
+export async function fetchBackflushPreview(projectId: string): Promise<BackflushPreview> {
+  return request<BackflushPreview>(`/projects/${encodeURIComponent(projectId)}/backflush-preview`);
+}
+
+export interface BackflushLineInput {
+  lineId: string;
+  consumeQuantity: number;
+}
+
+export interface BackflushInput {
+  lines: BackflushLineInput[];
+  /** Required to re-confirm when the project was already backflushed. */
+  confirmAgain?: boolean;
+}
+
+/** One line actually written by a `confirmBackflush` call. */
+export interface BackflushConsumedLine {
+  lineId: string;
+  itemId: string;
+  name: string;
+  requestedQuantity: number;
+  consumedQuantity: number;
+  shortage: boolean;
+  movementId: string;
+}
+
+export interface BackflushResult {
+  project: ProjectDetail;
+  consumed: BackflushConsumedLine[];
+}
+
+/** POST /api/projects/:id/backflush — confirms the backflush; 409 if already backflushed and `confirmAgain` isn't set. */
+export async function confirmBackflush(
+  projectId: string,
+  input: BackflushInput,
+): Promise<BackflushResult> {
+  return request<BackflushResult>(`/projects/${encodeURIComponent(projectId)}/backflush`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
 }
 
 // ---------------------------------------------------------------------------
