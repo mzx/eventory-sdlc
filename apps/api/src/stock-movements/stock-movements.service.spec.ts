@@ -39,11 +39,15 @@ function makeItemRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** `tx.*` mocks — a bare object exposing only the delegates `recordMovement` touches. */
+/**
+ * `tx.*` mocks — a bare object exposing only the delegates `recordMovement`
+ * / `recordConsumption` touch. `item.updateMany` backs `recordConsumption`'s
+ * conditional decrement (EVT-28 review round 2, finding 1).
+ */
 function makeTxMock() {
   return {
     stockMovement: { create: jest.fn() },
-    item: { update: jest.fn(), findUnique: jest.fn() },
+    item: { update: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
     // EVT-26 low-stock auto-trigger — raw `INSERT ... ON CONFLICT DO NOTHING`.
     $executeRaw: jest.fn().mockResolvedValue(0),
   };
@@ -415,6 +419,149 @@ describe('StockMovementsService', () => {
         });
 
         expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
+  // =========================================================================
+  // recordConsumption — race-safe consume-down-to-on-hand (EVT-28 review
+  // round 2, finding 1)
+  // =========================================================================
+
+  describe('recordConsumption', () => {
+    it('consumes the full requested amount via ONE conditional updateMany (no findUnique read needed)', async () => {
+      tx.item.updateMany.mockResolvedValue({ count: 1 });
+      tx.stockMovement.create.mockResolvedValue(
+        makeMovementRow({ kind: 'build', delta: -3, projectId: 'proj-1' }),
+      );
+
+      const result = await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'build',
+        requestedQuantity: 3,
+        projectId: 'proj-1',
+        note: 'Backflush: project completion',
+      });
+
+      // Regression guard (mirrors the EVT-25 round-2 race test): the fix is
+      // proven by the SHAPE of the call, not just the outcome — a
+      // conditional `updateMany` guarded by `quantity: { gte: n }`, not a
+      // blind read-then-`update`.
+      expect(tx.item.updateMany).toHaveBeenCalledWith({
+        where: { id: ITEM_ID, quantity: { gte: 3 } },
+        data: { quantity: { decrement: 3 } },
+      });
+      expect(tx.item.findUnique).not.toHaveBeenCalled();
+      expect(tx.stockMovement.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          itemId: ITEM_ID,
+          kind: 'build',
+          delta: -3,
+          projectId: 'proj-1',
+          note: 'Backflush: project completion',
+        }),
+      });
+      expect(result).toEqual({
+        movement: expect.objectContaining({ delta: -3 }),
+        consumedQuantity: 3,
+      });
+    });
+
+    it('finding 1: the first attempt fails the conditional gte check (raced by a concurrent consumer) — re-reads and clamps down, then succeeds', async () => {
+      // First attempt (requesting 5) affects 0 rows — on-hand had already
+      // dropped to 2 by the time this statement ran. `recordConsumption`
+      // must re-read the authoritative on-hand and retry with the clamp,
+      // NOT trust the stale value it started with.
+      tx.item.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+      tx.item.findUnique.mockResolvedValue({ quantity: 2 });
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'build', delta: -2 }));
+
+      const result = await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'build',
+        requestedQuantity: 5,
+      });
+
+      expect(tx.item.updateMany).toHaveBeenNthCalledWith(1, {
+        where: { id: ITEM_ID, quantity: { gte: 5 } },
+        data: { quantity: { decrement: 5 } },
+      });
+      expect(tx.item.findUnique).toHaveBeenCalledWith({
+        where: { id: ITEM_ID },
+        select: { quantity: true },
+      });
+      expect(tx.item.updateMany).toHaveBeenNthCalledWith(2, {
+        where: { id: ITEM_ID, quantity: { gte: 2 } },
+        data: { quantity: { decrement: 2 } },
+      });
+      expect(result).toEqual({
+        movement: expect.objectContaining({ delta: -2 }),
+        consumedQuantity: 2,
+      });
+    });
+
+    it('returns null and writes no movement when on-hand is already 0', async () => {
+      tx.item.updateMany.mockResolvedValue({ count: 0 });
+      tx.item.findUnique.mockResolvedValue({ quantity: 0 });
+
+      const result = await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'build',
+        requestedQuantity: 4,
+      });
+
+      expect(result).toBeNull();
+      expect(tx.stockMovement.create).not.toHaveBeenCalled();
+      // Only the first attempt runs before on-hand is discovered to be 0 —
+      // the loop stops rather than retrying with a 0 amount.
+      expect(tx.item.updateMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('treats requestedQuantity <= 0 as nothing to consume, without touching the database', async () => {
+      const result = await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'build',
+        requestedQuantity: 0,
+      });
+
+      expect(result).toBeNull();
+      expect(tx.item.updateMany).not.toHaveBeenCalled();
+      expect(tx.item.findUnique).not.toHaveBeenCalled();
+      expect(tx.stockMovement.create).not.toHaveBeenCalled();
+    });
+
+    it('bounds the retry loop: gives up and returns null after continual concurrent contention', async () => {
+      // Every conditional updateMany fails, and every re-read still reports
+      // on-hand > 0 (simulating persistent concurrent writes racing this
+      // call) — the retry loop must still terminate rather than spin
+      // forever.
+      tx.item.updateMany.mockResolvedValue({ count: 0 });
+      tx.item.findUnique.mockResolvedValue({ quantity: 1 });
+
+      const result = await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'build',
+        requestedQuantity: 1,
+      });
+
+      expect(result).toBeNull();
+      expect(tx.stockMovement.create).not.toHaveBeenCalled();
+      // Bounded — a small, fixed number of attempts, not unbounded.
+      expect(tx.item.updateMany.mock.calls.length).toBeLessThanOrEqual(5);
+    });
+
+    it('defaults optional projectId/note/createdById to null when omitted', async () => {
+      tx.item.updateMany.mockResolvedValue({ count: 1 });
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'build', delta: -1 }));
+
+      await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'build',
+        requestedQuantity: 1,
+      });
+
+      expect(tx.stockMovement.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ projectId: null, note: null, createdById: null }),
       });
     });
   });

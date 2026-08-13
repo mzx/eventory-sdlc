@@ -20,6 +20,8 @@ function makeProject(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const CURRENT_USER = { id: 'user-1' } as never;
+
 function makeBomLine(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'line-1',
@@ -202,14 +204,14 @@ describe('ProjectsController', () => {
   // ── backflush (EVT-28) ───────────────────────────────────────────────────
 
   describe('POST /projects/:id/backflush (backflush)', () => {
-    it('delegates to ProjectsService.backflush with id and body', async () => {
+    it('delegates to ProjectsService.backflush with id, body, and the current user id (SHOULD FIX 6)', async () => {
       const body = { lines: [{ lineId: 'line-1', consumeQuantity: 2 }] };
       const response = { project: makeProject({ status: 'completed' }), consumed: [] };
       serviceMock.backflush.mockResolvedValue(response);
 
-      const result = await controller.backflush('project-1', body);
+      const result = await controller.backflush('project-1', body, CURRENT_USER);
 
-      expect(serviceMock.backflush).toHaveBeenCalledWith('project-1', body);
+      expect(serviceMock.backflush).toHaveBeenCalledWith('project-1', body, 'user-1');
       expect(result).toBe(response);
     });
   });

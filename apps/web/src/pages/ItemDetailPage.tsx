@@ -79,6 +79,28 @@ const MOVEMENT_KIND_ICON: Record<StockMovementKind, ReactNode> = {
   build: <ConstructionIcon fontSize="small" color="action" />,
 };
 
+/**
+ * A `build` movement's `delta` is negative — EVT-28 backflush *consumes* BOM
+ * stock on project completion, it doesn't produce it (see the
+ * `StockMovementKind` schema doc comment) — so the plain "Built -2" reading
+ * from `MOVEMENT_KIND_LABEL`/`MOVEMENT_KIND_ICON` is confusing (review round
+ * 2, finding 4). Every other kind's delta sign always matches its label, so
+ * this only branches for `build`.
+ */
+function movementLabel(movement: StockMovementRow): string {
+  if (movement.kind === 'build' && movement.delta < 0) {
+    return 'Consumed in build';
+  }
+  return MOVEMENT_KIND_LABEL[movement.kind];
+}
+
+function movementIcon(movement: StockMovementRow): ReactNode {
+  if (movement.kind === 'build' && movement.delta < 0) {
+    return <RemoveCircleOutlineIcon fontSize="small" color="error" />;
+  }
+  return MOVEMENT_KIND_ICON[movement.kind];
+}
+
 /** Signed delta string ("+5", "-3"). `null` for `move`, whose delta is not the interesting part. */
 function formatMovementDelta(movement: StockMovementRow): string | null {
   if (movement.kind === 'move') return null;
@@ -100,11 +122,11 @@ function MovementListItem({ movement }: { movement: StockMovementRow }) {
 
   return (
     <ListItem disableGutters alignItems="flex-start">
-      <ListItemIcon sx={{ minWidth: 36 }}>{MOVEMENT_KIND_ICON[movement.kind]}</ListItemIcon>
+      <ListItemIcon sx={{ minWidth: 36 }}>{movementIcon(movement)}</ListItemIcon>
       <ListItemText
         primary={
           <Typography variant="body2">
-            {MOVEMENT_KIND_LABEL[movement.kind]}
+            {movementLabel(movement)}
             {delta ? ` ${delta}` : ''}
             {locations ? ` — ${locations}` : ''}
           </Typography>

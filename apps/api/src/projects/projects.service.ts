@@ -343,27 +343,36 @@ export class ProjectsService {
 
   /**
    * Confirms the backflush: writes one `build` movement per consumed
-   * item-linked line (via `StockMovementsService.recordMovement`, which also
-   * decrements `Item.quantity`) and marks the project `completed`, all
-   * inside a single `$transaction` (AC 2) — a mid-loop failure (e.g. one
-   * item's write rejects) throws before the project status update runs, so
-   * nothing lands partially.
+   * item-linked line (via `StockMovementsService.recordConsumption`, which
+   * also atomically, race-safely decrements `Item.quantity` — see that
+   * method's doc comment) and marks the project `completed`, all inside a
+   * single `$transaction` (AC 2) — a mid-loop failure (e.g. one item's write
+   * rejects) throws before the project status update runs, so nothing lands
+   * partially.
    *
    * `dto.lines` entries for a free-text BOM line, or omitted lines, are
-   * skipped — no movement is written for them (AC 3). Each requested
-   * quantity is first clamped to `[0, line.quantity]` (the per-line override
-   * contract, AC 1/2), then clamped again inside the transaction against the
-   * item's current on-hand, so it can never drive `Item.quantity` negative
-   * (AC 4) even under a stale preview.
+   * skipped — no movement is written for them (AC 3). Duplicate `lineId`
+   * entries in `dto.lines` are collapsed to their last occurrence BEFORE
+   * anything is clamped or written (review round 2, finding 3) — otherwise a
+   * client repeating the same line N times would multiply its consumption N×
+   * past the per-line cap. Each requested quantity is then clamped to
+   * `[0, line.quantity]` (the per-line override contract, AC 1/2); the
+   * *actual* on-hand clamp (AC 4) happens inside `recordConsumption` itself,
+   * atomically with the decrement, so it can never drive `Item.quantity`
+   * negative even under concurrent backflush confirms racing the same item.
    *
    * Idempotency guard (AC 6, EVT-28 risk): if this project already has
    * `build` movements, the call is rejected with `ConflictException` unless
-   * `dto.confirmAgain` is `true`.
+   * `dto.confirmAgain` is `true`. The count + guard decision run INSIDE the
+   * `$transaction`, immediately before any writes (review round 2, finding
+   * 2) — the previous shape counted before the transaction opened, leaving a
+   * TOCTOU window where two concurrent first-time confirms could both
+   * observe zero existing `build` movements and both proceed.
    */
   // Return type is inferred (rather than annotated) so `toProjectDetail`'s
   // generic resolves against the actual `tx.project.update(...)` payload
   // below, not its unconstrained default — see that helper's doc comment.
-  async backflush(id: string, dto: BackflushDto) {
+  async backflush(id: string, dto: BackflushDto, createdById?: string) {
     const project = await this.prisma.project.findUnique({
       where: { id },
       include: { bomLines: true },
@@ -372,21 +381,16 @@ export class ProjectsService {
       throw new NotFoundException(`Project ${id} not found`);
     }
 
-    const existingBuildCount = await this.prisma.stockMovement.count({
-      where: { projectId: id, kind: 'build' },
-    });
-    if (existingBuildCount > 0 && !dto.confirmAgain) {
-      throw new ConflictException(
-        `Project ${id} was already backflushed; pass confirmAgain to consume again`,
-      );
-    }
-
     const bomLinesById = new Map(project.bomLines.map((line) => [line.id, line]));
 
-    // Resolve + clamp requested lines up front — free-text lines and
-    // duplicates collapse away here, before the transaction opens.
+    // De-dupe by lineId (last entry wins) BEFORE resolving/clamping —
+    // `new Map(pairs)` keeps each key's first insertion position but its
+    // LAST assigned value, which is exactly "collapse duplicates, last
+    // wins" (finding 3).
+    const dedupedByLineId = new Map(dto.lines.map((entry) => [entry.lineId, entry]));
+
     const requested: { line: (typeof project.bomLines)[number]; requestedQuantity: number }[] = [];
-    for (const entry of dto.lines) {
+    for (const entry of dedupedByLineId.values()) {
       const line = bomLinesById.get(entry.lineId);
       if (!line) {
         throw new NotFoundException(`BOM line ${entry.lineId} not found on project ${id}`);
@@ -398,41 +402,46 @@ export class ProjectsService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // Idempotency guard (AC 6) — see doc comment above (finding 2).
+      const existingBuildCount = await tx.stockMovement.count({
+        where: { projectId: id, kind: 'build' },
+      });
+      if (existingBuildCount > 0 && !dto.confirmAgain) {
+        throw new ConflictException(
+          `Project ${id} was already backflushed; pass confirmAgain to consume again`,
+        );
+      }
+
       const consumed: BackflushConsumedLine[] = [];
 
       for (const { line, requestedQuantity } of requested) {
         if (requestedQuantity <= 0) {
           continue;
         }
-        // Re-read on-hand inside the transaction — the authoritative clamp
-        // (AC 4) — rather than trusting whatever `previewBackflush` returned
-        // moments earlier.
-        const item = await tx.item.findUnique({
-          where: { id: line.itemId as string },
-          select: { quantity: true },
-        });
-        const onHand = item?.quantity ?? 0;
-        const consumeQuantity = clamp(requestedQuantity, 0, onHand);
-        if (consumeQuantity <= 0) {
-          continue;
-        }
 
-        const { movement } = await this.stockMovementsService.recordMovement(tx, {
+        // Race-safe consume (finding 1) — see `recordConsumption`'s doc
+        // comment. `result` is `null` when on-hand was already 0 (or hit 0
+        // mid-loop): nothing to write, skip this line.
+        const result = await this.stockMovementsService.recordConsumption(tx, {
           itemId: line.itemId as string,
           kind: 'build',
-          delta: -consumeQuantity,
+          requestedQuantity,
           projectId: id,
           note: 'Backflush: project completion',
+          createdById,
         });
+        if (!result) {
+          continue;
+        }
 
         consumed.push({
           lineId: line.id,
           itemId: line.itemId as string,
           name: line.name,
           requestedQuantity,
-          consumedQuantity: consumeQuantity,
-          shortage: consumeQuantity < requestedQuantity,
-          movementId: movement.id,
+          consumedQuantity: result.consumedQuantity,
+          shortage: result.consumedQuantity < requestedQuantity,
+          movementId: result.movement.id,
         });
       }
 

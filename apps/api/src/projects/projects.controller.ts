@@ -11,6 +11,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
 import { BackflushDto } from './backflush.dto';
 import { CreateBomLineDto } from './create-bom-line.dto';
 import { CreateProjectDto } from './create-project.dto';
@@ -100,10 +101,15 @@ export class ProjectsController {
    * POST /api/projects/:id/backflush — confirms the backflush: writes one
    * `build` movement per consumed line and marks the project `completed`,
    * atomically (EVT-28 AC 2). 409s if already backflushed unless
-   * `confirmAgain` is set (AC 6).
+   * `confirmAgain` is set (AC 6). `createdById` is stamped from the caller's
+   * session onto every `build` movement (mirrors `ItemsController.create`).
    */
   @Post(':id/backflush')
-  backflush(@Param('id', ParseUUIDPipe) id: string, @Body() dto: BackflushDto) {
-    return this.projectsService.backflush(id, dto);
+  backflush(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: BackflushDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.backflush(id, dto, user.id);
   }
 }

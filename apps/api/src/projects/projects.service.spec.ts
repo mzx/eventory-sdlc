@@ -75,9 +75,12 @@ describe('ProjectsService', () => {
   // `tx.*` mocks — a bare object exposing only the delegates `backflush`
   // touches inside `$transaction`. `tx.project.update` and `tx.item`
   // deliberately share the same jest.fn()s as the top-level mocks below so
-  // a test can assert on either.
+  // a test can assert on either. `tx.stockMovement.count` backs the
+  // idempotency guard, which now runs INSIDE the transaction (review round
+  // 2, finding 2) rather than against the top-level `stockMovementMock`.
   const txProjectMock = { update: jest.fn() };
   const txItemMock = { findUnique: jest.fn() };
+  const txStockMovementMock = { count: jest.fn() };
 
   const prismaMock = {
     project: projectMock,
@@ -89,15 +92,24 @@ describe('ProjectsService', () => {
 
   const stockMovementsServiceMock = {
     recordMovement: jest.fn(),
+    recordConsumption: jest.fn(),
   };
 
   beforeEach(async () => {
     jest.clearAllMocks();
 
     prismaMock.$transaction.mockImplementation(
-      (cb: (tx: { project: typeof txProjectMock; item: typeof txItemMock }) => unknown) =>
-        cb({ project: txProjectMock, item: txItemMock }),
+      (
+        cb: (tx: {
+          project: typeof txProjectMock;
+          item: typeof txItemMock;
+          stockMovement: typeof txStockMovementMock;
+        }) => unknown,
+      ) => cb({ project: txProjectMock, item: txItemMock, stockMovement: txStockMovementMock }),
     );
+    // Default: not already backflushed — most tests only care about this
+    // when explicitly testing the idempotency guard.
+    txStockMovementMock.count.mockResolvedValue(0);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -561,17 +573,22 @@ describe('ProjectsService', () => {
       return bomLines;
     }
 
-    it('writes one build movement per item-linked line and marks the project completed, atomically (AC 2)', async () => {
+    /** Default happy-path stub: `recordConsumption` fully satisfies whatever it's asked for. */
+    function stubFullConsumption(movementId = 'mv-1') {
+      stockMovementsServiceMock.recordConsumption.mockImplementation(
+        async (_tx: unknown, input: { requestedQuantity: number }) => ({
+          movement: { id: movementId },
+          consumedQuantity: input.requestedQuantity,
+        }),
+      );
+    }
+
+    it('writes one build movement per item-linked line (via race-safe recordConsumption) and marks the project completed, atomically (AC 2)', async () => {
       withBomLines([
         makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 3 }),
         makeBomLine({ id: 'line-2', itemId: null, name: '2x4 lumber' }),
       ]);
-      stockMovementMock.count.mockResolvedValue(0);
-      txItemMock.findUnique.mockResolvedValue({ quantity: 10 });
-      stockMovementsServiceMock.recordMovement.mockResolvedValue({
-        movement: { id: 'mv-1' },
-        item: { id: 'item-1', quantity: 7 },
-      });
+      stubFullConsumption();
       txProjectMock.update.mockResolvedValue({
         ...makeProject({ status: 'completed' }),
         bomLines: [],
@@ -585,13 +602,13 @@ describe('ProjectsService', () => {
         ],
       });
 
-      expect(stockMovementsServiceMock.recordMovement).toHaveBeenCalledTimes(1);
-      expect(stockMovementsServiceMock.recordMovement).toHaveBeenCalledWith(
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledTimes(1);
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledWith(
         expect.objectContaining({ project: txProjectMock, item: txItemMock }),
         expect.objectContaining({
           itemId: 'item-1',
           kind: 'build',
-          delta: -3,
+          requestedQuantity: 3,
           projectId: 'project-1',
         }),
       );
@@ -606,13 +623,52 @@ describe('ProjectsService', () => {
       expect(result.project.status).toBe('completed');
     });
 
-    it('shortage: clamps the consumed quantity to current on-hand, never below zero (AC 4)', async () => {
+    it('review round 2, finding 2: the idempotency guard count runs INSIDE the transaction, after $transaction opens', async () => {
+      withBomLines();
+      stubFullConsumption();
+      txProjectMock.update.mockResolvedValue({
+        ...makeProject({ status: 'completed' }),
+        bomLines: [],
+        stockMovements: [],
+      });
+
+      await service.backflush('project-1', { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] });
+
+      expect(prismaMock.$transaction).toHaveBeenCalled();
+      expect(txStockMovementMock.count).toHaveBeenCalledWith({
+        where: { projectId: 'project-1', kind: 'build' },
+      });
+      const transactionCallOrder = prismaMock.$transaction.mock.invocationCallOrder[0];
+      const countCallOrder = txStockMovementMock.count.mock.invocationCallOrder[0];
+      expect(countCallOrder).toBeGreaterThan(transactionCallOrder);
+    });
+
+    it('threads createdById through to recordConsumption on every write (SHOULD FIX 6)', async () => {
+      withBomLines();
+      stubFullConsumption();
+      txProjectMock.update.mockResolvedValue({
+        ...makeProject({ status: 'completed' }),
+        bomLines: [],
+        stockMovements: [],
+      });
+
+      await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] },
+        'user-1',
+      );
+
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ createdById: 'user-1' }),
+      );
+    });
+
+    it('shortage: reports the amount recordConsumption actually applied, which may be less than requested (AC 4)', async () => {
       withBomLines([makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 5 })]);
-      stockMovementMock.count.mockResolvedValue(0);
-      txItemMock.findUnique.mockResolvedValue({ quantity: 2 }); // shortage: less than requested
-      stockMovementsServiceMock.recordMovement.mockResolvedValue({
+      stockMovementsServiceMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
-        item: { id: 'item-1', quantity: 0 },
+        consumedQuantity: 2, // recordConsumption clamped to on-hand internally
       });
       txProjectMock.update.mockResolvedValue({
         ...makeProject({ status: 'completed' }),
@@ -624,10 +680,6 @@ describe('ProjectsService', () => {
         lines: [{ lineId: 'line-1', consumeQuantity: 5 }],
       });
 
-      expect(stockMovementsServiceMock.recordMovement).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ delta: -2 }),
-      );
       expect(result.consumed[0]).toMatchObject({
         requestedQuantity: 5,
         consumedQuantity: 2,
@@ -635,14 +687,43 @@ describe('ProjectsService', () => {
       });
     });
 
-    it('clamps an over-large requested quantity to the line quantity before even reaching on-hand (AC 1/2)', async () => {
-      withBomLines([makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 })]);
-      stockMovementMock.count.mockResolvedValue(0);
-      txItemMock.findUnique.mockResolvedValue({ quantity: 100 });
-      stockMovementsServiceMock.recordMovement.mockResolvedValue({
-        movement: { id: 'mv-1' },
-        item: {},
+    it('review round 2, finding 1: on-hand hitting 0 mid-loop (recordConsumption returns null) skips the line with no write', async () => {
+      withBomLines([makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 3 })]);
+      stockMovementsServiceMock.recordConsumption.mockResolvedValue(null);
+      txProjectMock.update.mockResolvedValue({
+        ...makeProject({ status: 'completed' }),
+        bomLines: [],
+        stockMovements: [],
       });
+
+      const result = await service.backflush('project-1', {
+        lines: [{ lineId: 'line-1', consumeQuantity: 3 }],
+      });
+
+      expect(result.consumed).toEqual([]);
+      expect(txProjectMock.update).toHaveBeenCalled(); // project still completes
+    });
+
+    it('review round 2, finding 5: a line edited down to consumeQuantity 0 is skipped without calling recordConsumption', async () => {
+      withBomLines([makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 3 })]);
+      txProjectMock.update.mockResolvedValue({
+        ...makeProject({ status: 'completed' }),
+        bomLines: [],
+        stockMovements: [],
+      });
+
+      const result = await service.backflush('project-1', {
+        lines: [{ lineId: 'line-1', consumeQuantity: 0 }],
+      });
+
+      expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
+      expect(result.consumed).toEqual([]);
+      expect(txProjectMock.update).toHaveBeenCalled(); // project still completes
+    });
+
+    it('clamps an over-large requested quantity to the line quantity before even calling recordConsumption (AC 1/2)', async () => {
+      withBomLines([makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 })]);
+      stubFullConsumption();
       txProjectMock.update.mockResolvedValue({
         ...makeProject({ status: 'completed' }),
         bomLines: [],
@@ -651,15 +732,41 @@ describe('ProjectsService', () => {
 
       await service.backflush('project-1', { lines: [{ lineId: 'line-1', consumeQuantity: 10 }] });
 
-      expect(stockMovementsServiceMock.recordMovement).toHaveBeenCalledWith(
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ delta: -2 }),
+        expect.objectContaining({ requestedQuantity: 2 }),
       );
+    });
+
+    it('review round 2, finding 3: duplicate lineId entries are de-duplicated (last one wins), not multiplied', async () => {
+      withBomLines([makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 5 })]);
+      stubFullConsumption();
+      txProjectMock.update.mockResolvedValue({
+        ...makeProject({ status: 'completed' }),
+        bomLines: [],
+        stockMovements: [],
+      });
+
+      const result = await service.backflush('project-1', {
+        lines: [
+          { lineId: 'line-1', consumeQuantity: 1 },
+          { lineId: 'line-1', consumeQuantity: 5 },
+          { lineId: 'line-1', consumeQuantity: 2 }, // last wins
+        ],
+      });
+
+      // Exactly one write, for the last entry's quantity — not 3 writes /
+      // not 8 (1+5+2) worth of consumption.
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledTimes(1);
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ requestedQuantity: 2 }),
+      );
+      expect(result.consumed).toHaveLength(1);
     });
 
     it('writes no movement for a free-text BOM line and does not error (AC 3)', async () => {
       withBomLines([makeBomLine({ id: 'line-1', itemId: null, name: '2x4 lumber', quantity: 4 })]);
-      stockMovementMock.count.mockResolvedValue(0);
       txProjectMock.update.mockResolvedValue({
         ...makeProject({ status: 'completed' }),
         bomLines: [],
@@ -670,7 +777,7 @@ describe('ProjectsService', () => {
         lines: [{ lineId: 'line-1', consumeQuantity: 4 }],
       });
 
-      expect(stockMovementsServiceMock.recordMovement).not.toHaveBeenCalled();
+      expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
       expect(result.consumed).toEqual([]);
       expect(txProjectMock.update).toHaveBeenCalled(); // project still completes
     });
@@ -679,7 +786,7 @@ describe('ProjectsService', () => {
       // Documents the contract: with no call to backflush(), nothing is
       // touched — asserted by simply never invoking the service and
       // verifying no mock was called.
-      expect(stockMovementsServiceMock.recordMovement).not.toHaveBeenCalled();
+      expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
       expect(projectMock.update).not.toHaveBeenCalled();
     });
 
@@ -688,10 +795,8 @@ describe('ProjectsService', () => {
         makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 1 }),
         makeBomLine({ id: 'line-2', itemId: 'item-2', quantity: 1 }),
       ]);
-      stockMovementMock.count.mockResolvedValue(0);
-      txItemMock.findUnique.mockResolvedValue({ quantity: 10 });
-      stockMovementsServiceMock.recordMovement
-        .mockResolvedValueOnce({ movement: { id: 'mv-1' }, item: {} })
+      stockMovementsServiceMock.recordConsumption
+        .mockResolvedValueOnce({ movement: { id: 'mv-1' }, consumedQuantity: 1 })
         .mockRejectedValueOnce(new Error('write failed'));
 
       await expect(
@@ -708,23 +813,20 @@ describe('ProjectsService', () => {
 
     it('idempotency: rejects with ConflictException when already backflushed and confirmAgain is not set (AC 6)', async () => {
       withBomLines();
-      stockMovementMock.count.mockResolvedValue(1);
+      txStockMovementMock.count.mockResolvedValue(1);
 
       await expect(
         service.backflush('project-1', { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] }),
       ).rejects.toBeInstanceOf(ConflictException);
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
-      expect(stockMovementsServiceMock.recordMovement).not.toHaveBeenCalled();
+      expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
+      // The project status must never be written when the guard rejects.
+      expect(txProjectMock.update).not.toHaveBeenCalled();
     });
 
     it('idempotency: proceeds when already backflushed AND confirmAgain is true (AC 6)', async () => {
       withBomLines();
-      stockMovementMock.count.mockResolvedValue(1);
-      txItemMock.findUnique.mockResolvedValue({ quantity: 10 });
-      stockMovementsServiceMock.recordMovement.mockResolvedValue({
-        movement: { id: 'mv-2' },
-        item: {},
-      });
+      txStockMovementMock.count.mockResolvedValue(1);
+      stubFullConsumption('mv-2');
       txProjectMock.update.mockResolvedValue({
         ...makeProject({ status: 'completed' }),
         bomLines: [],
@@ -736,13 +838,12 @@ describe('ProjectsService', () => {
         confirmAgain: true,
       });
 
-      expect(stockMovementsServiceMock.recordMovement).toHaveBeenCalled();
+      expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalled();
       expect(result.consumed).toHaveLength(1);
     });
 
     it('throws NotFoundException for an unknown lineId', async () => {
       withBomLines();
-      stockMovementMock.count.mockResolvedValue(0);
 
       await expect(
         service.backflush('project-1', { lines: [{ lineId: 'missing-line', consumeQuantity: 1 }] }),

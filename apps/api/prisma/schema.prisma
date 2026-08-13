@@ -271,10 +271,21 @@ model BomLine {
 /// question always has an answer.
 ///
 /// - `add`     — new stock entering the system (item creation / intake).
-/// - `consume` — stock leaving via use (e.g. a future BOM backflush, EVT-28).
+/// - `consume` — stock leaving via use; currently unwritten by any endpoint,
+///                reserved for a future non-project consumption path.
 /// - `move`    — relocation between locations; `delta` is typically 0.
 /// - `adjust`  — a manual correction (e.g. editing quantity in the web form).
-/// - `build`   — stock produced by completing a project (future, EVT-28).
+/// - `build`   — BOM backflush consumption on project completion (EVT-28,
+///                `ProjectsService.backflush()`): despite the name, `delta`
+///                is NEGATIVE here — completing a project CONSUMES its BOM
+///                stock, it doesn't produce it — and `projectId` links back
+///                to the completed project. `build` was kept (rather than
+///                reusing `consume`) because it's the name the EVT-28 AC
+///                specifies and it's what distinguishes "consumed via BOM
+///                backflush" from a future generic `consume` write in the
+///                ledger; the web UI renders a negative-delta `build` as
+///                "Consumed in build" (see `ItemDetailPage`) so it doesn't
+///                read as a contradiction.
 enum StockMovementKind {
   add
   consume
@@ -287,16 +298,18 @@ model StockMovement {
   id             String            @id @default(uuid()) @db.Uuid
   itemId         String            @db.Uuid
   kind           StockMovementKind
-  /// Signed change applied to `Item.quantity` (positive for `add`/`build`,
-  /// negative for `consume`, either sign for `adjust`, typically 0 for a
-  /// pure `move`).
+  /// Signed change applied to `Item.quantity` (positive for `add`; negative
+  /// for `consume` and `build` — see the `StockMovementKind` doc comment
+  /// above for why `build`'s delta is negative; either sign for `adjust`;
+  /// typically 0 for a pure `move`).
   delta          Int
   /// Set only on `move` — the location the item left. Null for every other kind.
   fromLocationId String?           @db.Uuid
   /// Set only on `move` — the location the item arrived at. Null for every other kind.
   toLocationId   String?           @db.Uuid
-  /// Optional link to the project this movement is associated with (future
-  /// `consume`/`build` backflush, EVT-28). Unused by this task's endpoints.
+  /// Link to the project this movement is associated with. Set on every
+  /// `build` movement written by a backflush confirm (EVT-28); null
+  /// otherwise.
   projectId      String?           @db.Uuid
   /// Free-text context (e.g. "Initial intake", "Manual quantity edit").
   note           String?

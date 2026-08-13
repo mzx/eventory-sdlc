@@ -477,6 +477,46 @@ describe('ProjectDetailPage', () => {
       );
     });
 
+    it('review round 2, finding 8: shows an error alert when loading the confirmation screen fails', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockRejectedValue(new Error('preview boom'));
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      expect(await screen.findByText('preview boom')).toBeInTheDocument();
+      // The dialog itself never opens — there's nothing to confirm.
+      expect(
+        screen.queryByText('Complete project — confirm stock consumption'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('review round 2, finding 8: shows an error alert inside the dialog when confirming fails', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ lines: [previewLine({ lineId: 'line-1', quantity: 3, onHand: 5 })] }),
+      );
+      vi.spyOn(api, 'confirmBackflush').mockRejectedValue(new Error('confirm boom'));
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      const dialog = within(await screen.findByRole('dialog'));
+      await user.click(dialog.getByRole('button', { name: 'Confirm' }));
+
+      expect(await dialog.findByText('confirm boom')).toBeInTheDocument();
+      // The dialog stays open on failure — nothing was confirmed.
+      expect(screen.getByText('Complete project — confirm stock consumption')).toBeInTheDocument();
+    });
+
     it('cancelling the dialog writes nothing', async () => {
       vi.spyOn(api, 'fetchProject').mockResolvedValue(
         project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
