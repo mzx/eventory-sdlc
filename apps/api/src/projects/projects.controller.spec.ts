@@ -31,6 +31,7 @@ function makeBomLine(overrides: Partial<Record<string, unknown>> = {}) {
     quantity: 4,
     unit: 'pcs',
     notes: null,
+    picked: false,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     item: null,
@@ -52,6 +53,7 @@ describe('ProjectsController', () => {
     addBomLine: jest.fn(),
     updateBomLine: jest.fn(),
     removeBomLine: jest.fn(),
+    availability: jest.fn(),
     previewBackflush: jest.fn(),
     backflush: jest.fn(),
   };
@@ -184,6 +186,26 @@ describe('ProjectsController', () => {
       await controller.removeBomLine('project-1', 'line-1');
 
       expect(serviceMock.removeBomLine).toHaveBeenCalledWith('project-1', 'line-1');
+    });
+  });
+
+  // ── availability (EVT-29) ────────────────────────────────────────────────
+
+  describe('GET /projects/:id/availability (availability)', () => {
+    it('delegates to ProjectsService.availability with the id', async () => {
+      const availability = {
+        projectId: 'project-1',
+        asOf: '2026-08-13T00:00:00.000Z',
+        clearToBuild: true,
+        counts: { ok: 0, short: 0, untracked: 0 },
+        lines: [],
+      };
+      serviceMock.availability.mockResolvedValue(availability);
+
+      const result = await controller.availability('project-1');
+
+      expect(serviceMock.availability).toHaveBeenCalledWith('project-1');
+      expect(result).toBe(availability);
     });
   });
 

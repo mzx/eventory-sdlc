@@ -87,6 +87,17 @@ export class ProjectsController {
   }
 
   /**
+   * GET /api/projects/:id/availability — clear-to-build check + kitting
+   * pick-list data (EVT-29 AC 1, AC 2, AC 3): per-line on-hand, storage
+   * location, and status (`ok`/`short`/`untracked`), plus a `clearToBuild`
+   * summary. Read-only, point-in-time (see `ProjectAvailability.asOf`).
+   */
+  @Get(':id/availability')
+  availability(@Param('id', ParseUUIDPipe) id: string) {
+    return this.projectsService.availability(id);
+  }
+
+  /**
    * GET /api/projects/:id/backflush-preview — read-only confirmation-screen
    * data for completing a project (EVT-28 AC 1): per-line on-hand,
    * suggested consume quantity, shortage flags, and whether this project was

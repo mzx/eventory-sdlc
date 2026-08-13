@@ -76,6 +76,59 @@ export interface BackflushPreview {
   lines: BackflushPreviewLine[];
 }
 
+// ---------------------------------------------------------------------------
+// availability — clear-to-build check + kitting pick list (EVT-29)
+// ---------------------------------------------------------------------------
+
+/** Per-line status computed by `availability()` — see that method's doc comment. */
+export type AvailabilityStatus = 'ok' | 'short' | 'untracked';
+
+/** Denormalized location summary embedded on an availability line, for the pick list (AC 3). */
+export interface AvailabilityLocationRef {
+  id: string;
+  name: string;
+  path: string;
+}
+
+/** One BOM line as shown on the "Can I build this?" panel / pick list. */
+export interface AvailabilityLine {
+  lineId: string;
+  itemId: string | null;
+  name: string;
+  /** BOM line quantity (required). */
+  quantity: number;
+  unit: string | null;
+  /** Current on-hand for the linked item; `null` for a free-text (untracked) line. */
+  onHand: number | null;
+  /** Where the linked item is stored; `null` for untracked lines or an unlocated item. */
+  location: AvailabilityLocationRef | null;
+  /** `ok` (on-hand >= plan), `short` (on-hand < plan), or `untracked` (free-text, no itemId). */
+  status: AvailabilityStatus;
+  /** Kitting pick-list check-off state (AC 3). Always `false` for untracked lines. */
+  picked: boolean;
+}
+
+export interface AvailabilityCounts {
+  ok: number;
+  short: number;
+  untracked: number;
+}
+
+export interface ProjectAvailability {
+  projectId: string;
+  /**
+   * Point-in-time read timestamp (EVT-29 risk): the backflush confirmation
+   * (EVT-28) remains the source of truth at consume time, so this can go
+   * stale between reads — labeling it lets the UI show its data's age
+   * rather than implying a live reservation.
+   */
+  asOf: string;
+  /** `true` when every TRACKED (item-linked) line is `ok` — untracked lines never block this (AC 1). */
+  clearToBuild: boolean;
+  counts: AvailabilityCounts;
+  lines: AvailabilityLine[];
+}
+
 /** One line actually written by a `backflush()` call. */
 export interface BackflushConsumedLine {
   lineId: string;
@@ -264,6 +317,7 @@ export class ProjectsService {
         ...(dto.quantity !== undefined && { quantity: dto.quantity }),
         ...(dto.unit !== undefined && { unit: dto.unit }),
         ...(dto.notes !== undefined && { notes: dto.notes }),
+        ...(dto.picked !== undefined && { picked: dto.picked }),
       },
       include: { item: { select: LINKED_ITEM_SELECT } },
     });
@@ -276,6 +330,91 @@ export class ProjectsService {
   async removeBomLine(projectId: string, lineId: string): Promise<void> {
     await this.assertBomLineExists(projectId, lineId);
     await this.prisma.bomLine.delete({ where: { id: lineId } });
+  }
+
+  // -------------------------------------------------------------------------
+  // availability — GET /api/projects/:id/availability (EVT-29)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Clear-to-build check (AC 1, AC 2): every BOM line annotated with its
+   * current on-hand, storage location, and a status —
+   *
+   * - `ok`        — item-linked, on-hand >= plan quantity.
+   * - `short`     — item-linked, on-hand < plan quantity.
+   * - `untracked` — free-text (no `itemId`); not verifiable against
+   *                 inventory at all, so it's counted SEPARATELY from a
+   *                 shortage rather than folded into it (AC 1) and never
+   *                 blocks `clearToBuild` (AC 1/2 — "green all-clear when
+   *                 every TRACKED line is ok").
+   *
+   * Read-only, point-in-time — see `ProjectAvailability.asOf`'s doc comment
+   * for the staleness contract (EVT-29 risk).
+   */
+  async availability(id: string): Promise<ProjectAvailability> {
+    const project = await this.prisma.project.findUnique({
+      where: { id },
+      include: {
+        bomLines: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            item: {
+              select: {
+                id: true,
+                quantity: true,
+                location: { select: { id: true, name: true, path: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!project) {
+      throw new NotFoundException(`Project ${id} not found`);
+    }
+
+    const counts: AvailabilityCounts = { ok: 0, short: 0, untracked: 0 };
+
+    const lines: AvailabilityLine[] = project.bomLines.map((line) => {
+      if (!line.item) {
+        counts.untracked += 1;
+        return {
+          lineId: line.id,
+          itemId: null,
+          name: line.name,
+          quantity: line.quantity,
+          unit: line.unit,
+          onHand: null,
+          location: null,
+          status: 'untracked',
+          picked: line.picked,
+        };
+      }
+
+      const onHand = line.item.quantity;
+      const status: AvailabilityStatus = onHand >= line.quantity ? 'ok' : 'short';
+      counts[status] += 1;
+
+      return {
+        lineId: line.id,
+        itemId: line.item.id,
+        name: line.name,
+        quantity: line.quantity,
+        unit: line.unit,
+        onHand,
+        location: line.item.location,
+        status,
+        picked: line.picked,
+      };
+    });
+
+    return {
+      projectId: id,
+      asOf: new Date().toISOString(),
+      clearToBuild: counts.short === 0,
+      counts,
+      lines,
+    };
   }
 
   // -------------------------------------------------------------------------

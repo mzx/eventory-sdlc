@@ -32,6 +32,7 @@ function bomLine(overrides: Partial<api.BomLine> = {}): api.BomLine {
     quantity: 1,
     unit: null,
     notes: null,
+    picked: false,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     item: null,
@@ -59,6 +60,32 @@ function preview(overrides: Partial<api.BackflushPreview> = {}): api.BackflushPr
     projectId: 'project-1',
     alreadyBackflushed: false,
     lines: [previewLine()],
+    ...overrides,
+  };
+}
+
+function availabilityLine(overrides: Partial<api.AvailabilityLine> = {}): api.AvailabilityLine {
+  return {
+    lineId: 'line-1',
+    itemId: 'item-1',
+    name: 'Cordless drill',
+    quantity: 2,
+    unit: null,
+    onHand: 5,
+    location: { id: 'loc-1', name: 'Cabinet 3', path: 'garage.cabinet-3' },
+    status: 'ok',
+    picked: false,
+    ...overrides,
+  };
+}
+
+function availability(overrides: Partial<api.ProjectAvailability> = {}): api.ProjectAvailability {
+  return {
+    projectId: 'project-1',
+    asOf: '2026-08-13T00:00:00.000Z',
+    clearToBuild: true,
+    counts: { ok: 1, short: 0, untracked: 0 },
+    lines: [availabilityLine()],
     ...overrides,
   };
 }
@@ -642,6 +669,149 @@ describe('ProjectDetailPage', () => {
       renderPage();
 
       expect(await screen.findByText(/does not reverse that consumption/i)).toBeInTheDocument();
+    });
+  });
+
+  // ── "Can I build this?" availability panel (EVT-29 AC 1, 2, 4) ──────────
+
+  describe('Availability panel (EVT-29)', () => {
+    it('shows an all-clear alert when every tracked line is ok (AC 2)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(availability());
+
+      renderPage();
+
+      expect(await screen.findByText('Can I build this?')).toBeInTheDocument();
+      expect(
+        await screen.findByText('All clear — every tracked part is on hand.'),
+      ).toBeInTheDocument();
+    });
+
+    it('shows a short/untracked breakdown with per-line status and location (AC 1, 2)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 5 })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({
+          clearToBuild: false,
+          counts: { ok: 0, short: 1, untracked: 1 },
+          lines: [
+            availabilityLine({
+              lineId: 'line-1',
+              name: 'Cordless drill',
+              quantity: 5,
+              onHand: 2,
+              status: 'short',
+            }),
+            availabilityLine({
+              lineId: 'line-2',
+              itemId: null,
+              name: '2x4 lumber',
+              onHand: null,
+              location: null,
+              status: 'untracked',
+            }),
+          ],
+        }),
+      );
+
+      renderPage();
+
+      expect(await screen.findByText('1 short, 1 untracked')).toBeInTheDocument();
+      expect(screen.getByText('Short')).toBeInTheDocument();
+      expect(screen.getByText('Untracked')).toBeInTheDocument();
+      expect(screen.getByText('garage.cabinet-3')).toBeInTheDocument();
+    });
+
+    it('a shortage line offers "Add to shopping list", which creates an EVT-26 entry (AC 4)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 5 })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({
+          clearToBuild: false,
+          counts: { ok: 0, short: 1, untracked: 0 },
+          lines: [
+            availabilityLine({ lineId: 'line-1', itemId: 'item-1', onHand: 2, status: 'short' }),
+          ],
+        }),
+      );
+      const markRunningLowMock = vi.spyOn(api, 'markRunningLow').mockResolvedValue({
+        id: 'entry-1',
+        itemId: 'item-1',
+        status: 'open',
+        source: 'manual',
+        createdAt: '2026-08-13T00:00:00.000Z',
+        resolvedAt: null,
+        item: {
+          id: 'item-1',
+          name: 'Cordless drill',
+          quantity: 2,
+          minQuantity: null,
+          qrCode: 'qr-1',
+          primaryPhoto: null,
+          location: null,
+        },
+      });
+
+      const user = userEvent.setup();
+      renderPage();
+
+      const button = await screen.findByRole('button', { name: 'Add to shopping list' });
+      await user.click(button);
+
+      await waitFor(() => expect(markRunningLowMock).toHaveBeenCalledWith('item-1'));
+    });
+
+    it('an ok line does not offer "Add to shopping list"', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(availability());
+
+      renderPage();
+
+      await screen.findByText('Can I build this?');
+      expect(
+        screen.queryByRole('button', { name: 'Add to shopping list' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('links to the pick list page', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(availability());
+
+      renderPage();
+
+      const link = await screen.findByRole('link', { name: 'Pick list' });
+      expect(link).toHaveAttribute('href', '/projects/project-1/pick-list');
+    });
+
+    it('renders nothing when the project has no BOM lines', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project({ bomLines: [] }));
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({ counts: { ok: 0, short: 0, untracked: 0 }, lines: [] }),
+      );
+
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      expect(screen.queryByText('Can I build this?')).not.toBeInTheDocument();
+    });
+
+    it('shows an error alert when the availability fetch fails', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1' })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockRejectedValue(new Error('availability boom'));
+
+      renderPage();
+
+      expect(await screen.findByText('availability boom')).toBeInTheDocument();
     });
   });
 });

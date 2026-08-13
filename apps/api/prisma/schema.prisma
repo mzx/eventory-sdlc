@@ -18,6 +18,9 @@
 // as a single itemless `StockMovement` (nullable `itemId`, new `containerId`)
 // via `StockMovementsService.recordContainerMove` rather than one row per
 // contained item — see `LocationsService.moveContainer`.
+// Clear-to-build + kitting (EVT-29): `BomLine.picked` is the pick-list
+// check-off state; availability status (ok/short/untracked) is computed
+// on read in `ProjectsService.availability` rather than stored.
 
 generator client {
   provider = "prisma-client-js"
@@ -278,6 +281,10 @@ model BomLine {
   quantity  Int      @default(1)
   unit      String?
   notes     String?
+  /// Kitting pick-list check-off state (EVT-29 AC 3) — informational only,
+  /// not a stock reservation (single-user, EVT-29 non-goal). Persists across
+  /// reloads so a paused pick session resumes where it left off.
+  picked    Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

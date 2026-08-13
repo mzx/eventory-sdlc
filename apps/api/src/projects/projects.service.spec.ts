@@ -31,6 +31,7 @@ function makeBomLine(overrides: Partial<Record<string, unknown>> = {}) {
     quantity: 1,
     unit: null,
     notes: null,
+    picked: false,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -430,6 +431,17 @@ describe('ProjectsService', () => {
         service.updateBomLine('project-1', 'line-1', { quantity: 2 }),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    it('persists the picked check-off state (EVT-29 AC 3)', async () => {
+      bomLineMock.findUnique.mockResolvedValue(makeBomLine());
+      bomLineMock.update.mockResolvedValue(makeBomLine({ picked: true }));
+
+      await service.updateBomLine('project-1', 'line-1', { picked: true });
+
+      expect(bomLineMock.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ picked: true }) }),
+      );
+    });
   });
 
   // ── removeBomLine — delete ───────────────────────────────────────────────
@@ -460,6 +472,104 @@ describe('ProjectsService', () => {
         NotFoundException,
       );
       expect(bomLineMock.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── availability — GET /:id/availability (EVT-29 AC 1, 2, 3) ────────────
+
+  describe('availability', () => {
+    it('returns ok/short/untracked per line and a correct clearToBuild summary (AC 1)', async () => {
+      projectMock.findUnique.mockResolvedValue({
+        ...makeProject(),
+        bomLines: [
+          {
+            ...makeBomLine({ id: 'line-1', itemId: 'item-1', name: 'Cordless drill', quantity: 2 }),
+            item: {
+              id: 'item-1',
+              quantity: 5,
+              location: { id: 'loc-1', name: 'Cabinet 3', path: 'garage.cabinet-3' },
+            },
+          },
+          {
+            ...makeBomLine({ id: 'line-2', itemId: 'item-2', name: 'M3 screws', quantity: 10 }),
+            item: { id: 'item-2', quantity: 4, location: null },
+          },
+          {
+            ...makeBomLine({ id: 'line-3', name: '2x4 lumber', quantity: 4 }),
+            item: null,
+          },
+        ],
+      });
+
+      const result = await service.availability('project-1');
+
+      expect(result.projectId).toBe('project-1');
+      expect(result.asOf).toEqual(expect.any(String));
+      expect(result.counts).toEqual({ ok: 1, short: 1, untracked: 1 });
+      // A shortage exists, so the project is not clear to build.
+      expect(result.clearToBuild).toBe(false);
+      expect(result.lines).toEqual([
+        expect.objectContaining({
+          lineId: 'line-1',
+          itemId: 'item-1',
+          onHand: 5,
+          status: 'ok',
+          location: { id: 'loc-1', name: 'Cabinet 3', path: 'garage.cabinet-3' },
+        }),
+        expect.objectContaining({
+          lineId: 'line-2',
+          itemId: 'item-2',
+          onHand: 4,
+          status: 'short',
+          location: null,
+        }),
+        expect.objectContaining({
+          lineId: 'line-3',
+          itemId: null,
+          onHand: null,
+          status: 'untracked',
+          location: null,
+        }),
+      ]);
+    });
+
+    it('is clear to build when every tracked line is ok, regardless of untracked lines (AC 1/2)', async () => {
+      projectMock.findUnique.mockResolvedValue({
+        ...makeProject(),
+        bomLines: [
+          {
+            ...makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 }),
+            item: { id: 'item-1', quantity: 2, location: null },
+          },
+          { ...makeBomLine({ id: 'line-2', name: '2x4 lumber' }), item: null },
+        ],
+      });
+
+      const result = await service.availability('project-1');
+
+      expect(result.counts).toEqual({ ok: 1, short: 0, untracked: 1 });
+      expect(result.clearToBuild).toBe(true);
+    });
+
+    it("includes each line's persisted picked state (AC 3)", async () => {
+      projectMock.findUnique.mockResolvedValue({
+        ...makeProject(),
+        bomLines: [
+          {
+            ...makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 1, picked: true }),
+            item: { id: 'item-1', quantity: 1, location: null },
+          },
+        ],
+      });
+
+      const result = await service.availability('project-1');
+
+      expect(result.lines[0]).toMatchObject({ picked: true });
+    });
+
+    it('throws NotFoundException when the project does not exist', async () => {
+      projectMock.findUnique.mockResolvedValue(null);
+      await expect(service.availability('missing')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 
