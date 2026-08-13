@@ -2,6 +2,7 @@ import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import ConstructionIcon from '@mui/icons-material/Construction';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
+import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
 import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
@@ -31,15 +32,19 @@ import {
   TableBody,
   TableCell,
   TableRow,
+  TextField,
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useState } from 'react';
 import { Link as RouterLink, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
+  consumeItem,
+  countItem,
   deleteItem,
   fetchItem,
   fetchItemMovements,
+  isCountOverdue,
   markRunningLow,
   photoUrl,
   type ItemDetail,
@@ -48,6 +53,7 @@ import {
   type StockMovementRow,
 } from '../api';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { CountDialog } from '../components/CountDialog';
 import { QrThumb } from '../components/QrThumb';
 
 /** How many additional rows "Load more" reveals each click (EVT-25 AC 6). */
@@ -218,6 +224,40 @@ export function ItemDetailPage() {
     },
   });
 
+  // "Verify count" (EVT-27 AC 2/5) — the blind-entry `CountDialog` is shared
+  // with the opportunistic "how many are actually left?" prompt below (both
+  // just want a blind count recorded); `countDialogOpen` drives whichever
+  // triggered it.
+  const [countDialogOpen, setCountDialogOpen] = useState(false);
+  const countMutation = useMutation({
+    mutationFn: (quantity: number) => countItem(id as string, quantity),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['items'] });
+    },
+  });
+
+  // "Use" — consumes stock (EVT-27 AC 4). A consume that leaves on-hand at
+  // or below `max(minQuantity, 2)` offers the opportunistic count prompt;
+  // skipping it is one tap and leaves no state behind.
+  const [useDialogOpen, setUseDialogOpen] = useState(false);
+  const [useQuantity, setUseQuantity] = useState('1');
+  const [useError, setUseError] = useState<string | null>(null);
+  const [offerVerificationOpen, setOfferVerificationOpen] = useState(false);
+  const consumeMutation = useMutation({
+    mutationFn: (quantity: number) => consumeItem(id as string, quantity),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['items'] });
+      setUseDialogOpen(false);
+      setUseError(null);
+      if (result.offerVerification) {
+        setOfferVerificationOpen(true);
+      }
+    },
+    onError: (error: unknown) => {
+      setUseError(error instanceof Error ? error.message : 'Failed to record consumption');
+    },
+  });
+
   if (itemQuery.isLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
@@ -237,6 +277,11 @@ export function ItemDetailPage() {
   const item = itemQuery.data;
   const gallery = orderedGallery(item);
   const propertyEntries = Object.entries(item.properties ?? {});
+  // "Verify count" affordance (EVT-27 AC 5) — this page doubles as the
+  // scan-landing page (a scanned item QR redirects straight here, see
+  // ScanPage), so this covers both spots the AC calls out without
+  // duplicating the button on a page that immediately navigates away.
+  const overdue = item.countIntervalDays != null && isCountOverdue(item);
   // `path` is a materialized path whose last segment is the current location's
   // own slug (e.g. 'garage.cabinet-3' for 'Cabinet 3'), so drop it — the leaf
   // is rendered separately below via `item.location.name`.
@@ -269,17 +314,42 @@ export function ItemDetailPage() {
               {item.description}
             </Typography>
           )}
-          <Button
-            size="small"
-            variant="outlined"
-            color="warning"
-            startIcon={<WarningAmberOutlinedIcon fontSize="small" />}
-            onClick={() => runningLowMutation.mutate()}
-            disabled={runningLowMutation.isPending}
-            sx={{ mt: 1 }}
-          >
-            Running low
-          </Button>
+          <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', rowGap: 1 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              startIcon={<WarningAmberOutlinedIcon fontSize="small" />}
+              onClick={() => runningLowMutation.mutate()}
+              disabled={runningLowMutation.isPending}
+            >
+              Running low
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<RemoveCircleOutlineIcon fontSize="small" />}
+              onClick={() => {
+                setUseQuantity('1');
+                setUseError(null);
+                setUseDialogOpen(true);
+              }}
+              disabled={item.quantity <= 0}
+            >
+              Use
+            </Button>
+            {overdue && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="info"
+                startIcon={<FactCheckOutlinedIcon fontSize="small" />}
+                onClick={() => setCountDialogOpen(true)}
+              >
+                Verify count
+              </Button>
+            )}
+          </Stack>
         </Box>
         <Stack direction="row" spacing={1}>
           <Button
@@ -521,6 +591,85 @@ export function ItemDetailPage() {
             View
           </Button>
         }
+      />
+
+      <Dialog
+        open={useDialogOpen}
+        onClose={() => {
+          setUseDialogOpen(false);
+          setUseError(null);
+        }}
+      >
+        <DialogTitle>Use {item.name}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>How many are being used?</DialogContentText>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Quantity"
+            type="number"
+            fullWidth
+            value={useQuantity}
+            onChange={(e) => setUseQuantity(e.target.value)}
+            inputProps={{ min: 1, max: item.quantity }}
+          />
+          {useError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {useError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setUseDialogOpen(false);
+              setUseError(null);
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={
+              consumeMutation.isPending || useQuantity.trim() === '' || Number(useQuantity) <= 0
+            }
+            onClick={() => consumeMutation.mutate(Number(useQuantity))}
+          >
+            Use
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Opportunistic verification prompt (EVT-27 AC 4) — rides the "Use"
+          confirmation; skipping is one tap and leaves no state behind. */}
+      <Snackbar
+        open={offerVerificationOpen}
+        onClose={() => setOfferVerificationOpen(false)}
+        message="How many are actually left?"
+        action={
+          <Stack direction="row" spacing={1}>
+            <Button
+              color="inherit"
+              size="small"
+              onClick={() => {
+                setOfferVerificationOpen(false);
+                setCountDialogOpen(true);
+              }}
+            >
+              Count
+            </Button>
+            <Button color="inherit" size="small" onClick={() => setOfferVerificationOpen(false)}>
+              Skip
+            </Button>
+          </Stack>
+        }
+      />
+
+      <CountDialog
+        open={countDialogOpen}
+        itemName={item.name}
+        onCount={(quantity) => countMutation.mutateAsync(quantity)}
+        onClose={() => setCountDialogOpen(false)}
       />
     </Stack>
   );

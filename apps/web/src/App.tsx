@@ -1,4 +1,5 @@
 import AddIcon from '@mui/icons-material/Add';
+import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import QrCodeScannerOutlinedIcon from '@mui/icons-material/QrCodeScannerOutlined';
 import ShoppingCartOutlinedIcon from '@mui/icons-material/ShoppingCartOutlined';
@@ -7,7 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useCallback, useState } from 'react';
 import { Link as RouterLink, Navigate, Route, Routes } from 'react-router-dom';
-import { fetchShoppingList } from './api';
+import { fetchShoppingList, fetchVerificationQueue } from './api';
 import { AuthGate } from './auth/AuthGate';
 import { useAuth } from './auth/AuthContext';
 import { ScannerDialog } from './components/ScannerDialog';
@@ -25,6 +26,7 @@ import { ProjectDetailPage } from './pages/ProjectDetailPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { ScanPage } from './pages/ScanPage';
 import { ShoppingListPage } from './pages/ShoppingListPage';
+import { VerificationPage } from './pages/VerificationPage';
 
 /** Top-level router: the QR sticker print view and the kitting pick list are
  * deliberately rendered outside `AppShell` (no AppBar, no Container chrome)
@@ -71,6 +73,14 @@ function AppShell() {
   const shoppingListQuery = useQuery({ queryKey: ['shopping-list'], queryFn: fetchShoppingList });
   const openShoppingListCount = shoppingListQuery.data?.length ?? 0;
 
+  // Nav badge (EVT-27) — same ['verification-queue'] query key
+  // VerificationPage and the count/consume mutations invalidate.
+  const verificationQuery = useQuery({
+    queryKey: ['verification-queue'],
+    queryFn: fetchVerificationQueue,
+  });
+  const overdueVerificationCount = verificationQuery.data?.length ?? 0;
+
   return (
     <>
       <AppBar position="sticky" color="primary" enableColorOnDark>
@@ -110,6 +120,20 @@ function AppShell() {
           </Button>
           <Button
             component={RouterLink}
+            to="/verification"
+            color="inherit"
+            variant="text"
+            startIcon={
+              <Badge badgeContent={overdueVerificationCount} color="error">
+                <FactCheckOutlinedIcon />
+              </Badge>
+            }
+            sx={{ mr: 1 }}
+          >
+            Verification
+          </Button>
+          <Button
+            component={RouterLink}
             to="/locations"
             color="inherit"
             variant="text"
@@ -143,6 +167,7 @@ function AppShell() {
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:id" element={<ProjectDetailPage />} />
           <Route path="/shopping-list" element={<ShoppingListPage />} />
+          <Route path="/verification" element={<VerificationPage />} />
           <Route
             path="/admin/users"
             element={

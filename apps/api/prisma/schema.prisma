@@ -21,6 +21,13 @@
 // Clear-to-build + kitting (EVT-29): `BomLine.picked` is the pick-list
 // check-off state; availability status (ok/short/untracked) is computed
 // on read in `ProjectsService.availability` rather than stored.
+// Count cadence + opportunistic verification (EVT-27): `Item.lastVerifiedAt`
+// + `Item.countIntervalDays` — `countIntervalDays` null means the item is not
+// on a count schedule at all ("today's count list" never includes it). Any
+// explicit count (blind entry via `ItemsService.count`, or the opportunistic
+// "how many are actually left?" prompt riding a consume via
+// `ItemsService.consume`) always stamps `lastVerifiedAt`, and records an
+// `adjust` movement only when the counted quantity differs from book.
 
 generator client {
   provider = "prisma-client-js"
@@ -160,6 +167,16 @@ model Item {
   /// `low-stock` ShoppingListEntry is created (idempotent — see
   /// StockMovementsService.recordMovement).
   minQuantity    Int?
+  /// Count cadence (EVT-27). `null` = this item is not on a count schedule —
+  /// it never appears on the verification queue regardless of how stale
+  /// `lastVerifiedAt` is. When set, the item is "due" once `lastVerifiedAt +
+  /// countIntervalDays` has passed (see `ItemsService.listVerificationQueue`).
+  countIntervalDays Int?
+  /// When this item was last explicitly counted — via a blind verification
+  /// count (`ItemsService.count`) or the opportunistic "how many are
+  /// actually left?" prompt (`ItemsService.consume`). `null` = never
+  /// verified; treated as due `countIntervalDays` days after `createdAt`.
+  lastVerifiedAt DateTime?
   unit           String?
   /// Notion-style free-form attributes (e.g. { "voltage": "12V", "brand": "Bosch" }).
   properties     Json     @default("{}")

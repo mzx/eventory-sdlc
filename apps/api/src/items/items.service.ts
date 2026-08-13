@@ -397,7 +397,15 @@ export class ItemsService {
    * `tx`, immediately before the writes that use it, closes that window.
    */
   async update(id: string, dto: UpdateItemDto, createdById?: string) {
-    const { tags: tagNames, photoIds, properties, quantity, locationId, ...scalarData } = dto;
+    const {
+      tags: tagNames,
+      photoIds,
+      properties,
+      quantity,
+      locationId,
+      lastVerifiedAt,
+      ...scalarData
+    } = dto;
 
     // Build tag update: full replacement when `tags` is provided in the DTO
     let tagsUpdate: Prisma.ItemUpdateInput['tags'] | undefined;
@@ -433,6 +441,12 @@ export class ItemsService {
           }),
           ...(primaryPhotoId !== undefined && { primaryPhotoId }),
           ...(tagsUpdate && { tags: tagsUpdate }),
+          // EVT-27: `undefined` (key omitted) leaves `lastVerifiedAt`
+          // unchanged; explicit `null` clears it, same convention as
+          // locationId/categoryId above.
+          ...(lastVerifiedAt !== undefined && {
+            lastVerifiedAt: lastVerifiedAt ? new Date(lastVerifiedAt) : null,
+          }),
         },
         include: ITEM_DETAIL_INCLUDE,
       });
@@ -484,6 +498,181 @@ export class ItemsService {
       throw err;
     }
   }
+
+  // -------------------------------------------------------------------------
+  // count — POST /api/items/:id/count (EVT-27 AC 2, blind verification count)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Records an explicit count against `id`. The CALLER is responsible for
+   * never showing book quantity before the count is submitted (this is a UI
+   * contract, not something the API can enforce) — the response only
+   * reveals `bookQuantity`/`delta` AFTER the write, which is what lets the
+   * web client do the "ask blind, reveal after" flow (AC 2).
+   *
+   * Writes an `adjust` movement only when `countedQuantity` differs from
+   * the pre-count book quantity (a match writes no movement — nothing
+   * changed). `lastVerifiedAt` is ALWAYS stamped to now, regardless of
+   * whether the count matched — the verification itself happened either way,
+   * which is what keeps the item off the overdue queue.
+   */
+  async count(id: string, countedQuantity: number, createdById?: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const current = await tx.item.findUnique({
+        where: { id },
+        select: { quantity: true, locationId: true },
+      });
+      if (!current) {
+        throw new NotFoundException(`Item ${id} not found`);
+      }
+
+      const delta = countedQuantity - current.quantity;
+      const bookQuantity = current.quantity;
+
+      if (delta !== 0) {
+        await this.stockMovementsService.recordMovement(tx, {
+          itemId: id,
+          kind: 'adjust',
+          delta,
+          toLocationId: current.locationId,
+          createdById,
+          note: 'Verification count',
+        });
+      }
+
+      const item = await tx.item.update({
+        where: { id },
+        data: { lastVerifiedAt: new Date() },
+        include: ITEM_DETAIL_INCLUDE,
+      });
+
+      return { item, bookQuantity, countedQuantity, delta };
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // consume — POST /api/items/:id/consume (EVT-27 AC 4, opportunistic prompt trigger)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Records a `consume` movement for up to `requestedQuantity` (race-safe,
+   * clamped to on-hand via `StockMovementsService.recordConsumption` — see
+   * its doc comment; this is the first endpoint to actually write the
+   * `consume` StockMovementKind, previously reserved-but-unwritten).
+   *
+   * `offerVerification` on the response is `true` when the resulting
+   * on-hand is at or below `max(minQuantity ?? 0, 2)` — the "how many are
+   * actually left?" opportunistic-counting moment (EVT-27 AC 4, Mechanics
+   * 05: verification is cheapest and most valuable exactly when a pick
+   * leaves a bin nearly empty). The web client decides how to present that
+   * (an inline, one-tap-skippable prompt) — this method only computes
+   * whether the moment qualifies.
+   */
+  async consume(id: string, requestedQuantity: number, createdById?: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.item.findUnique({ where: { id }, select: { id: true } });
+      if (!existing) {
+        throw new NotFoundException(`Item ${id} not found`);
+      }
+
+      await this.stockMovementsService.recordConsumption(tx, {
+        itemId: id,
+        kind: 'consume',
+        requestedQuantity,
+        createdById,
+        note: 'Consumed',
+      });
+
+      const item = await tx.item.findUniqueOrThrow({
+        where: { id },
+        include: ITEM_DETAIL_INCLUDE,
+      });
+
+      const threshold = Math.max(item.minQuantity ?? 0, OPPORTUNISTIC_PROMPT_FLOOR);
+      const offerVerification = item.quantity <= threshold;
+
+      return { item, offerVerification };
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // listVerificationQueue — GET /api/items/verification-queue (EVT-27 AC 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * "Today's count list": items on a count schedule (`countIntervalDays`
+   * not null) whose next-due date has passed, most-overdue first, capped at
+   * `VERIFICATION_QUEUE_CAP`. Items with no `countIntervalDays` NEVER
+   * appear, regardless of how stale `lastVerifiedAt` is (AC 3).
+   *
+   * Filtering/sorting happens in application code (not SQL date-interval
+   * arithmetic) after fetching every scheduled item — the inventory sizes
+   * this app targets (a household workshop, not a warehouse) make that the
+   * simpler, more directly testable option; `daysOverdue` is exported as a
+   * pure function precisely so overdue-ness and sort order can be unit
+   * tested without a database.
+   */
+  async listVerificationQueue(now: Date = new Date()) {
+    const items = await this.prisma.item.findMany({
+      where: { countIntervalDays: { not: null } },
+      select: {
+        id: true,
+        name: true,
+        quantity: true,
+        qrCode: true,
+        lastVerifiedAt: true,
+        countIntervalDays: true,
+        createdAt: true,
+        primaryPhoto: { select: { id: true, filename: true, mimeType: true } },
+        location: { select: { id: true, name: true, path: true } },
+      },
+    });
+
+    return items
+      .map((item) => ({ item, overdueBy: daysOverdue(item, now) }))
+      .filter(({ overdueBy }) => overdueBy >= 0)
+      .sort((a, b) => b.overdueBy - a.overdueBy)
+      .slice(0, VERIFICATION_QUEUE_CAP)
+      .map(({ item, overdueBy }) => ({ ...item, daysOverdue: Math.floor(overdueBy) }));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// verification / count cadence helpers (EVT-27)
+// ---------------------------------------------------------------------------
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Cap on `GET /api/items/verification-queue` — "today's count list", not a full audit (AC 3). */
+export const VERIFICATION_QUEUE_CAP = 20;
+
+/**
+ * The on-hand floor a `consume` movement must fall to (or below) to trigger
+ * the opportunistic "how many are actually left?" prompt (EVT-27 AC 4), when
+ * the item's own `minQuantity` is unset or lower than this. Mirrors the
+ * research dossier's "a pick that leaves 0-2 units" framing (Mechanics 05).
+ */
+export const OPPORTUNISTIC_PROMPT_FLOOR = 2;
+
+/**
+ * How many days overdue `item` is for its next scheduled count, as of `now`.
+ * Negative = not yet due. Exported as a pure function so overdue-ness and
+ * sort order are unit-testable without a database (EVT-27 AC 6).
+ *
+ * An item that's never been counted (`lastVerifiedAt === null`) is treated
+ * as due `countIntervalDays` days after it was CREATED, not immediately on
+ * creation — new items get one full cadence's grace period before their
+ * first count is "due", rather than landing on the queue the moment
+ * `countIntervalDays` is set.
+ */
+export function daysOverdue(
+  item: { lastVerifiedAt: Date | null; countIntervalDays: number | null; createdAt: Date },
+  now: Date,
+): number {
+  const baseline = item.lastVerifiedAt ?? item.createdAt;
+  const intervalDays = item.countIntervalDays ?? 0;
+  const dueAt = baseline.getTime() + intervalDays * MS_PER_DAY;
+  return (now.getTime() - dueAt) / MS_PER_DAY;
 }
 
 // ---------------------------------------------------------------------------

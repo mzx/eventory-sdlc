@@ -12,6 +12,7 @@ import { ItemsController } from './items.controller';
 import { ItemsService } from './items.service';
 import { ReceiveItemDto } from './receive-item.dto';
 import { UpdateItemDto } from './update-item.dto';
+import { ConsumeItemDto, CountItemDto } from './verification.dto';
 
 // `@nestjs/throttler`'s `@Throttle()` decorator stashes its config under
 // these Reflect metadata keys — see the same pattern in
@@ -38,6 +39,9 @@ function makeItemServiceMock() {
     remove: jest.fn(),
     searchByPhoto: jest.fn(),
     receive: jest.fn(),
+    count: jest.fn(),
+    consume: jest.fn(),
+    listVerificationQueue: jest.fn(),
   };
 }
 
@@ -300,6 +304,64 @@ describe('ItemsController', () => {
   });
 
   // =========================================================================
+  // listVerificationQueue (EVT-27 AC 3)
+  // =========================================================================
+
+  describe('listVerificationQueue', () => {
+    it('delegates to ItemsService.listVerificationQueue and returns the queue', async () => {
+      const queue = [{ id: ITEM_ID, daysOverdue: 3 }];
+      service.listVerificationQueue.mockResolvedValue(queue);
+
+      expect(await controller.listVerificationQueue()).toBe(queue);
+      expect(service.listVerificationQueue).toHaveBeenCalledWith();
+    });
+  });
+
+  // =========================================================================
+  // count (EVT-27 AC 2)
+  // =========================================================================
+
+  describe('count', () => {
+    it('delegates to ItemsService.count with id, quantity, and the caller id', async () => {
+      const result = { item: { id: ITEM_ID }, bookQuantity: 3, countedQuantity: 5, delta: 2 };
+      service.count.mockResolvedValue(result);
+
+      const dto: CountItemDto = { quantity: 5 };
+      expect(await controller.count(ITEM_ID, dto, CURRENT_USER)).toBe(result);
+      expect(service.count).toHaveBeenCalledWith(ITEM_ID, 5, USER_ID);
+    });
+
+    it('propagates NotFoundException from service', async () => {
+      service.count.mockRejectedValue(new NotFoundException());
+      await expect(controller.count(ITEM_ID, { quantity: 1 }, CURRENT_USER)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  // =========================================================================
+  // consume (EVT-27 AC 4)
+  // =========================================================================
+
+  describe('consume', () => {
+    it('delegates to ItemsService.consume with id, quantity, and the caller id', async () => {
+      const result = { item: { id: ITEM_ID }, offerVerification: true };
+      service.consume.mockResolvedValue(result);
+
+      const dto: ConsumeItemDto = { quantity: 2 };
+      expect(await controller.consume(ITEM_ID, dto, CURRENT_USER)).toBe(result);
+      expect(service.consume).toHaveBeenCalledWith(ITEM_ID, 2, USER_ID);
+    });
+
+    it('propagates NotFoundException from service', async () => {
+      service.consume.mockRejectedValue(new NotFoundException());
+      await expect(controller.consume(ITEM_ID, { quantity: 1 }, CURRENT_USER)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  // =========================================================================
   // remove
   // =========================================================================
 
@@ -419,6 +481,93 @@ describe('ItemsController', () => {
           { type: 'body', metatype: UpdateItemDto },
         );
         expect(dto).toEqual({ categoryId: null });
+      });
+
+      // EVT-27 AC 1
+      it('accepts a valid countIntervalDays', async () => {
+        const dto = await pipe.transform(
+          { countIntervalDays: 30 },
+          { type: 'body', metatype: UpdateItemDto },
+        );
+        expect(dto).toEqual({ countIntervalDays: 30 });
+      });
+
+      it('accepts explicit null for countIntervalDays (clears the count schedule)', async () => {
+        const dto = await pipe.transform(
+          { countIntervalDays: null },
+          { type: 'body', metatype: UpdateItemDto },
+        );
+        expect(dto).toEqual({ countIntervalDays: null });
+      });
+
+      it('throws BadRequestException when countIntervalDays is 0 or below', async () => {
+        await expect(
+          pipe.transform({ countIntervalDays: 0 }, { type: 'body', metatype: UpdateItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('accepts a valid lastVerifiedAt ISO date string', async () => {
+        const dto = await pipe.transform(
+          { lastVerifiedAt: '2026-08-01T00:00:00.000Z' },
+          { type: 'body', metatype: UpdateItemDto },
+        );
+        expect(dto).toEqual({ lastVerifiedAt: '2026-08-01T00:00:00.000Z' });
+      });
+
+      it('accepts explicit null for lastVerifiedAt (clears "never verified")', async () => {
+        const dto = await pipe.transform(
+          { lastVerifiedAt: null },
+          { type: 'body', metatype: UpdateItemDto },
+        );
+        expect(dto).toEqual({ lastVerifiedAt: null });
+      });
+
+      it('throws BadRequestException when lastVerifiedAt is not a valid date string', async () => {
+        await expect(
+          pipe.transform(
+            { lastVerifiedAt: 'not-a-date' },
+            { type: 'body', metatype: UpdateItemDto },
+          ),
+        ).rejects.toThrow(BadRequestException);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // CountItemDto / ConsumeItemDto (EVT-27)
+    // -----------------------------------------------------------------------
+
+    describe('CountItemDto', () => {
+      it('accepts a valid non-negative quantity, including 0', async () => {
+        const dto = await pipe.transform({ quantity: 0 }, { type: 'body', metatype: CountItemDto });
+        expect(dto).toEqual({ quantity: 0 });
+      });
+
+      it('throws BadRequestException when quantity is negative', async () => {
+        await expect(
+          pipe.transform({ quantity: -1 }, { type: 'body', metatype: CountItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('throws BadRequestException when quantity is missing', async () => {
+        await expect(pipe.transform({}, { type: 'body', metatype: CountItemDto })).rejects.toThrow(
+          BadRequestException,
+        );
+      });
+    });
+
+    describe('ConsumeItemDto', () => {
+      it('accepts a valid positive quantity', async () => {
+        const dto = await pipe.transform(
+          { quantity: 2 },
+          { type: 'body', metatype: ConsumeItemDto },
+        );
+        expect(dto).toEqual({ quantity: 2 });
+      });
+
+      it('throws BadRequestException when quantity is 0 (nothing to consume)', async () => {
+        await expect(
+          pipe.transform({ quantity: 0 }, { type: 'body', metatype: ConsumeItemDto }),
+        ).rejects.toThrow(BadRequestException);
       });
     });
 
