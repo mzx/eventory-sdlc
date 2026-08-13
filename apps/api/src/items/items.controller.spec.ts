@@ -10,6 +10,7 @@ import { StockMovementsService } from '../stock-movements/stock-movements.servic
 import { CreateItemDto } from './create-item.dto';
 import { ItemsController } from './items.controller';
 import { ItemsService } from './items.service';
+import { ReceiveItemDto } from './receive-item.dto';
 import { UpdateItemDto } from './update-item.dto';
 
 // `@nestjs/throttler`'s `@Throttle()` decorator stashes its config under
@@ -36,6 +37,7 @@ function makeItemServiceMock() {
     update: jest.fn(),
     remove: jest.fn(),
     searchByPhoto: jest.fn(),
+    receive: jest.fn(),
   };
 }
 
@@ -238,6 +240,28 @@ describe('ItemsController', () => {
   });
 
   // =========================================================================
+  // receive (EVT-31 AC 4)
+  // =========================================================================
+
+  describe('receive', () => {
+    it('delegates to ItemsService.receive with the quantity and caller id', async () => {
+      const received = { id: ITEM_ID, quantity: 125 };
+      service.receive.mockResolvedValue(received);
+
+      const dto: ReceiveItemDto = { quantity: 25 };
+      expect(await controller.receive(ITEM_ID, dto, CURRENT_USER)).toBe(received);
+      expect(service.receive).toHaveBeenCalledWith(ITEM_ID, 25, USER_ID);
+    });
+
+    it('propagates NotFoundException from service (unknown item)', async () => {
+      service.receive.mockRejectedValue(new NotFoundException());
+      await expect(controller.receive(ITEM_ID, { quantity: 5 }, CURRENT_USER)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  // =========================================================================
   // listMovements (EVT-25)
   // =========================================================================
 
@@ -395,6 +419,38 @@ describe('ItemsController', () => {
           { type: 'body', metatype: UpdateItemDto },
         );
         expect(dto).toEqual({ categoryId: null });
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // ReceiveItemDto (EVT-31 AC 4)
+    // -----------------------------------------------------------------------
+
+    describe('ReceiveItemDto', () => {
+      it('throws BadRequestException when quantity is missing', async () => {
+        await expect(
+          pipe.transform({}, { type: 'body', metatype: ReceiveItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('throws BadRequestException when quantity is 0 (must add at least 1)', async () => {
+        await expect(
+          pipe.transform({ quantity: 0 }, { type: 'body', metatype: ReceiveItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('throws BadRequestException when quantity is not an integer', async () => {
+        await expect(
+          pipe.transform({ quantity: 1.5 }, { type: 'body', metatype: ReceiveItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('accepts a valid positive integer quantity', async () => {
+        const dto = await pipe.transform(
+          { quantity: 25 },
+          { type: 'body', metatype: ReceiveItemDto },
+        );
+        expect(dto.quantity).toBe(25);
       });
     });
 

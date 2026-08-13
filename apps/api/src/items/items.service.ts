@@ -329,6 +329,43 @@ export class ItemsService {
   }
 
   // -------------------------------------------------------------------------
+  // receive — POST /api/items/:id/receive (EVT-31 AC 4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Records an `add` movement for `quantity` against an EXISTING item — the
+   * "add to existing" branch of distributor barcode receiving (EVT-31 AC 4):
+   * re-scanning a known MPN adds to the matched item's on-hand count instead
+   * of creating a duplicate item. Mirrors `ShoppingListService.restock`'s
+   * use of `recordMovement` for the same `kind: 'add'` write path — the
+   * ONLY place `Item.quantity` should ever be written from application code
+   * (EVT-25 AC 2). 404 when the item does not exist.
+   */
+  async receive(id: string, quantity: number, createdById?: string) {
+    const item = await this.prisma.item.findUnique({
+      where: { id },
+      select: { id: true, locationId: true },
+    });
+    if (!item) {
+      throw new NotFoundException(`Item ${id} not found`);
+    }
+
+    const { item: received } = await this.stockMovementsService.recordMovement(
+      this.prisma,
+      {
+        itemId: id,
+        kind: 'add',
+        delta: quantity,
+        toLocationId: item.locationId,
+        createdById,
+        note: 'Received via barcode scan',
+      },
+      ITEM_DETAIL_INCLUDE,
+    );
+    return received;
+  }
+
+  // -------------------------------------------------------------------------
   // update — PATCH /api/items/:id
   // -------------------------------------------------------------------------
 

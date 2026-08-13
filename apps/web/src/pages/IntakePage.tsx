@@ -1,6 +1,7 @@
 import AddIcon from '@mui/icons-material/Add';
 import CollectionsOutlinedIcon from '@mui/icons-material/CollectionsOutlined';
 import PhotoCameraOutlinedIcon from '@mui/icons-material/PhotoCameraOutlined';
+import QrCodeScannerOutlinedIcon from '@mui/icons-material/QrCodeScannerOutlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
 import {
   Alert,
@@ -25,18 +26,29 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   createItem,
   fetchCategories,
+  fetchItems,
   fetchLocations,
   fetchTags,
   photoUrl,
+  receiveItem,
   uploadPhoto,
   type CategoryListItem,
+  type ItemListRow,
   type LocationListItem,
   type PhotoSearchAnalysis,
   type UploadedPhoto,
 } from '../api';
+import { BarcodeScannerDialog } from '../components/BarcodeScannerDialog';
+import { parseEciaBarcode, type ParsedEciaBarcode } from '../lib/eciaBarcode';
 
-/** The two screens of the intake flow: pick/skip a photo, then confirm the (possibly AI-drafted) form. */
-type Step = 'photo' | 'form';
+/**
+ * The screens of the intake flow:
+ * - `photo` — pick/skip a photo, or scan a distributor barcode (EVT-31).
+ * - `barcode-match` — a scanned MPN matched an existing item; offers
+ *   "add to existing" vs "create new anyway" (EVT-31 AC 4).
+ * - `form` — confirm the (possibly AI- or barcode-drafted) form.
+ */
+type Step = 'photo' | 'barcode-match' | 'form';
 
 /** One row of the dynamic properties (key/value) editor — mirrors EditItemPage. */
 interface PropertyRow {
@@ -101,6 +113,18 @@ export function IntakePage() {
   const [categoryId, setCategoryId] = useState('');
   const [properties, setProperties] = useState<PropertyRow[]>([]);
 
+  // --- Distributor barcode receiving (EVT-31) --------------------------
+  const [barcodeDialogOpen, setBarcodeDialogOpen] = useState(false);
+  const [barcodeDraftApplied, setBarcodeDraftApplied] = useState(false);
+  const [barcodeLookupError, setBarcodeLookupError] = useState<string | null>(null);
+  // Set when a scanned MPN/supplier-PN matches an existing item — drives
+  // the `barcode-match` step (AC 4).
+  const [barcodeMatch, setBarcodeMatch] = useState<{
+    item: ItemListRow;
+    parsed: ParsedEciaBarcode;
+  } | null>(null);
+  const [barcodeAddQuantity, setBarcodeAddQuantity] = useState(1);
+
   const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: fetchTags });
   const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: fetchCategories });
@@ -149,6 +173,97 @@ export function IntakePage() {
     setDescription(`${analysis.description ?? ''}${keywordSuffix}`);
     setAiDraftApplied(true);
   }
+
+  /**
+   * Prefills the draft from a parsed ECIA barcode scan (EVT-31 goal): name
+   * from MPN (falling back to the customer/supplier part number, then the
+   * raw scan text so there's never a blank name to stare at — AC 2 "no
+   * dead ends"), quantity from `Q`, and `mpn`/`supplierPn`/`lot`/`dateCode`
+   * as properties rows whenever the label actually carried them (AC 3).
+   * Unlike `applyAiDraft`, only fields the label actually encoded are set —
+   * a partial label leaves description/tags/unit blank and editable.
+   */
+  function applyBarcodeDraft(parsed: ParsedEciaBarcode) {
+    setName(parsed.mpn || parsed.supplierPn || parsed.raw);
+    if (parsed.quantity != null) setQuantity(parsed.quantity);
+    const rows: PropertyRow[] = [];
+    if (parsed.mpn) rows.push(newPropertyRow('mpn', parsed.mpn));
+    if (parsed.supplierPn) rows.push(newPropertyRow('supplierPn', parsed.supplierPn));
+    if (parsed.lot) rows.push(newPropertyRow('lot', parsed.lot));
+    if (parsed.dateCode) rows.push(newPropertyRow('dateCode', parsed.dateCode));
+    setProperties(rows);
+    setBarcodeDraftApplied(true);
+    setStep('form');
+  }
+
+  /**
+   * True when `item`'s saved `mpn`/`supplierPn` properties exactly match
+   * `identifier` (case-insensitive) — the "known MPN" check behind AC 4.
+   * Deliberately exact, not substring: `fetchItems({ search })` itself is
+   * an ILIKE substring match, so this narrows those candidates down to a
+   * genuine re-scan of the same part rather than any item whose properties
+   * happen to contain the identifier as a substring.
+   */
+  function matchesScannedIdentifier(item: ItemListRow, identifier: string): boolean {
+    const props = item.properties as Record<string, unknown>;
+    const needle = identifier.trim().toLowerCase();
+    const mpn = typeof props.mpn === 'string' ? props.mpn.trim().toLowerCase() : undefined;
+    const supplierPn =
+      typeof props.supplierPn === 'string' ? props.supplierPn.trim().toLowerCase() : undefined;
+    return mpn === needle || supplierPn === needle;
+  }
+
+  /**
+   * Fired by `BarcodeScannerDialog` with the raw decoded text. Parses it
+   * (AC 1/2), then checks for an existing item carrying the same MPN/
+   * supplier-PN (AC 4) before falling back to prefilling a fresh draft.
+   * A lookup failure (network) doesn't block the scan — it just skips
+   * straight to the fresh-draft path, same "never block on a convenience
+   * check" principle as `uploadMutation`'s AI-analysis fallback.
+   */
+  async function handleBarcodeDecoded(text: string) {
+    setBarcodeDialogOpen(false);
+    setBarcodeLookupError(null);
+    const parsed = parseEciaBarcode(text);
+    const identifier = parsed.mpn ?? parsed.supplierPn;
+
+    if (identifier) {
+      try {
+        const candidates = await fetchItems({ search: identifier });
+        const match = candidates.find((item) => matchesScannedIdentifier(item, identifier));
+        if (match) {
+          setBarcodeMatch({ item: match, parsed });
+          setBarcodeAddQuantity(parsed.quantity ?? 1);
+          setStep('barcode-match');
+          return;
+        }
+      } catch {
+        setBarcodeLookupError('Could not check for an existing item — continuing as new.');
+      }
+    }
+
+    applyBarcodeDraft(parsed);
+  }
+
+  /** "Create new item instead" on the barcode-match screen (AC 4 alternative). */
+  function createNewFromBarcodeMatch() {
+    if (!barcodeMatch) return;
+    const parsed = barcodeMatch.parsed;
+    setBarcodeMatch(null);
+    applyBarcodeDraft(parsed);
+  }
+
+  const receiveMutation = useMutation({
+    mutationFn: () => {
+      if (!barcodeMatch) {
+        throw new Error('No matched item to receive against');
+      }
+      return receiveItem(barcodeMatch.item.id, barcodeAddQuantity);
+    },
+    onSuccess: (item) => {
+      navigate(`/items/${item.id}`);
+    },
+  });
 
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
@@ -267,6 +382,7 @@ export function IntakePage() {
         )}
 
         {uploadError && <Alert severity="error">{uploadError}</Alert>}
+        {barcodeLookupError && <Alert severity="warning">{barcodeLookupError}</Alert>}
 
         {/* Camera capture — forces the rear camera on mobile via `capture`. */}
         <input
@@ -310,6 +426,77 @@ export function IntakePage() {
             Skip photo
           </Button>
         </Stack>
+
+        {/* Distributor barcode receiving (EVT-31): a separate path from
+            photo capture — decodes a Data Matrix/PDF417 label instead of
+            photographing the item. */}
+        <Button
+          variant="outlined"
+          startIcon={<QrCodeScannerOutlinedIcon />}
+          onClick={() => setBarcodeDialogOpen(true)}
+          disabled={uploadMutation.isPending}
+        >
+          Scan supplier barcode
+        </Button>
+
+        <BarcodeScannerDialog
+          open={barcodeDialogOpen}
+          onClose={() => setBarcodeDialogOpen(false)}
+          onDecoded={(text) => {
+            void handleBarcodeDecoded(text);
+          }}
+        />
+      </Stack>
+    );
+  }
+
+  if (step === 'barcode-match' && barcodeMatch) {
+    const match = barcodeMatch;
+    return (
+      <Stack spacing={3} sx={{ maxWidth: 480 }}>
+        <Typography variant="h5" component="h1">
+          Already in inventory
+        </Typography>
+        <Alert severity="info">
+          This barcode matches an existing item — add to it instead of creating a duplicate?
+        </Alert>
+
+        <Box>
+          <Typography variant="subtitle1">{match.item.name}</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Currently {match.item.quantity} {match.item.unit || 'on hand'}
+            {match.item.location ? ` · ${match.item.location.name}` : ''}
+          </Typography>
+        </Box>
+
+        <TextField
+          label="Quantity to add"
+          type="number"
+          value={barcodeAddQuantity}
+          onChange={(e) => setBarcodeAddQuantity(Math.max(1, Number(e.target.value)))}
+          inputProps={{ min: 1 }}
+        />
+
+        {receiveMutation.isError && (
+          <Alert severity="error">
+            {receiveMutation.error instanceof Error
+              ? receiveMutation.error.message
+              : 'Failed to add to existing item'}
+          </Alert>
+        )}
+
+        <Stack direction="row" spacing={2}>
+          <Button
+            variant="contained"
+            onClick={() => receiveMutation.mutate()}
+            disabled={receiveMutation.isPending || barcodeAddQuantity < 1}
+          >
+            Add to existing
+          </Button>
+          <Button onClick={createNewFromBarcodeMatch} disabled={receiveMutation.isPending}>
+            Create new item instead
+          </Button>
+        </Stack>
       </Stack>
     );
   }
@@ -337,6 +524,7 @@ export function IntakePage() {
       )}
 
       {aiDraftApplied && <Alert severity="info">AI draft — check before saving</Alert>}
+      {barcodeDraftApplied && <Alert severity="info">Barcode scan — check before saving</Alert>}
 
       <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} />
 
