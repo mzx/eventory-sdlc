@@ -14,7 +14,8 @@
     "format:check": "pnpm -r --if-present run format:check",
     "test": "pnpm -r --if-present run test && node --test scripts/*.test.mjs",
     "test:coverage": "pnpm -r --if-present run test:coverage",
-    "verify": "pnpm build && pnpm test && pnpm lint && pnpm format:check"
+    "verify": "pnpm build && pnpm test && pnpm lint && pnpm format:check",
+    "refresh": "bash scripts/dev-refresh.sh"
   },
   "engines": {
     "node": ">=20"
