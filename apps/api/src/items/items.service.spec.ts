@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { AiService, STUB_ANALYSIS, stubAnalysis } from '../ai/ai.service';
@@ -7,10 +7,13 @@ import { StockMovementsService } from '../stock-movements/stock-movements.servic
 import { TagsService } from '../tags/tags.service';
 import {
   buildSearchTerms,
+  daysOverdue,
   escapeLikePattern,
   ItemsService,
   MAX_MATCHES,
   MAX_SEARCH_TERMS,
+  OPPORTUNISTIC_PROMPT_FLOOR,
+  VERIFICATION_QUEUE_CAP,
 } from './items.service';
 
 // ---------------------------------------------------------------------------
@@ -70,6 +73,7 @@ function makePrismaMock() {
     item: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
@@ -103,6 +107,7 @@ function makeAiServiceMock() {
 function makeStockMovementsMock() {
   return {
     recordMovement: jest.fn(),
+    recordConsumption: jest.fn(),
   };
 }
 
@@ -1011,6 +1016,43 @@ describe('ItemsService', () => {
     });
 
     // -------------------------------------------------------------------------
+    // EVT-27: lastVerifiedAt conversion (review round 2, test-reviewer finding)
+    // -------------------------------------------------------------------------
+
+    it('EVT-27: converts a lastVerifiedAt ISO string to a Date on the scalar update', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { lastVerifiedAt: '2026-08-01T00:00:00.000Z' });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data.lastVerifiedAt).toBeInstanceOf(Date);
+      expect((updateCall.data.lastVerifiedAt as Date).toISOString()).toBe(
+        '2026-08-01T00:00:00.000Z',
+      );
+    });
+
+    it('EVT-27: clears lastVerifiedAt with explicit null', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { lastVerifiedAt: null });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data.lastVerifiedAt).toBeNull();
+    });
+
+    it('EVT-27: leaves lastVerifiedAt unchanged when the key is omitted from the DTO', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { name: 'New Name' });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data).not.toHaveProperty('lastVerifiedAt');
+    });
+
+    // -------------------------------------------------------------------------
     // EVT-25 — stock movement ledger
     // -------------------------------------------------------------------------
 
@@ -1277,6 +1319,389 @@ describe('ItemsService', () => {
       prismaMock.item.delete.mockRejectedValue(err);
 
       await expect(service.remove(ITEM_ID)).rejects.toThrow(err);
+    });
+  });
+
+  // =========================================================================
+  // count — POST /api/items/:id/count (EVT-27 AC 2, blind-count delta math)
+  // =========================================================================
+
+  describe('count', () => {
+    it('throws NotFoundException when the item does not exist', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(null);
+      await expect(service.count(ITEM_ID, 5)).rejects.toThrow(NotFoundException);
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+    });
+
+    it('records an `adjust` movement with the correct delta when the count is higher than book', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ quantity: 3, locationId: LOC_ID });
+      prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 5 }));
+
+      const result = await service.count(ITEM_ID, 5, 'user-1');
+
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          itemId: ITEM_ID,
+          kind: 'adjust',
+          delta: 2,
+          toLocationId: LOC_ID,
+          createdById: 'user-1',
+        }),
+      );
+      expect(result.bookQuantity).toBe(3);
+      expect(result.countedQuantity).toBe(5);
+      expect(result.delta).toBe(2);
+    });
+
+    it('records a negative-delta `adjust` movement when the count is lower than book', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ quantity: 10, locationId: LOC_ID });
+      prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 4 }));
+
+      const result = await service.count(ITEM_ID, 4);
+
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({ kind: 'adjust', delta: -6 }),
+      );
+      expect(result.delta).toBe(-6);
+    });
+
+    it('writes NO movement when the count matches book quantity exactly', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ quantity: 7, locationId: LOC_ID });
+      prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 7 }));
+
+      const result = await service.count(ITEM_ID, 7);
+
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      expect(result.delta).toBe(0);
+      expect(result.bookQuantity).toBe(7);
+      expect(result.countedQuantity).toBe(7);
+    });
+
+    it('ALWAYS stamps lastVerifiedAt, even when the count matches book (nothing to adjust)', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ quantity: 7, locationId: LOC_ID });
+      prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 7 }));
+
+      await service.count(ITEM_ID, 7);
+
+      expect(prismaMock.item.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: ITEM_ID },
+          data: { lastVerifiedAt: expect.any(Date) },
+        }),
+      );
+    });
+  });
+
+  // =========================================================================
+  // consume — POST /api/items/:id/consume (EVT-27 AC 4, opportunistic trigger)
+  // =========================================================================
+
+  describe('consume', () => {
+    it('throws NotFoundException when the item does not exist', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(null);
+      await expect(service.consume(ITEM_ID, 1)).rejects.toThrow(NotFoundException);
+      expect(stockMovementsMock.recordConsumption).not.toHaveBeenCalled();
+    });
+
+    it('delegates to recordConsumption with the requested quantity', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 3,
+      });
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: 7, minQuantity: null }),
+      );
+
+      await service.consume(ITEM_ID, 3, 'user-1');
+
+      expect(stockMovementsMock.recordConsumption).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          itemId: ITEM_ID,
+          kind: 'consume',
+          requestedQuantity: 3,
+          createdById: 'user-1',
+        }),
+      );
+    });
+
+    // -------------------------------------------------------------------------
+    // EVT-27 review round 2, finding 1: `recordConsumption` returning `null`
+    // (nothing on hand) must not fall through to a 200 as if the consumption
+    // succeeded.
+    // -------------------------------------------------------------------------
+
+    it('throws ConflictException when recordConsumption returns null (nothing on hand)', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue(null);
+
+      await expect(service.consume(ITEM_ID, 5)).rejects.toThrow(ConflictException);
+      // No item write should be attempted once recordConsumption reports
+      // nothing was consumed.
+      expect(prismaMock.item.findUniqueOrThrow).not.toHaveBeenCalled();
+    });
+
+    it('surfaces consumedQuantity from recordConsumption on the response', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 3,
+      });
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: 7, minQuantity: null }),
+      );
+
+      // Requested 5, but on-hand only supported 3 (partial consumption) —
+      // the caller must be able to tell "consumed 3" apart from "consumed
+      // nothing" (EVT-27 review round 2, security-reviewer suggestion).
+      const result = await service.consume(ITEM_ID, 5);
+
+      expect(result.consumedQuantity).toBe(3);
+    });
+
+    it('offerVerification is true when resulting on-hand is at the OPPORTUNISTIC_PROMPT_FLOOR with no minQuantity set', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 5,
+      });
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR, minQuantity: null }),
+      );
+
+      const result = await service.consume(ITEM_ID, 5);
+      expect(result.offerVerification).toBe(true);
+    });
+
+    it('offerVerification is false when resulting on-hand is above the floor with no minQuantity set', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 1,
+      });
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR + 1, minQuantity: null }),
+      );
+
+      const result = await service.consume(ITEM_ID, 1);
+      expect(result.offerVerification).toBe(false);
+    });
+
+    it('uses minQuantity as the floor when it is higher than OPPORTUNISTIC_PROMPT_FLOOR', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 2,
+      });
+      // quantity (5) is above the flat floor (2) but at-or-below minQuantity (5)
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: 5, minQuantity: 5 }),
+      );
+
+      const result = await service.consume(ITEM_ID, 2);
+      expect(result.offerVerification).toBe(true);
+    });
+
+    it('uses the OPPORTUNISTIC_PROMPT_FLOOR when minQuantity is a small positive value below it', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 1,
+      });
+      // minQuantity=1 is below OPPORTUNISTIC_PROMPT_FLOOR (2) — the flat
+      // floor should still apply via Math.max, not the lower minQuantity.
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR, minQuantity: 1 }),
+      );
+
+      const result = await service.consume(ITEM_ID, 1);
+      expect(result.offerVerification).toBe(true);
+    });
+  });
+
+  // =========================================================================
+  // listVerificationQueue — GET /api/items/verification-queue (EVT-27 AC 3)
+  // =========================================================================
+
+  describe('listVerificationQueue', () => {
+    const NOW = new Date('2026-08-13T00:00:00.000Z');
+
+    function overdueRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: ITEM_ID,
+        name: 'Box of Screws',
+        quantity: 10,
+        qrCode: 'qr',
+        lastVerifiedAt: null,
+        countIntervalDays: 30,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        primaryPhoto: null,
+        location: null,
+        ...overrides,
+      };
+    }
+
+    it('only fetches items with countIntervalDays set', async () => {
+      prismaMock.item.findMany.mockResolvedValue([]);
+      await service.listVerificationQueue(NOW);
+      expect(prismaMock.item.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { countIntervalDays: { not: null } } }),
+      );
+    });
+
+    it('excludes items that are not yet due', async () => {
+      // Verified yesterday, 30-day cadence — nowhere near due.
+      prismaMock.item.findMany.mockResolvedValue([
+        overdueRow({ lastVerifiedAt: new Date('2026-08-12T00:00:00.000Z') }),
+      ]);
+      const result = await service.listVerificationQueue(NOW);
+      expect(result).toEqual([]);
+    });
+
+    it('includes an item exactly on its due date', async () => {
+      prismaMock.item.findMany.mockResolvedValue([
+        overdueRow({
+          id: 'due-exactly',
+          lastVerifiedAt: new Date('2026-07-14T00:00:00.000Z'), // + 30d = 2026-08-13
+          countIntervalDays: 30,
+        }),
+      ]);
+      const result = await service.listVerificationQueue(NOW);
+      expect(result).toHaveLength(1);
+      expect(result[0].daysOverdue).toBe(0);
+    });
+
+    it('orders most-overdue first', async () => {
+      prismaMock.item.findMany.mockResolvedValue([
+        overdueRow({
+          id: 'a-slightly-overdue',
+          lastVerifiedAt: new Date('2026-07-10T00:00:00.000Z'), // due 2026-08-09, 4 days overdue
+          countIntervalDays: 30,
+        }),
+        overdueRow({
+          id: 'b-very-overdue',
+          lastVerifiedAt: new Date('2026-05-01T00:00:00.000Z'), // due 2026-05-31, 74 days overdue
+          countIntervalDays: 30,
+        }),
+        overdueRow({
+          id: 'c-barely-overdue',
+          lastVerifiedAt: new Date('2026-07-13T00:00:00.000Z'), // due 2026-08-12, 1 day overdue
+          countIntervalDays: 30,
+        }),
+      ]);
+
+      const result = await service.listVerificationQueue(NOW);
+
+      expect(result.map((r) => r.id)).toEqual([
+        'b-very-overdue',
+        'a-slightly-overdue',
+        'c-barely-overdue',
+      ]);
+    });
+
+    it('never-verified items (lastVerifiedAt null) are due countIntervalDays after createdAt', async () => {
+      prismaMock.item.findMany.mockResolvedValue([
+        // Created 40 days before NOW, 30-day cadence -> 10 days overdue.
+        overdueRow({
+          lastVerifiedAt: null,
+          countIntervalDays: 30,
+          createdAt: new Date('2026-07-04T00:00:00.000Z'),
+        }),
+      ]);
+      const result = await service.listVerificationQueue(NOW);
+      expect(result).toHaveLength(1);
+      expect(result[0].daysOverdue).toBe(10);
+    });
+
+    it('caps the result at VERIFICATION_QUEUE_CAP', async () => {
+      const rows = Array.from({ length: VERIFICATION_QUEUE_CAP + 10 }, (_, i) =>
+        overdueRow({
+          id: `item-${i}`,
+          lastVerifiedAt: new Date('2026-01-01T00:00:00.000Z'),
+          countIntervalDays: 1,
+        }),
+      );
+      prismaMock.item.findMany.mockResolvedValue(rows);
+
+      const result = await service.listVerificationQueue(NOW);
+      expect(result).toHaveLength(VERIFICATION_QUEUE_CAP);
+    });
+
+    it('defaults `now` to the current time when omitted', async () => {
+      prismaMock.item.findMany.mockResolvedValue([]);
+      await expect(service.listVerificationQueue()).resolves.toEqual([]);
+    });
+  });
+
+  // =========================================================================
+  // daysOverdue — pure helper (EVT-27 AC 6: overdue query ordering)
+  // =========================================================================
+
+  describe('daysOverdue', () => {
+    const NOW = new Date('2026-08-13T00:00:00.000Z');
+
+    it('is negative when the item is not yet due', () => {
+      const result = daysOverdue(
+        {
+          lastVerifiedAt: new Date('2026-08-01T00:00:00.000Z'),
+          countIntervalDays: 30,
+          createdAt: NOW,
+        },
+        NOW,
+      );
+      expect(result).toBeLessThan(0);
+    });
+
+    it('is 0 exactly on the due date', () => {
+      const result = daysOverdue(
+        {
+          lastVerifiedAt: new Date('2026-07-14T00:00:00.000Z'),
+          countIntervalDays: 30,
+          createdAt: NOW,
+        },
+        NOW,
+      );
+      expect(result).toBe(0);
+    });
+
+    it('is positive once the due date has passed', () => {
+      const result = daysOverdue(
+        {
+          lastVerifiedAt: new Date('2026-07-01T00:00:00.000Z'),
+          countIntervalDays: 30,
+          createdAt: NOW,
+        },
+        NOW,
+      );
+      expect(result).toBeCloseTo(13, 5);
+    });
+
+    it('falls back to createdAt when lastVerifiedAt is null', () => {
+      const result = daysOverdue(
+        {
+          lastVerifiedAt: null,
+          countIntervalDays: 10,
+          createdAt: new Date('2026-08-01T00:00:00.000Z'),
+        },
+        NOW,
+      );
+      // due 2026-08-11, now 2026-08-13 -> 2 days overdue
+      expect(result).toBeCloseTo(2, 5);
+    });
+
+    it('treats a null countIntervalDays as a 0-day interval', () => {
+      const result = daysOverdue(
+        {
+          lastVerifiedAt: new Date('2026-08-12T00:00:00.000Z'),
+          countIntervalDays: null,
+          createdAt: NOW,
+        },
+        NOW,
+      );
+      expect(result).toBeCloseTo(1, 5);
     });
   });
 

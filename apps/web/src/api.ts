@@ -109,6 +109,15 @@ export interface ItemListRow {
   quantity: number;
   /** Replenishment threshold (EVT-26). `null` = no replenishment tracking. */
   minQuantity: number | null;
+  /**
+   * Count cadence in days (EVT-27). `null`/`undefined` = not on a count
+   * schedule. Optional client-side (rather than required), same rationale
+   * as `LocationListItem.kind` above — existing fixtures/tests that predate
+   * EVT-27 keep compiling; every real API response always includes it.
+   */
+  countIntervalDays?: number | null;
+  /** When this item was last explicitly counted. `null`/`undefined` = never verified. Optional client-side, see `countIntervalDays` above. */
+  lastVerifiedAt?: string | null;
   unit: string | null;
   properties: Record<string, unknown>;
   qrCode: string;
@@ -274,6 +283,16 @@ export interface UpdateItemInput {
    * unchanged; `null` clears it back to "no replenishment tracking".
    */
   minQuantity?: number | null;
+  /**
+   * Count cadence in days (EVT-27). `undefined` (omitted) leaves it
+   * unchanged; `null` clears it back to "not on a count schedule".
+   */
+  countIntervalDays?: number | null;
+  /**
+   * Manual override of the last-verified timestamp (EVT-27). `undefined`
+   * (omitted) leaves it unchanged; `null` clears it to "never verified".
+   */
+  lastVerifiedAt?: string | null;
   unit?: string;
   properties?: Record<string, unknown>;
   /** `undefined` (omitted) leaves the relation unchanged; `null` clears it. */
@@ -1046,4 +1065,82 @@ export async function restockShoppingListEntry(
     method: 'POST',
     body: JSON.stringify({ quantity }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// count cadence + opportunistic verification (EVT-27)
+// ---------------------------------------------------------------------------
+
+/**
+ * `true` when `item` is past due for its next scheduled count — mirrors
+ * `apps/api ItemsService.daysOverdue`'s "never verified = due
+ * countIntervalDays after createdAt" rule. `null`/no schedule is never
+ * overdue, matching the API's verification-queue filter (AC 3/5).
+ */
+export function isCountOverdue(
+  item: {
+    countIntervalDays?: number | null;
+    lastVerifiedAt?: string | null;
+    createdAt: string;
+  },
+  now: Date = new Date(),
+): boolean {
+  if (item.countIntervalDays == null) return false;
+  const baseline = new Date(item.lastVerifiedAt ?? item.createdAt);
+  const dueAt = baseline.getTime() + item.countIntervalDays * 24 * 60 * 60 * 1000;
+  return now.getTime() >= dueAt;
+}
+
+/** Response shape of `POST /api/items/:id/count` (EVT-27 AC 2, blind entry). */
+export interface CountItemResult {
+  item: ItemDetail;
+  /** On-hand quantity BEFORE this count — only ever revealed after submit. */
+  bookQuantity: number;
+  /** What the counter actually entered. */
+  countedQuantity: number;
+  /** `countedQuantity - bookQuantity`. */
+  delta: number;
+}
+
+/** POST /api/items/:id/count — records a blind verification count. */
+export async function countItem(id: string, quantity: number): Promise<CountItemResult> {
+  return request<CountItemResult>(`/items/${encodeURIComponent(id)}/count`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity }),
+  });
+}
+
+/** Response shape of `POST /api/items/:id/consume` (EVT-27 AC 4). */
+export interface ConsumeItemResult {
+  item: ItemDetail;
+  /** `true` when the resulting on-hand qualifies for the opportunistic "how many are actually left?" prompt. */
+  offerVerification: boolean;
+}
+
+/** POST /api/items/:id/consume — records a `consume` movement for up to `quantity` (clamped to on-hand). */
+export async function consumeItem(id: string, quantity: number): Promise<ConsumeItemResult> {
+  return request<ConsumeItemResult>(`/items/${encodeURIComponent(id)}/consume`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity }),
+  });
+}
+
+/** Row shape returned by `GET /api/items/verification-queue` (EVT-27 AC 3). */
+export interface VerificationQueueRow {
+  id: string;
+  name: string;
+  quantity: number;
+  qrCode: string;
+  lastVerifiedAt: string | null;
+  countIntervalDays: number;
+  createdAt: string;
+  primaryPhoto: PhotoRef | null;
+  location: LocationRef | null;
+  /** Whole days past due, floored. `0` = due today. */
+  daysOverdue: number;
+}
+
+/** GET /api/items/verification-queue — "today's count list", most-overdue first, capped at 20. */
+export async function fetchVerificationQueue(): Promise<VerificationQueueRow[]> {
+  return request<VerificationQueueRow[]>('/items/verification-queue');
 }

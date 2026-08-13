@@ -28,6 +28,7 @@ import { ListItemsQueryDto } from './list-items-query.dto';
 import { ReceiveItemDto } from './receive-item.dto';
 import { searchByPhotoMulterOptions } from './search-by-photo.helpers';
 import { UpdateItemDto } from './update-item.dto';
+import { ConsumeItemDto, CountItemDto } from './verification.dto';
 
 @Controller('items')
 export class ItemsController {
@@ -65,6 +66,22 @@ export class ItemsController {
   }
 
   /**
+   * GET /api/items/verification-queue
+   *
+   * "Today's count list" (EVT-27 AC 3): items on a count schedule
+   * (`countIntervalDays` set) whose next count is past due, most-overdue
+   * first, capped at 20. Items with no `countIntervalDays` never appear.
+   *
+   * NOTE: This route MUST be declared before `/:id` so NestJS doesn't
+   * treat "verification-queue" as a UUID param and route it to `findById`
+   * (same reasoning as `by-qr/:qr` above).
+   */
+  @Get('verification-queue')
+  listVerificationQueue() {
+    return this.itemsService.listVerificationQueue();
+  }
+
+  /**
    * GET /api/items/:id
    *
    * Full item detail: photos, tags, location, category.
@@ -86,6 +103,44 @@ export class ItemsController {
   @Get(':id/movements')
   listMovements(@Param('id', ParseUUIDPipe) id: string, @Query() query: ListMovementsQueryDto) {
     return this.stockMovementsService.listForItem(id, query);
+  }
+
+  /**
+   * POST /api/items/:id/count
+   *
+   * Records a blind verification count (EVT-27 AC 2) — the caller (web
+   * client) MUST ask "how many are there?" and submit BEFORE showing book
+   * quantity; this endpoint reveals `bookQuantity`/`delta` only in its
+   * response. Writes an `adjust` movement only when the count differs from
+   * book; always stamps `lastVerifiedAt`. 404 when the item does not exist.
+   */
+  @Post(':id/count')
+  @HttpCode(HttpStatus.OK)
+  count(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CountItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itemsService.count(id, dto.quantity, user.id);
+  }
+
+  /**
+   * POST /api/items/:id/consume
+   *
+   * Records a `consume` movement for up to `quantity` (race-safe, clamped
+   * to on-hand). The response's `offerVerification` flag (EVT-27 AC 4)
+   * tells the client whether the resulting on-hand qualifies for the
+   * opportunistic "how many are actually left?" prompt. 404 when the item
+   * does not exist.
+   */
+  @Post(':id/consume')
+  @HttpCode(HttpStatus.OK)
+  consume(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ConsumeItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itemsService.consume(id, dto.quantity, user.id);
   }
 
   /**

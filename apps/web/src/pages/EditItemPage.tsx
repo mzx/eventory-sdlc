@@ -75,6 +75,10 @@ export function EditItemPage() {
   const [quantity, setQuantity] = useState(1);
   /** Replenishment threshold (EVT-26). Empty string = no tracking (`null`). */
   const [minQuantity, setMinQuantity] = useState('');
+  /** Count cadence in days (EVT-27). Empty string = not on a count schedule (`null`). */
+  const [countIntervalDays, setCountIntervalDays] = useState('');
+  /** Manual "last verified" override (EVT-27). Empty string = clear to "never verified" (`null`). */
+  const [lastVerifiedAt, setLastVerifiedAt] = useState('');
   const [unit, setUnit] = useState('');
   const [tags, setTags] = useState<string[]>([]);
   const [locationId, setLocationId] = useState('');
@@ -91,6 +95,10 @@ export function EditItemPage() {
       setDescription(item.description ?? '');
       setQuantity(item.quantity);
       setMinQuantity(item.minQuantity != null ? String(item.minQuantity) : '');
+      setCountIntervalDays(item.countIntervalDays != null ? String(item.countIntervalDays) : '');
+      // `lastVerifiedAt` is an ISO datetime; the <input type="date"> control
+      // only accepts the "YYYY-MM-DD" prefix.
+      setLastVerifiedAt(item.lastVerifiedAt ? item.lastVerifiedAt.slice(0, 10) : '');
       setUnit(item.unit ?? '');
       setTags(item.tags.map((t) => t.tag.name));
       setLocationId(item.locationId ?? '');
@@ -115,6 +123,11 @@ export function EditItemPage() {
         // below — omitting the key would leave a previously-set threshold
         // unchanged instead of clearing it.
         minQuantity: minQuantity.trim() === '' ? null : Number(minQuantity),
+        // Same undefined-vs-null convention as minQuantity above — an empty
+        // field explicitly clears the count schedule / verified date rather
+        // than leaving a previously-set value untouched.
+        countIntervalDays: countIntervalDays.trim() === '' ? null : Number(countIntervalDays),
+        lastVerifiedAt: lastVerifiedAt.trim() === '' ? null : lastVerifiedAt,
         unit,
         tags,
         // Empty string ("No location"/"No category" selected) must send an
@@ -239,6 +252,27 @@ export function EditItemPage() {
         onChange={(e) => setMinQuantity(e.target.value)}
         inputProps={{ min: 0 }}
       />
+
+      <Stack direction="row" spacing={2}>
+        <TextField
+          label="Count interval (days)"
+          helperText="Optional. Puts this item on the verification queue once this many days pass since it was last counted."
+          type="number"
+          value={countIntervalDays}
+          onChange={(e) => setCountIntervalDays(e.target.value)}
+          inputProps={{ min: 1 }}
+          fullWidth
+        />
+        <TextField
+          label="Last verified"
+          helperText="Set automatically by a count; correct it here if it's wrong."
+          type="date"
+          value={lastVerifiedAt}
+          onChange={(e) => setLastVerifiedAt(e.target.value)}
+          InputLabelProps={{ shrink: true }}
+          fullWidth
+        />
+      </Stack>
 
       <Autocomplete
         multiple

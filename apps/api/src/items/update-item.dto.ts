@@ -1,6 +1,7 @@
 import {
   IsArray,
   IsInt,
+  IsISO8601,
   IsNotEmpty,
   IsObject,
   IsOptional,
@@ -40,6 +41,36 @@ export class UpdateItemDto {
   @Min(0)
   @Max(2147483647)
   minQuantity?: number | null;
+
+  /**
+   * Count cadence in days (EVT-27). `undefined` (key omitted) leaves it
+   * unchanged; explicit `null` clears it back to "not on a count schedule"
+   * — same undefined-vs-null convention as `minQuantity` above. Capped at
+   * ~10 years (3650 days), well past any sane "count this every N days"
+   * value, so a typo can't silently push an item off the queue forever.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  countIntervalDays?: number | null;
+
+  /**
+   * Manual override of the last-verified timestamp (EVT-27 AC 1). Most
+   * verifications are stamped automatically by `ItemsService.count`/
+   * `.consume`; this lets the item form correct a mistaken date. ISO date
+   * string; `undefined` leaves it unchanged, explicit `null` clears it back
+   * to "never verified".
+   *
+   * `@IsISO8601({ strict: true })` rather than `@IsDateString()` — the
+   * latter accepts calendar-invalid dates like `2026-02-30` (JS's `Date`
+   * constructor silently rolls them over to March), which would otherwise
+   * reach Prisma as an `Invalid Date` and fail as an unhandled 500 instead
+   * of a 400 (EVT-27 review round 2, finding 3).
+   */
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  lastVerifiedAt?: string | null;
 
   @IsOptional()
   @IsString()

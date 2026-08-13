@@ -36,9 +36,11 @@ function renderApp(initialEntry = '/') {
 
 describe('App / auth-aware shell', () => {
   beforeEach(() => {
-    // AppShell's nav badge (EVT-26 AC 6) queries this on every render;
-    // stub it so these auth-focused tests don't make a real network call.
+    // AppShell's nav badges (EVT-26 AC 6, EVT-27) query these on every
+    // render; stub them so these auth-focused tests don't make a real
+    // network call.
     vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -141,5 +143,35 @@ describe('App / auth-aware shell', () => {
     // absent from the DOM — jsdom doesn't compute that rule for `toBeVisible`,
     // so assert on the class directly.
     expect(within(navLink).getByText('0')).toHaveClass('MuiBadge-invisible');
+  });
+
+  // =========================================================================
+  // Verification nav badge (EVT-27)
+  // =========================================================================
+
+  it('the nav badge shows the count of overdue verification-queue items', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([
+      {
+        id: 'item-1',
+        name: 'Box of Screws',
+        quantity: 10,
+        qrCode: 'qr-1',
+        lastVerifiedAt: null,
+        countIntervalDays: 30,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        primaryPhoto: null,
+        location: null,
+        daysOverdue: 5,
+      },
+    ]);
+
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const navLink = await screen.findByRole('link', { name: /verification/i });
+    expect(within(navLink).getByText('1')).toBeInTheDocument();
   });
 });

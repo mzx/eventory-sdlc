@@ -490,4 +490,194 @@ describe('ItemDetailPage', () => {
       expect(await screen.findByText('Added to shopping list')).toBeInTheDocument();
     });
   });
+
+  // =========================================================================
+  // "Verify count" affordance (EVT-27 AC 5)
+  // =========================================================================
+
+  describe('"Verify count" affordance (EVT-27)', () => {
+    it('shows "Verify count" when the item is overdue', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(
+        detail({
+          countIntervalDays: 30,
+          lastVerifiedAt: '2026-01-01T00:00:00.000Z', // long past due by "today" (frozen system clock)
+        }),
+      );
+
+      renderDetailPage();
+
+      expect(await screen.findByRole('button', { name: /verify count/i })).toBeInTheDocument();
+    });
+
+    it('hides "Verify count" when the item has no count schedule', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(
+        detail({ countIntervalDays: null, lastVerifiedAt: null }),
+      );
+
+      renderDetailPage();
+
+      await screen.findByText('Cordless drill');
+      expect(screen.queryByRole('button', { name: /verify count/i })).not.toBeInTheDocument();
+    });
+
+    it('hides "Verify count" when the item is on schedule and not yet due', async () => {
+      const justNow = new Date().toISOString();
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(
+        detail({ countIntervalDays: 365, lastVerifiedAt: justNow }),
+      );
+
+      renderDetailPage();
+
+      await screen.findByText('Cordless drill');
+      expect(screen.queryByRole('button', { name: /verify count/i })).not.toBeInTheDocument();
+    });
+
+    it('tapping "Verify count" opens the blind CountDialog and records the count', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(
+        detail({ countIntervalDays: 30, lastVerifiedAt: '2026-01-01T00:00:00.000Z' }),
+      );
+      const countMock = vi.spyOn(api, 'countItem').mockResolvedValue({
+        item: detail(),
+        bookQuantity: 2,
+        countedQuantity: 4,
+        delta: 2,
+      });
+      const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: /verify count/i }));
+      expect(screen.getByText('How many are there?')).toBeInTheDocument();
+      // Blind entry — book quantity must not be visible before submit.
+      expect(screen.queryByText(/book quantity/i)).not.toBeInTheDocument();
+
+      await user.type(screen.getByLabelText('Counted quantity'), '4');
+      await user.click(screen.getByRole('button', { name: 'Submit count' }));
+
+      expect(countMock).toHaveBeenCalledWith('item-1', 4);
+      expect(await screen.findByText(/Book quantity was 2/)).toBeInTheDocument();
+      // A count can clear (or newly trigger) an item's overdue
+      // verification status, so VerificationPage's queue query must be
+      // invalidated too — not just 'items' (mirrors VerificationPage's own
+      // countMutation.onSuccess, which invalidates both keys).
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['items'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['verification-queue'] });
+    });
+  });
+
+  // =========================================================================
+  // "Use" (consume) + opportunistic verification prompt (EVT-27 AC 4)
+  // =========================================================================
+
+  describe('"Use" + opportunistic prompt (EVT-27)', () => {
+    it('tapping "Use" records a consume movement for the entered quantity', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 10, minQuantity: null }));
+      const consumeMock = vi.spyOn(api, 'consumeItem').mockResolvedValue({
+        item: detail({ quantity: 9 }),
+        offerVerification: false,
+      });
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Use' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Use' }));
+
+      await waitFor(() => expect(consumeMock).toHaveBeenCalledWith('item-1', 1));
+    });
+
+    it('offers the opportunistic "how many are actually left?" prompt when the response says so', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 3, minQuantity: null }));
+      vi.spyOn(api, 'consumeItem').mockResolvedValue({
+        item: detail({ quantity: 2 }),
+        offerVerification: true,
+      });
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Use' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Use' }));
+
+      expect(await screen.findByText('How many are actually left?')).toBeInTheDocument();
+    });
+
+    it('does NOT offer the opportunistic prompt when the response says no', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 10, minQuantity: null }));
+      vi.spyOn(api, 'consumeItem').mockResolvedValue({
+        item: detail({ quantity: 9 }),
+        offerVerification: false,
+      });
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Use' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Use' }));
+
+      await waitFor(() => expect(api.consumeItem).toHaveBeenCalled());
+      expect(screen.queryByText('How many are actually left?')).not.toBeInTheDocument();
+    });
+
+    it('"Skip" dismisses the opportunistic prompt in one tap without opening the count dialog', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 3, minQuantity: null }));
+      vi.spyOn(api, 'consumeItem').mockResolvedValue({
+        item: detail({ quantity: 2 }),
+        offerVerification: true,
+      });
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Use' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Use' }));
+
+      // `findByRole` (not `getByRole`) — the confirm dialog's exit
+      // transition briefly leaves it aria-hidden-blocking role queries even
+      // after its text has left the accessible tree; findByRole polls until
+      // that settles.
+      await user.click(await screen.findByRole('button', { name: 'Skip' }));
+
+      // The Snackbar's own exit transition briefly leaves its text in the
+      // DOM after the click — wait for it to actually leave, same reasoning
+      // as the findByRole above.
+      await waitFor(() =>
+        expect(screen.queryByText('How many are actually left?')).not.toBeInTheDocument(),
+      );
+      expect(screen.queryByText('How many are there?')).not.toBeInTheDocument();
+    });
+
+    it('"Count" on the opportunistic prompt opens the blind CountDialog', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 3, minQuantity: null }));
+      vi.spyOn(api, 'consumeItem').mockResolvedValue({
+        item: detail({ quantity: 2 }),
+        offerVerification: true,
+      });
+      vi.spyOn(api, 'countItem').mockResolvedValue({
+        item: detail({ quantity: 2 }),
+        bookQuantity: 2,
+        countedQuantity: 2,
+        delta: 0,
+      });
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Use' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Use' }));
+
+      await user.click(await screen.findByRole('button', { name: 'Count' }));
+
+      expect(screen.getByText('How many are there?')).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.queryByText('How many are actually left?')).not.toBeInTheDocument(),
+      );
+    });
+  });
 });

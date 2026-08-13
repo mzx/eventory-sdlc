@@ -250,6 +250,22 @@ export class StockMovementsService {
             createdById: input.createdById ?? null,
           },
         });
+
+        // EVT-26 (mirrors `recordMovement` above): a consumption that
+        // leaves the item's on-hand `quantity` at or below `minQuantity`
+        // opens a `low-stock` shopping-list entry. Unlike `recordMovement`,
+        // the conditional `updateMany` above doesn't return the updated
+        // row, so the post-decrement quantity/minQuantity is re-read here —
+        // still inside this same transaction, so it reflects exactly the
+        // decrement just applied.
+        const updated = await tx.item.findUnique({
+          where: { id: input.itemId },
+          select: { quantity: true, minQuantity: true },
+        });
+        if (updated && updated.minQuantity != null && updated.quantity <= updated.minQuantity) {
+          await openLowStockEntry(tx, input.itemId);
+        }
+
         return { movement, consumedQuantity: attempt };
       }
 

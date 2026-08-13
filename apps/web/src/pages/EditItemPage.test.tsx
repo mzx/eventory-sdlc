@@ -140,6 +140,118 @@ describe('EditItemPage', () => {
     );
   });
 
+  // =========================================================================
+  // Count cadence + last verified (EVT-27 AC 1)
+  // =========================================================================
+
+  it('seeds the count-interval field from the item and saves a new value', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ countIntervalDays: 30 }));
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi
+      .spyOn(api, 'updateItem')
+      .mockResolvedValue(detail({ countIntervalDays: 60 }));
+    const user = userEvent.setup();
+
+    renderEditPage();
+
+    const intervalInput = await screen.findByLabelText(/count interval/i);
+    await waitFor(() => expect(intervalInput).toHaveValue(30));
+
+    await user.clear(intervalInput);
+    await user.type(intervalInput, '60');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ countIntervalDays: 60 }),
+      ),
+    );
+  });
+
+  it('clearing the count-interval field sends an explicit null', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ countIntervalDays: 30 }));
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi
+      .spyOn(api, 'updateItem')
+      .mockResolvedValue(detail({ countIntervalDays: null }));
+    const user = userEvent.setup();
+
+    renderEditPage();
+
+    const intervalInput = await screen.findByLabelText(/count interval/i);
+    await waitFor(() => expect(intervalInput).toHaveValue(30));
+
+    await user.clear(intervalInput);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ countIntervalDays: null }),
+      ),
+    );
+  });
+
+  it('seeds the last-verified field from the item and saves a corrected date', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({ lastVerifiedAt: '2026-01-15T00:00:00.000Z' }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail());
+    const user = userEvent.setup();
+
+    renderEditPage();
+
+    const verifiedInput = await screen.findByLabelText(/last verified/i);
+    await waitFor(() => expect(verifiedInput).toHaveValue('2026-01-15'));
+
+    await user.clear(verifiedInput);
+    await user.type(verifiedInput, '2026-02-01');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ lastVerifiedAt: '2026-02-01' }),
+      ),
+    );
+  });
+
+  it('clearing the last-verified field sends an explicit null', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(
+      detail({ lastVerifiedAt: '2026-01-15T00:00:00.000Z' }),
+    );
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi
+      .spyOn(api, 'updateItem')
+      .mockResolvedValue(detail({ lastVerifiedAt: null }));
+    const user = userEvent.setup();
+
+    renderEditPage();
+
+    const verifiedInput = await screen.findByLabelText(/last verified/i);
+    await waitFor(() => expect(verifiedInput).toHaveValue('2026-01-15'));
+
+    await user.clear(verifiedInput);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ lastVerifiedAt: null }),
+      ),
+    );
+  });
+
   it('uploads a new photo linked to the item', async () => {
     vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
     vi.spyOn(api, 'fetchTags').mockResolvedValue([]);

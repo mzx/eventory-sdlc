@@ -435,8 +435,9 @@ describe('StockMovementsService', () => {
   // =========================================================================
 
   describe('recordConsumption', () => {
-    it('consumes the full requested amount via ONE conditional updateMany (no findUnique read needed)', async () => {
+    it('consumes the full requested amount via ONE conditional updateMany (no findUnique read for the race check itself)', async () => {
       tx.item.updateMany.mockResolvedValue({ count: 1 });
+      tx.item.findUnique.mockResolvedValue({ quantity: 5, minQuantity: null });
       tx.stockMovement.create.mockResolvedValue(
         makeMovementRow({ kind: 'build', delta: -3, projectId: 'proj-1' }),
       );
@@ -452,12 +453,14 @@ describe('StockMovementsService', () => {
       // Regression guard (mirrors the EVT-25 round-2 race test): the fix is
       // proven by the SHAPE of the call, not just the outcome — a
       // conditional `updateMany` guarded by `quantity: { gte: n }`, not a
-      // blind read-then-`update`.
+      // blind read-then-`update`. A single `findUnique` DOES happen after
+      // the decrement succeeds — that's the EVT-26 low-stock re-read (see
+      // below), not the race-safety mechanism under test here.
       expect(tx.item.updateMany).toHaveBeenCalledWith({
         where: { id: ITEM_ID, quantity: { gte: 3 } },
         data: { quantity: { decrement: 3 } },
       });
-      expect(tx.item.findUnique).not.toHaveBeenCalled();
+      expect(tx.item.findUnique).toHaveBeenCalledTimes(1);
       expect(tx.stockMovement.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           itemId: ITEM_ID,
@@ -568,6 +571,75 @@ describe('StockMovementsService', () => {
 
       expect(tx.stockMovement.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ projectId: null, note: null, createdById: null }),
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-27 review: `recordConsumption` — the only write path for
+    // `ItemsService.consume()` — must open the same EVT-26 low-stock entry
+    // as `recordMovement` under the same conditions, not silently skip it.
+    // -----------------------------------------------------------------------
+
+    describe('EVT-26: low-stock auto-trigger (mirrors recordMovement)', () => {
+      it('opens exactly one low-stock entry when consuming crosses the threshold (6 -> 4, min 5)', async () => {
+        tx.item.updateMany.mockResolvedValue({ count: 1 });
+        tx.item.findUnique.mockResolvedValue({ quantity: 4, minQuantity: 5 });
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+
+        await service.recordConsumption(asClient(tx) as never, {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          requestedQuantity: 2,
+        });
+
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+        const rawArgs = tx.$executeRaw.mock.calls[0];
+        expect(rawArgs).toContain(ITEM_ID);
+      });
+
+      it('is idempotent when a low-stock entry is already open (the raw INSERT is ON CONFLICT DO NOTHING)', async () => {
+        tx.item.updateMany.mockResolvedValue({ count: 1 });
+        tx.item.findUnique.mockResolvedValue({ quantity: 4, minQuantity: 5 });
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+        tx.$executeRaw.mockResolvedValue(0); // simulates an already-open entry for this item
+
+        await expect(
+          service.recordConsumption(asClient(tx) as never, {
+            itemId: ITEM_ID,
+            kind: 'consume',
+            requestedQuantity: 2,
+          }),
+        ).resolves.toBeDefined();
+
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      });
+
+      it('opens none when consuming does NOT cross the threshold (10 -> 8, min 5)', async () => {
+        tx.item.updateMany.mockResolvedValue({ count: 1 });
+        tx.item.findUnique.mockResolvedValue({ quantity: 8, minQuantity: 5 });
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+
+        await service.recordConsumption(asClient(tx) as never, {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          requestedQuantity: 2,
+        });
+
+        expect(tx.$executeRaw).not.toHaveBeenCalled();
+      });
+
+      it('opens none when minQuantity is null (no replenishment tracking)', async () => {
+        tx.item.updateMany.mockResolvedValue({ count: 1 });
+        tx.item.findUnique.mockResolvedValue({ quantity: 0, minQuantity: null });
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+
+        await service.recordConsumption(asClient(tx) as never, {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          requestedQuantity: 2,
+        });
+
+        expect(tx.$executeRaw).not.toHaveBeenCalled();
       });
     });
   });
