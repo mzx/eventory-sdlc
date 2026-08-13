@@ -1110,6 +1110,80 @@ describe('ItemsService', () => {
         );
       });
     });
+
+    // -------------------------------------------------------------------------
+    // EVT-25 review round 2 — race-safe quantity/location reads (finding 1)
+    // -------------------------------------------------------------------------
+
+    describe('EVT-25 review round 2: race-safe current-state read', () => {
+      // Finding 4 — regression guard proving the delta is computed from a
+      // read that happens INSIDE the transaction, not via a pre-transaction
+      // `this.findById(id)` call. A stale, pre-transaction read is exactly
+      // the shape finding 1 flagged: it leaves a window where a concurrent
+      // PATCH to the same item can commit between the read and this
+      // transaction's write. Since the test's `$transaction` mock invokes
+      // its callback with itself as `tx`, `tx.item.findUnique` and
+      // `this.prisma.item.findUnique` land on the exact same jest.fn() — so
+      // identity can't distinguish the two shapes, but invocation ORDER
+      // can: a read inside the transaction is only ever observed AFTER
+      // `$transaction` itself is invoked (its mock synchronously calls the
+      // callback), whereas a pre-transaction read would be observed first.
+      it('finding 1/4: reads current quantity/locationId via the tx client, after $transaction opens', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'adjust' },
+          item: makeItemDetail({ quantity: 7 }),
+        });
+
+        await service.update(ITEM_ID, { quantity: 7 });
+
+        expect(prismaMock.$transaction).toHaveBeenCalled();
+        expect(prismaMock.item.findUnique).toHaveBeenCalled();
+        const transactionCallOrder = prismaMock.$transaction.mock.invocationCallOrder[0];
+        const findUniqueCallOrder = prismaMock.item.findUnique.mock.invocationCallOrder[0];
+        expect(findUniqueCallOrder).toBeGreaterThan(transactionCallOrder);
+      });
+
+      it('throws NotFoundException when the in-transaction read finds no row (item deleted concurrently)', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(null);
+        await expect(service.update(ITEM_ID, { quantity: 5 })).rejects.toThrow(NotFoundException);
+        // No writes should be attempted once the item is known missing.
+        expect(prismaMock.item.update).not.toHaveBeenCalled();
+        expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      });
+
+      // Finding 5 — failure-path atomicity: if any write inside the
+      // transaction rejects, the whole `update()` call must reject too,
+      // rather than swallowing the error and returning a partial result.
+      it('finding 5: rejects the whole update when the scalar item write fails, without recording a movement', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        const writeError = new Error('connection reset');
+        prismaMock.item.update.mockRejectedValue(writeError);
+
+        await expect(service.update(ITEM_ID, { quantity: 9 })).rejects.toThrow(writeError);
+
+        // The quantity movement must never be recorded on its own — the
+        // ledger row and the quantity change stand or fall together.
+        expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      });
+
+      it('finding 5: rejects the whole update when recordMovement fails, and does not apply a second movement', async () => {
+        const NEW_LOC_ID = '99999999-9999-9999-9999-999999999999';
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        const movementError = new Error('movement write failed');
+        stockMovementsMock.recordMovement.mockRejectedValueOnce(movementError);
+
+        await expect(
+          service.update(ITEM_ID, { quantity: 9, locationId: NEW_LOC_ID }),
+        ).rejects.toThrow(movementError);
+
+        // The failed "adjust" call is the only recordMovement call — the
+        // "move" for the locationId change must never fire after it.
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   // =========================================================================

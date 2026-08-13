@@ -51,6 +51,16 @@ import { QrThumb } from '../components/QrThumb';
 /** How many additional rows "Load more" reveals each click (EVT-25 AC 6). */
 const MOVEMENTS_PAGE_SIZE_STEP = 20;
 
+/**
+ * Backend cap on `pageSize` — mirrors `ListMovementsQueryDto`'s `@Max(100)`
+ * (apps/api/src/stock-movements/list-movements-query.dto.ts). "Load more"
+ * must never grow `movementsLimit` past this: the API 400s a `pageSize` over
+ * 100, and the query error previously replaced the whole rendered History
+ * section with an error alert instead of just declining to load more rows
+ * (EVT-25 review round 2, finding 2).
+ */
+const MOVEMENTS_PAGE_SIZE_CAP = 100;
+
 const MOVEMENT_KIND_LABEL: Record<StockMovementKind, string> = {
   add: 'Added',
   consume: 'Consumed',
@@ -359,14 +369,27 @@ export function ItemDetailPage() {
             ))}
           </List>
         )}
-        {movementsQuery.data && movementsQuery.data.total > movementsQuery.data.data.length && (
-          <Button
-            size="small"
-            onClick={() => setMovementsLimit((n) => n + MOVEMENTS_PAGE_SIZE_STEP)}
-          >
-            Load more
-          </Button>
-        )}
+        {movementsQuery.data &&
+          movementsQuery.data.total > movementsQuery.data.data.length &&
+          movementsLimit < MOVEMENTS_PAGE_SIZE_CAP && (
+            <Button
+              size="small"
+              onClick={() =>
+                setMovementsLimit((n) =>
+                  Math.min(n + MOVEMENTS_PAGE_SIZE_STEP, MOVEMENTS_PAGE_SIZE_CAP),
+                )
+              }
+            >
+              Load more
+            </Button>
+          )}
+        {movementsQuery.data &&
+          movementsQuery.data.total > movementsQuery.data.data.length &&
+          movementsLimit >= MOVEMENTS_PAGE_SIZE_CAP && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              Showing the first {MOVEMENTS_PAGE_SIZE_CAP} movements.
+            </Typography>
+          )}
       </Box>
 
       <Divider />

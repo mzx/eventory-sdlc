@@ -263,6 +263,47 @@ describe('StockMovementsService', () => {
     // (no `$transaction` method) rather than the top-level PrismaService.
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // EVT-25 review round 2, finding 5 — failure-path atomicity: the
+    // movement row and the Item write must stand or fall together.
+    // -----------------------------------------------------------------------
+
+    it('finding 5: propagates a failure from the Item update, so the movement never lands alone', async () => {
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'adjust', delta: 5 }));
+      const writeError = new Error('connection reset');
+      tx.item.update.mockRejectedValue(writeError);
+
+      await expect(
+        service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'adjust',
+          delta: 5,
+        }),
+      ).rejects.toThrow(writeError);
+
+      // The movement `create` call did happen against the transaction
+      // client, but since the transaction is mocked (no real DB rollback to
+      // observe), the atomicity guarantee under test is that the overall
+      // `$transaction`-wrapped call rejects rather than resolving with a
+      // movement and no matching quantity change.
+      expect(tx.stockMovement.create).toHaveBeenCalled();
+    });
+
+    it('finding 5: propagates a failure from the StockMovement create, without ever touching the Item', async () => {
+      const createError = new Error('unique constraint violation');
+      tx.stockMovement.create.mockRejectedValue(createError);
+
+      await expect(
+        service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'adjust',
+          delta: 5,
+        }),
+      ).rejects.toThrow(createError);
+
+      expect(tx.item.update).not.toHaveBeenCalled();
+    });
+
     it('rides along an already-open transaction client without opening a nested transaction', async () => {
       const openTx = makeTxMock(); // no `$transaction` method — this IS the tx
       openTx.stockMovement.create.mockResolvedValue(makeMovementRow());

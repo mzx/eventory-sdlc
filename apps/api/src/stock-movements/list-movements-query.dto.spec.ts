@@ -1,5 +1,5 @@
 import { ArgumentMetadata, ValidationPipe } from '@nestjs/common';
-import { ListMovementsQueryDto } from './list-movements-query.dto';
+import { ListMovementsQueryDto, MAX_PAGE } from './list-movements-query.dto';
 
 /**
  * Runs the exact `ValidationPipe` config main.ts installs globally
@@ -47,5 +47,21 @@ describe('ListMovementsQueryDto validation (ValidationPipe, matches main.ts conf
 
   it('rejects a non-numeric page', async () => {
     await expect(pipe.transform({ page: 'not-a-number' }, metadata)).rejects.toThrow();
+  });
+
+  // EVT-25 review round 2, finding 3 — an unbounded `page` would overflow
+  // Prisma's Int32 `skip` (`(page - 1) * pageSize`) into a 500 instead of a
+  // clean 400.
+  it('rejects a page number past MAX_PAGE', async () => {
+    await expect(pipe.transform({ page: String(MAX_PAGE + 1) }, metadata)).rejects.toThrow();
+  });
+
+  it('accepts a page number at the MAX_PAGE boundary', async () => {
+    const result = await pipe.transform({ page: String(MAX_PAGE) }, metadata);
+    expect(result.page).toBe(MAX_PAGE);
+  });
+
+  it('rejects an absurdly large page number that would overflow Int32 skip', async () => {
+    await expect(pipe.transform({ page: '999999999' }, metadata)).rejects.toThrow();
   });
 });

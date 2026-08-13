@@ -344,12 +344,22 @@ export class ItemsService {
    * field on this PATCH. A `quantity`/`locationId` key that's present in the
    * DTO but equal to the current value writes no movement (nothing changed);
    * an omitted key leaves the field untouched, same as before.
+   *
+   * The pre-edit `quantity`/`locationId` snapshot (`current`) is read via
+   * `tx.item.findUnique` — the FIRST statement inside the `$transaction`
+   * callback below — rather than via a separate `this.findById(id)` call
+   * before the transaction opens (the previous shape). That previous shape
+   * left a race window: the read happened on its own connection, often with
+   * an additional `await` gap for `tagsService.upsertMany` in between, so a
+   * concurrent PATCH to the same item could commit in that window. Each
+   * caller would then compute its `adjust` delta from an already-stale
+   * `current.quantity`, and applying both deltas via `recordMovement`'s
+   * `increment` could land the final quantity on neither caller's intended
+   * value — or drive it negative past the DTO's `@Min(0)` under enough
+   * concurrent requests (EVT-25 review round 2, finding 1). Reading via
+   * `tx`, immediately before the writes that use it, closes that window.
    */
   async update(id: string, dto: UpdateItemDto, createdById?: string) {
-    // Verify the item exists before attempting the update, and capture the
-    // pre-edit quantity/locationId to compute movement deltas below.
-    const current = await this.findById(id);
-
     const { tags: tagNames, photoIds, properties, quantity, locationId, ...scalarData } = dto;
 
     // Build tag update: full replacement when `tags` is provided in the DTO
@@ -365,10 +375,18 @@ export class ItemsService {
     // When photoIds provided, update primary photo to the first entry
     const primaryPhotoId = photoIds !== undefined ? (photoIds[0] ?? null) : undefined;
 
-    const quantityChanged = quantity !== undefined && quantity !== current.quantity;
-    const locationChanged = locationId !== undefined && locationId !== current.locationId;
-
     return this.prisma.$transaction(async (tx) => {
+      const current = await tx.item.findUnique({
+        where: { id },
+        select: { quantity: true, locationId: true },
+      });
+      if (!current) {
+        throw new NotFoundException(`Item ${id} not found`);
+      }
+
+      const quantityChanged = quantity !== undefined && quantity !== current.quantity;
+      const locationChanged = locationId !== undefined && locationId !== current.locationId;
+
       let item = await tx.item.update({
         where: { id },
         data: {

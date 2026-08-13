@@ -359,6 +359,40 @@ describe('ItemDetailPage', () => {
       expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
     });
 
+    // EVT-25 review round 2, finding 2 — "Load more" must never grow the
+    // requested pageSize past the backend's @Max(100) cap.
+    it('finding 2: clamps the pageSize at 100 and hides "Load more" once the cap is reached', async () => {
+      const fetchMovements = vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({
+          data: [movementRow({ id: 'mv-1' })],
+          total: 200,
+          pageSize: 100,
+        }),
+      );
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      // Click "Load more" repeatedly (20 -> 40 -> 60 -> 80 -> 100); each
+      // click's fetch must never request a pageSize over 100.
+      for (let i = 0; i < 4; i++) {
+        const loadMoreButton = await screen.findByRole('button', { name: 'Load more' });
+        await user.click(loadMoreButton);
+      }
+
+      await waitFor(() =>
+        expect(fetchMovements).toHaveBeenLastCalledWith('item-1', { page: 1, pageSize: 100 }),
+      );
+      for (const call of fetchMovements.mock.calls) {
+        expect(call[1]?.pageSize).toBeLessThanOrEqual(100);
+      }
+      // At the cap, with more movements still available (total: 200), the
+      // button must be gone rather than triggering a 5th, over-cap request.
+      expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+      expect(await screen.findByText('Showing the first 100 movements.')).toBeInTheDocument();
+    });
+
     it('does not show "Load more" once every movement is already displayed', async () => {
       vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
       vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
