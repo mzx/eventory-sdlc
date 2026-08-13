@@ -14,6 +14,7 @@ function locationDetail(overrides: Partial<api.LocationDetail> = {}): api.Locati
     parentId: 'garage',
     notes: null,
     qrCode: 'qr-shelf-3',
+    kind: 'area',
     children: [],
     items: [],
     breadcrumb: [
@@ -31,6 +32,7 @@ function locListItem(overrides: Partial<api.LocationListItem> = {}): api.Locatio
     path: 'garage',
     parentId: null,
     qrCode: 'qr-garage',
+    kind: 'area',
     itemCount: 1,
     ...overrides,
   };
@@ -154,5 +156,227 @@ describe('LocationDetailPage', () => {
 
     fakeWindow.onload?.();
     expect(printSpy).toHaveBeenCalled();
+  });
+
+  // EVT-30 AC 1/5: container child cards show the distinct icon.
+  it('renders a distinct icon for a container child vs. an area child', async () => {
+    vi.spyOn(api, 'fetchLocation').mockResolvedValue(
+      locationDetail({
+        children: [
+          { id: 'shelf-4', name: 'Shelf 4', path: 'garage.shelf-3.shelf-4', kind: 'area' },
+          { id: 'box-1', name: 'Tote Box', path: 'garage.shelf-3.box-1', kind: 'container' },
+        ],
+      }),
+    );
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+
+    renderLocationDetailPage();
+
+    const areaCard = (await screen.findByText('Shelf 4')).closest(
+      '[data-testid="location-child-card"]',
+    ) as HTMLElement;
+    const containerCard = screen
+      .getByText('Tote Box')
+      .closest('[data-testid="location-child-card"]') as HTMLElement;
+
+    expect(areaCard.querySelector('[aria-label="Area"]')).not.toBeNull();
+    expect(containerCard.querySelector('[aria-label="Container"]')).not.toBeNull();
+  });
+
+  // EVT-30 AC 2: containers offer "Move to…"; areas do not.
+  describe('container "Move to…" flow', () => {
+    it('shows "Move to…" only for a container location, not an area', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(locationDetail({ kind: 'area' }));
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+
+      renderLocationDetailPage();
+
+      await screen.findByRole('heading', { name: 'Shelf 3' });
+      expect(screen.queryByRole('button', { name: 'Move to…' })).not.toBeInTheDocument();
+    });
+
+    it('opens a destination picker excluding the container itself and its descendants, and moves on confirm', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(
+        locationDetail({ id: 'box-1', path: 'garage.box-1', kind: 'container' }),
+      );
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+        locListItem({ id: 'garage', name: 'Garage', path: 'garage' }),
+        locListItem({ id: 'box-1', name: 'Tote Box', path: 'garage.box-1', kind: 'container' }),
+        locListItem({
+          id: 'box-1-inner',
+          name: 'Inner Box',
+          path: 'garage.box-1.inner',
+          kind: 'container',
+        }),
+        locListItem({ id: 'shelf-2', name: 'Shelf 2', path: 'garage.shelf-2' }),
+      ]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchContainerMovements').mockResolvedValue({
+        data: [],
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        totalPages: 1,
+      });
+      const moveLocationMock = vi
+        .spyOn(api, 'moveLocation')
+        .mockResolvedValue(
+          locationDetail({ id: 'box-1', path: 'garage.shelf-2.box-1', kind: 'container' }),
+        );
+
+      renderLocationDetailPage('box-1');
+      const user = userEvent.setup();
+
+      await user.click(await screen.findByRole('button', { name: 'Move to…' }));
+
+      // Neither the container itself nor its descendant is offered as a destination.
+      expect(screen.queryByRole('option', { name: 'Tote Box' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'Inner Box' })).not.toBeInTheDocument();
+
+      await user.click(screen.getByLabelText('Destination'));
+      await user.click(await screen.findByRole('option', { name: 'Shelf 2' }));
+      await user.click(screen.getByRole('button', { name: 'Move' }));
+
+      await waitFor(() => expect(moveLocationMock).toHaveBeenCalledWith('box-1', 'shelf-2'));
+    });
+
+    it('shows a "No location (root)" option and passes null when selected', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(
+        locationDetail({
+          id: 'box-1',
+          path: 'garage.box-1',
+          parentId: 'garage',
+          kind: 'container',
+        }),
+      );
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+        locListItem({ id: 'garage', name: 'Garage', path: 'garage' }),
+        locListItem({ id: 'box-1', name: 'Tote Box', path: 'garage.box-1', kind: 'container' }),
+      ]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchContainerMovements').mockResolvedValue({
+        data: [],
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        totalPages: 1,
+      });
+      const moveLocationMock = vi
+        .spyOn(api, 'moveLocation')
+        .mockResolvedValue(
+          locationDetail({ id: 'box-1', path: 'box-1', parentId: null, kind: 'container' }),
+        );
+
+      renderLocationDetailPage('box-1');
+      const user = userEvent.setup();
+
+      await user.click(await screen.findByRole('button', { name: 'Move to…' }));
+      await user.click(screen.getByLabelText('Destination'));
+      await user.click(await screen.findByRole('option', { name: 'No location (root)' }));
+      await user.click(screen.getByRole('button', { name: 'Move' }));
+
+      await waitFor(() => expect(moveLocationMock).toHaveBeenCalledWith('box-1', null));
+    });
+
+    it('shows a server error message in the dialog when the move is rejected', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(
+        locationDetail({ id: 'box-1', path: 'garage.box-1', kind: 'container' }),
+      );
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+        locListItem({ id: 'garage', name: 'Garage', path: 'garage' }),
+        locListItem({ id: 'box-1', name: 'Tote Box', path: 'garage.box-1', kind: 'container' }),
+      ]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchContainerMovements').mockResolvedValue({
+        data: [],
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        totalPages: 1,
+      });
+      vi.spyOn(api, 'moveLocation').mockRejectedValue(
+        new Error('Request to /locations/box-1/move failed with status 422'),
+      );
+
+      renderLocationDetailPage('box-1');
+      const user = userEvent.setup();
+
+      await user.click(await screen.findByRole('button', { name: 'Move to…' }));
+      await user.click(screen.getByRole('button', { name: 'Move' }));
+
+      expect(
+        await screen.findByText('Request to /locations/box-1/move failed with status 422'),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // EVT-30 AC 3: a container's own move history is visible, without per-item spam.
+  describe('container move history', () => {
+    it('renders the container move history when the location is a container', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(
+        locationDetail({ id: 'box-1', path: 'garage.box-1', kind: 'container' }),
+      );
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchContainerMovements').mockResolvedValue({
+        data: [
+          {
+            id: 'mv-1',
+            containerId: 'box-1',
+            kind: 'move',
+            delta: 0,
+            fromLocationId: 'garage',
+            toLocationId: 'shelf-2',
+            note: null,
+            createdById: null,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            fromLocation: { id: 'garage', name: 'Garage', path: 'garage' },
+            toLocation: { id: 'shelf-2', name: 'Shelf 2', path: 'garage.shelf-2' },
+          },
+        ],
+        page: 1,
+        pageSize: 20,
+        total: 1,
+        totalPages: 1,
+      });
+
+      renderLocationDetailPage('box-1');
+
+      expect(await screen.findByText('Moved — Garage → Shelf 2')).toBeInTheDocument();
+    });
+
+    it('does not render a move-history section for an area location', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(locationDetail({ kind: 'area' }));
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      const fetchContainerMovementsMock = vi.spyOn(api, 'fetchContainerMovements');
+
+      renderLocationDetailPage();
+
+      await screen.findByRole('heading', { name: 'Shelf 3' });
+      expect(screen.queryByText('Move history')).not.toBeInTheDocument();
+      expect(fetchContainerMovementsMock).not.toHaveBeenCalled();
+    });
+
+    it('shows an empty state when the container has no recorded moves', async () => {
+      vi.spyOn(api, 'fetchLocation').mockResolvedValue(
+        locationDetail({ id: 'box-1', path: 'garage.box-1', kind: 'container' }),
+      );
+      vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      vi.spyOn(api, 'fetchContainerMovements').mockResolvedValue({
+        data: [],
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        totalPages: 1,
+      });
+
+      renderLocationDetailPage('box-1');
+
+      expect(await screen.findByText('No moves recorded yet.')).toBeInTheDocument();
+    });
   });
 });

@@ -12,11 +12,13 @@ const FROM_LOC_ID = '22222222-2222-2222-2222-222222222222';
 const TO_LOC_ID = '33333333-3333-3333-3333-333333333333';
 const USER_ID = '44444444-4444-4444-4444-444444444444';
 const MOVEMENT_ID = '55555555-5555-5555-5555-555555555555';
+const CONTAINER_ID = '66666666-6666-6666-6666-666666666666';
 
 function makeMovementRow(overrides: Record<string, unknown> = {}) {
   return {
     id: MOVEMENT_ID,
     itemId: ITEM_ID,
+    containerId: null,
     kind: 'adjust',
     delta: 3,
     fromLocationId: null,
@@ -66,6 +68,10 @@ function makePrismaMock() {
     cb(tx),
   );
   return { mock, tx };
+}
+
+function makeLocationRow(overrides: Record<string, unknown> = {}) {
+  return { id: CONTAINER_ID, kind: 'container', ...overrides };
 }
 
 /** Loosely-typed test doubles stand in for `PrismaClientOrTx` at direct call sites. */
@@ -567,6 +573,99 @@ describe('StockMovementsService', () => {
   });
 
   // =========================================================================
+  // recordContainerMove — EVT-30 AC 2/3
+  // =========================================================================
+
+  describe('recordContainerMove', () => {
+    it('writes exactly one itemless StockMovement row: itemId null, containerId set, kind move, delta 0', async () => {
+      tx.stockMovement.create.mockResolvedValue(
+        makeMovementRow({ itemId: null, containerId: CONTAINER_ID, kind: 'move', delta: 0 }),
+      );
+
+      const movement = await service.recordContainerMove(asClient(prismaMock), {
+        containerId: CONTAINER_ID,
+        fromLocationId: FROM_LOC_ID,
+        toLocationId: TO_LOC_ID,
+      });
+
+      expect(prismaMock.$transaction).toHaveBeenCalled();
+      expect(tx.stockMovement.create).toHaveBeenCalledWith({
+        data: {
+          itemId: null,
+          containerId: CONTAINER_ID,
+          kind: 'move',
+          delta: 0,
+          fromLocationId: FROM_LOC_ID,
+          toLocationId: TO_LOC_ID,
+          note: null,
+          createdById: null,
+        },
+      });
+      // Never touches Item — a container move has no Item row to update.
+      expect(tx.item.update).not.toHaveBeenCalled();
+      expect(movement.containerId).toBe(CONTAINER_ID);
+    });
+
+    it('never touches Item.quantity/locationId — only the ledger row is written here', async () => {
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ containerId: CONTAINER_ID }));
+
+      await service.recordContainerMove(asClient(prismaMock), {
+        containerId: CONTAINER_ID,
+        fromLocationId: null,
+        toLocationId: TO_LOC_ID,
+      });
+
+      expect(tx.item.update).not.toHaveBeenCalled();
+    });
+
+    it('accepts null fromLocationId (container previously at root)', async () => {
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ containerId: CONTAINER_ID }));
+
+      await service.recordContainerMove(asClient(prismaMock), {
+        containerId: CONTAINER_ID,
+        fromLocationId: null,
+        toLocationId: TO_LOC_ID,
+      });
+
+      expect(tx.stockMovement.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ fromLocationId: null }) }),
+      );
+    });
+
+    it('forwards note and createdById onto the movement row', async () => {
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ containerId: CONTAINER_ID }));
+
+      await service.recordContainerMove(asClient(prismaMock), {
+        containerId: CONTAINER_ID,
+        fromLocationId: FROM_LOC_ID,
+        toLocationId: TO_LOC_ID,
+        note: 'Moved to the top shelf',
+        createdById: USER_ID,
+      });
+
+      expect(tx.stockMovement.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ note: 'Moved to the top shelf', createdById: USER_ID }),
+        }),
+      );
+    });
+
+    it('rides along an already-open transaction client without opening a nested transaction', async () => {
+      const openTx = makeTxMock();
+      openTx.stockMovement.create.mockResolvedValue(makeMovementRow({ containerId: CONTAINER_ID }));
+
+      await service.recordContainerMove(asClient(openTx), {
+        containerId: CONTAINER_ID,
+        fromLocationId: FROM_LOC_ID,
+        toLocationId: TO_LOC_ID,
+      });
+
+      expect(openTx.stockMovement.create).toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
   // listForItem — GET /api/items/:id/movements (AC 5)
   // =========================================================================
 
@@ -635,6 +734,68 @@ describe('StockMovementsService', () => {
           project: expect.objectContaining({ select: expect.any(Object) }),
         }),
       );
+    });
+  });
+
+  // =========================================================================
+  // listForContainer — GET /api/locations/:id/movements (EVT-30 AC 3)
+  // =========================================================================
+
+  describe('listForContainer', () => {
+    it('404s when the location does not exist', async () => {
+      prismaMock.location.findUnique.mockResolvedValue(null);
+      await expect(service.listForContainer(CONTAINER_ID, {})).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s when the location exists but is an "area", not a "container"', async () => {
+      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow({ kind: 'area' }));
+      await expect(service.listForContainer(CONTAINER_ID, {})).rejects.toThrow(NotFoundException);
+    });
+
+    it('returns newest-first, paginated container-move history, filtered by containerId', async () => {
+      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
+      prismaMock.stockMovement.count.mockResolvedValue(2);
+      const rows = [
+        makeMovementRow({ id: 'mv-2', itemId: null, containerId: CONTAINER_ID }),
+        makeMovementRow({ id: 'mv-1', itemId: null, containerId: CONTAINER_ID }),
+      ];
+      prismaMock.stockMovement.findMany.mockResolvedValue(rows);
+
+      const result = await service.listForContainer(CONTAINER_ID, {});
+
+      expect(prismaMock.stockMovement.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { containerId: CONTAINER_ID },
+          orderBy: { createdAt: 'desc' },
+          skip: 0,
+          take: 20,
+        }),
+      );
+      expect(result).toEqual({ data: rows, page: 1, pageSize: 20, total: 2, totalPages: 1 });
+    });
+
+    it('applies page/pageSize to skip/take', async () => {
+      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
+      prismaMock.stockMovement.count.mockResolvedValue(50);
+      prismaMock.stockMovement.findMany.mockResolvedValue([]);
+
+      const result = await service.listForContainer(CONTAINER_ID, { page: 2, pageSize: 10 });
+
+      expect(prismaMock.stockMovement.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 10, take: 10 }),
+      );
+      expect(result.page).toBe(2);
+      expect(result.totalPages).toBe(5);
+    });
+
+    it('returns an empty page (not an error) when the container has no moves yet', async () => {
+      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
+      prismaMock.stockMovement.count.mockResolvedValue(0);
+      prismaMock.stockMovement.findMany.mockResolvedValue([]);
+
+      const result = await service.listForContainer(CONTAINER_ID, {});
+
+      expect(result).toEqual({ data: [], page: 1, pageSize: 20, total: 0, totalPages: 1 });
     });
   });
 });

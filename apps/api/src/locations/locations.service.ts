@@ -3,9 +3,14 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { LocationKind, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  RecordContainerMoveInput,
+  StockMovementsService,
+} from '../stock-movements/stock-movements.service';
 
 /**
  * Convert a human name into a URL/path-safe slug.
@@ -26,6 +31,12 @@ export interface LocationListItem {
   path: string;
   parentId: string | null;
   qrCode: string;
+  kind: LocationKind;
+  /**
+   * Recursive count: this location's own direct items PLUS every direct item
+   * of every descendant location (EVT-30 AC 5) — computed in `findAll` from
+   * the flat, path-ordered list rather than a per-node DB round trip.
+   */
   itemCount: number;
 }
 
@@ -36,7 +47,8 @@ export interface LocationDetail {
   parentId: string | null;
   notes: string | null;
   qrCode: string;
-  children: Array<{ id: string; name: string; path: string }>;
+  kind: LocationKind;
+  children: Array<{ id: string; name: string; path: string; kind: LocationKind }>;
   items: Array<{
     id: string;
     name: string;
@@ -49,6 +61,8 @@ export interface CreateLocationDto {
   name: string;
   parentId?: string;
   notes?: string;
+  /** Defaults to `area` (matches the Prisma column default) when omitted. */
+  kind?: LocationKind;
 }
 
 export interface RenameLocationDto {
@@ -57,9 +71,19 @@ export interface RenameLocationDto {
 
 @Injectable()
 export class LocationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stockMovementsService: StockMovementsService,
+  ) {}
 
-  /** Flat list ordered by materialized path. */
+  /**
+   * Flat list ordered by materialized path. `itemCount` is RECURSIVE (EVT-30
+   * AC 5) — a container (or an area) rolls up the direct item count of every
+   * descendant, not just its own direct items, computed in-memory from this
+   * single flat fetch via path-prefix matching (O(n^2) over the location
+   * count, which stays small at household/workshop scale — no separate
+   * per-node query).
+   */
   async findAll(): Promise<LocationListItem[]> {
     const locations = await this.prisma.location.findMany({
       orderBy: { path: 'asc' },
@@ -74,7 +98,8 @@ export class LocationsService {
       path: loc.path,
       parentId: loc.parentId,
       qrCode: loc.qrCode,
-      itemCount: loc._count.items,
+      kind: loc.kind,
+      itemCount: recursiveItemCount(loc.path, locations),
     }));
   }
 
@@ -83,7 +108,7 @@ export class LocationsService {
     const location = await this.prisma.location.findUnique({
       where: { id },
       include: {
-        children: { select: { id: true, name: true, path: true } },
+        children: { select: { id: true, name: true, path: true, kind: true } },
         items: {
           select: {
             id: true,
@@ -112,6 +137,7 @@ export class LocationsService {
       parentId: location.parentId,
       notes: location.notes,
       qrCode: location.qrCode,
+      kind: location.kind,
       children: location.children,
       items: location.items,
       breadcrumb,
@@ -161,6 +187,7 @@ export class LocationsService {
           path,
           parentId: dto.parentId ?? null,
           notes: dto.notes ?? null,
+          kind: dto.kind ?? 'area',
         },
       });
     } catch (err) {
@@ -242,6 +269,118 @@ export class LocationsService {
   }
 
   /**
+   * "Move to…" — re-parents a CONTAINER location under `toParentId` (or to
+   * root when `null`), rewriting its own path and every descendant's path in
+   * the same atomic transaction as `rename` (EVT-30 AC 2). All contents —
+   * items placed directly in the container or any of its descendant
+   * containers — implicitly follow, since they're addressed by
+   * `locationId`/materialized path, not copied.
+   *
+   * Restricted to `kind: 'container'` — `area` nodes keep the existing
+   * add/rename/delete management flows (EVT-30 non-goal); moving an area
+   * throws 400.
+   *
+   * Guard rails (EVT-30 AC 4, risk register): rejects moving a container
+   * into itself or any of its own descendants with 422 — validated
+   * server-side against the freshly-read `path`, not just trusted from a
+   * client-side picker.
+   *
+   * Records exactly ONE itemless `move` `StockMovement` for the container
+   * itself (EVT-30 AC 3) — never one row per contained item.
+   */
+  async moveContainer(
+    id: string,
+    toParentId: string | null,
+    createdById?: string,
+  ): Promise<LocationDetail> {
+    const location = await this.prisma.location.findUnique({ where: { id } });
+    if (!location) {
+      throw new NotFoundException(`Location ${id} not found`);
+    }
+    if (location.kind !== 'container') {
+      throw new BadRequestException(
+        `Only container locations can be moved; "${location.name}" is an area. Area locations keep the existing add/rename/delete flows.`,
+      );
+    }
+    if (toParentId === id) {
+      throw new UnprocessableEntityException(`Cannot move "${location.name}" into itself`);
+    }
+
+    let parent: { id: string; path: string } | null = null;
+    if (toParentId) {
+      parent = await this.prisma.location.findUnique({
+        where: { id: toParentId },
+        select: { id: true, path: true },
+      });
+      if (!parent) {
+        throw new NotFoundException(`Location ${toParentId} not found`);
+      }
+      if (parent.path === location.path || parent.path.startsWith(`${location.path}.`)) {
+        throw new UnprocessableEntityException(
+          `Cannot move "${location.name}" into itself or one of its own descendants`,
+        );
+      }
+    }
+
+    // Already at the requested destination — no-op, no movement recorded.
+    if ((toParentId ?? null) === location.parentId) {
+      return this.findOne(id);
+    }
+
+    const oldPath = location.path;
+    const leafSlug = oldPath.split('.').pop() as string;
+    const newPath = parent ? `${parent.path}.${leafSlug}` : leafSlug;
+
+    if (newPath !== oldPath) {
+      const conflict = await this.prisma.location.findFirst({
+        where: { path: newPath, id: { not: id } },
+      });
+      if (conflict) {
+        throw new ConflictException(`A location with path "${newPath}" already exists`);
+      }
+    }
+
+    const fromLocationId = location.parentId;
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.location.update({
+          where: { id },
+          data: { parentId: toParentId, path: newPath },
+        });
+
+        // Same SUBSTRING-based prefix rewrite as `rename` — see that
+        // method's doc comment for why REPLACE() would corrupt paths where
+        // the same slug repeats at multiple depths.
+        if (newPath !== oldPath) {
+          const oldPrefix = `${oldPath}.`;
+          const newPrefix = `${newPath}.`;
+          await tx.$executeRaw`
+            UPDATE "Location"
+            SET    path = ${newPrefix} || SUBSTRING(path FROM LENGTH(${oldPrefix}) + 1)
+            WHERE  path LIKE ${oldPrefix + '%'}
+          `;
+        }
+
+        const input: RecordContainerMoveInput = {
+          containerId: id,
+          fromLocationId,
+          toLocationId: toParentId,
+          createdById,
+        };
+        await this.stockMovementsService.recordContainerMove(tx, input);
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(`A location with path "${newPath}" already exists`);
+      }
+      throw err;
+    }
+
+    return this.findOne(id);
+  }
+
+  /**
    * Delete a location.
    * Rejected if the location has any direct children (to prevent orphaned
    * sub-trees).  Items inside the location receive `locationId = null` via the
@@ -264,4 +403,22 @@ export class LocationsService {
 
     return this.prisma.location.delete({ where: { id } });
   }
+}
+
+/**
+ * Sums `_count.items` across `loc` itself and every descendant of `loc`
+ * (path equal to `loc.path`, or starting with `"${loc.path}."`) within the
+ * already-fetched flat `locations` list — see `findAll`'s doc comment.
+ */
+function recursiveItemCount(
+  path: string,
+  locations: Array<{ path: string; _count: { items: number } }>,
+): number {
+  const prefix = `${path}.`;
+  return locations.reduce((sum, other) => {
+    if (other.path === path || other.path.startsWith(prefix)) {
+      return sum + other._count.items;
+    }
+    return sum;
+  }, 0);
 }

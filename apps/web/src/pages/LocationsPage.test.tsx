@@ -99,10 +99,47 @@ describe('LocationsPage', () => {
     await user.type(input, 'Shelf 3{Enter}');
 
     await waitFor(() =>
-      expect(createLocationMock).toHaveBeenCalledWith({ name: 'Shelf 3', parentId: 'garage' }),
+      expect(createLocationMock).toHaveBeenCalledWith({
+        name: 'Shelf 3',
+        parentId: 'garage',
+        kind: 'area',
+      }),
     );
     await waitFor(() => expect(fetchLocationsMock.mock.calls.length).toBeGreaterThan(1));
     expect(await screen.findByText('Shelf 3')).toBeInTheDocument();
+  });
+
+  it('creates a container child when the Container toggle is selected (EVT-30 AC 1)', async () => {
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      loc({ id: 'garage', name: 'Garage', path: 'garage' }),
+    ]);
+    const createLocationMock = vi.spyOn(api, 'createLocation').mockResolvedValue(
+      loc({
+        id: 'box-1',
+        name: 'Tote Box',
+        path: 'garage.tote-box',
+        parentId: 'garage',
+        kind: 'container',
+      }),
+    );
+
+    renderLocationsPage();
+    const user = userEvent.setup();
+
+    await screen.findByText('Garage');
+    await user.click(screen.getByRole('button', { name: 'Add child to Garage' }));
+    await user.click(screen.getByRole('button', { name: 'Container' }));
+
+    const input = screen.getByLabelText('New child location name for Garage');
+    await user.type(input, 'Tote Box{Enter}');
+
+    await waitFor(() =>
+      expect(createLocationMock).toHaveBeenCalledWith({
+        name: 'Tote Box',
+        parentId: 'garage',
+        kind: 'container',
+      }),
+    );
   });
 
   it('adds a root location via the top-level control', async () => {
@@ -117,7 +154,11 @@ describe('LocationsPage', () => {
     await user.type(screen.getByLabelText('New root location name'), 'Garage{Enter}');
 
     await waitFor(() =>
-      expect(createLocationMock).toHaveBeenCalledWith({ name: 'Garage', parentId: undefined }),
+      expect(createLocationMock).toHaveBeenCalledWith({
+        name: 'Garage',
+        parentId: undefined,
+        kind: 'area',
+      }),
     );
   });
 

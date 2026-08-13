@@ -11,8 +11,9 @@ function node(
   itemCount: number,
   children: LocationNode[] = [],
   parentId: string | null = null,
+  kind: LocationNode['kind'] = 'area',
 ): LocationNode {
-  return { id, name, path, parentId, qrCode: `qr-${id}`, itemCount, children };
+  return { id, name, path, parentId, qrCode: `qr-${id}`, kind, itemCount, children };
 }
 
 const nodes: LocationNode[] = [
@@ -24,8 +25,9 @@ const nodes: LocationNode[] = [
       'Garage.Shelf A',
       18,
       [
-        node('bin-1', 'Bin 1', 'Garage.Shelf A.Bin 1', 6, [], 'shelf-a'),
-        node('bin-2', 'Bin 2', 'Garage.Shelf A.Bin 2', 9, [], 'shelf-a'),
+        // A movable container — distinct icon, item count rolls up its own contents (EVT-30).
+        node('bin-1', 'Bin 1', 'Garage.Shelf A.Bin 1', 6, [], 'shelf-a', 'container'),
+        node('bin-2', 'Bin 2', 'Garage.Shelf A.Bin 2', 9, [], 'shelf-a', 'container'),
       ],
       'garage',
     ),

@@ -15,6 +15,12 @@ const MOVEMENT_INCLUDE = {
   project: { select: { id: true, name: true } },
 };
 
+/** Same shape as `MOVEMENT_INCLUDE`, used for container-scoped history (EVT-30 AC 3). */
+const CONTAINER_MOVEMENT_INCLUDE = {
+  fromLocation: { select: { id: true, name: true, path: true } },
+  toLocation: { select: { id: true, name: true, path: true } },
+};
+
 const DEFAULT_PAGE_SIZE = 20;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +71,25 @@ export interface RecordConsumptionInput {
    */
   requestedQuantity: number;
   projectId?: string | null;
+  note?: string | null;
+  createdById?: string | null;
+}
+
+/**
+ * Input to `recordContainerMove` — a container ("box") re-parent (EVT-30).
+ * Unlike `RecordMovementInput`, there is no `Item` row to update: the
+ * `Location` row's `parentId`/`path` are written by
+ * `LocationsService.moveContainer` itself, in the same transaction, so this
+ * method's ONLY job is to write the single audit row (kind is always
+ * `'move'`, `delta` is always `0` — a container move never changes any
+ * quantity).
+ */
+export interface RecordContainerMoveInput {
+  containerId: string;
+  /** The location the container left. `null` when it was previously at root. */
+  fromLocationId: string | null;
+  /** The location the container arrived at. `null` when it moved to root. */
+  toLocationId: string | null;
   note?: string | null;
   createdById?: string | null;
 }
@@ -239,6 +264,48 @@ export class StockMovementsService {
   }
 
   // -------------------------------------------------------------------------
+  // recordContainerMove — the single write path for a container re-parent (EVT-30)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Writes exactly ONE `StockMovement` row for a container re-parent —
+   * `itemId: null`, `containerId` set, `kind: 'move'`, `delta: 0` (EVT-30 AC
+   * 3: "item-level histories are NOT spammed with per-item entries" — every
+   * item inside the container keeps its own `locationId` unchanged in the DB
+   * sense; only its resolved ancestry changes, via the container's `path`).
+   *
+   * Same `PrismaClientOrTx` dual-mode as `recordMovement` — accepts either
+   * the top-level `PrismaService` (opens its own `$transaction`) or an
+   * already-open `Prisma.TransactionClient` (rides along without nesting).
+   * `LocationsService.moveContainer` always calls this from inside its own
+   * transaction (the container's `Location.parentId`/`path` rewrite and this
+   * audit row must land atomically together).
+   */
+  async recordContainerMove(
+    client: PrismaClientOrTx,
+    input: RecordContainerMoveInput,
+  ): Promise<StockMovement> {
+    const run = (tx: Prisma.TransactionClient | PrismaService) =>
+      tx.stockMovement.create({
+        data: {
+          itemId: null,
+          containerId: input.containerId,
+          kind: 'move',
+          delta: 0,
+          fromLocationId: input.fromLocationId ?? null,
+          toLocationId: input.toLocationId ?? null,
+          note: input.note ?? null,
+          createdById: input.createdById ?? null,
+        },
+      });
+
+    if (isPrismaService(client)) {
+      return client.$transaction((tx) => run(tx));
+    }
+    return run(client);
+  }
+
+  // -------------------------------------------------------------------------
   // listForItem — GET /api/items/:id/movements
   // -------------------------------------------------------------------------
 
@@ -260,6 +327,48 @@ export class StockMovementsService {
         skip: (page - 1) * pageSize,
         take: pageSize,
         include: MOVEMENT_INCLUDE,
+      }),
+    ]);
+
+    return {
+      data,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // listForContainer — GET /api/locations/:id/movements (EVT-30 AC 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Paginated movement history for one container location, newest first —
+   * only the container's own re-parent events (`containerId` = this
+   * location), never a per-item entry. 404 when the location doesn't exist
+   * or is not a `container` (an `area` has no move history of its own).
+   */
+  async listForContainer(containerId: string, query: ListMovementsQueryDto) {
+    const location = await this.prisma.location.findUnique({
+      where: { id: containerId },
+      select: { id: true, kind: true },
+    });
+    if (!location || location.kind !== 'container') {
+      throw new NotFoundException(`Container ${containerId} not found`);
+    }
+
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE;
+
+    const [total, data] = await Promise.all([
+      this.prisma.stockMovement.count({ where: { containerId } }),
+      this.prisma.stockMovement.findMany({
+        where: { containerId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        include: CONTAINER_MOVEMENT_INCLUDE,
       }),
     ]);
 

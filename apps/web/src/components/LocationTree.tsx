@@ -3,6 +3,8 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import {
   Box,
   Chip,
@@ -12,17 +14,33 @@ import {
   ListItem,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
+import type { LocationKind } from '../api';
 import type { LocationNode } from '../lib/locationTree';
 import { frostedPanel } from '../theme';
 
+/**
+ * Distinct icon per `Location.kind` (EVT-30 AC 5) — a fixed `area` reads as
+ * a folder; a movable `container` reads as a box. Missing `kind` (older
+ * fixtures/tests predating EVT-30) falls back to the `area` folder icon.
+ */
+function KindIcon({ kind }: { kind?: LocationKind }) {
+  return kind === 'container' ? (
+    <Inventory2OutlinedIcon fontSize="small" color="action" aria-label="Container" />
+  ) : (
+    <FolderOutlinedIcon fontSize="small" color="action" aria-label="Area" />
+  );
+}
+
 interface LocationTreeProps {
   nodes: LocationNode[];
-  onAddChild: (parentId: string | null, name: string) => void;
+  onAddChild: (parentId: string | null, name: string, kind: LocationKind) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   depth?: number;
@@ -66,7 +84,7 @@ export function LocationTree({
 interface LocationTreeRowProps {
   node: LocationNode;
   depth: number;
-  onAddChild: (parentId: string | null, name: string) => void;
+  onAddChild: (parentId: string | null, name: string, kind: LocationKind) => void;
   onRename: (id: string, name: string) => void;
   onDelete: (id: string) => void;
   defaultExpanded: boolean;
@@ -83,6 +101,7 @@ function LocationTreeRow({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [addingChild, setAddingChild] = useState(false);
   const [childName, setChildName] = useState('');
+  const [childKind, setChildKind] = useState<LocationKind>('area');
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(node.name);
 
@@ -91,8 +110,9 @@ function LocationTreeRow({
   function submitChild() {
     const trimmed = childName.trim();
     if (!trimmed) return;
-    onAddChild(node.id, trimmed);
+    onAddChild(node.id, trimmed, childKind);
     setChildName('');
+    setChildKind('area');
     setAddingChild(false);
     setExpanded(true);
   }
@@ -124,6 +144,8 @@ function LocationTreeRow({
           >
             {expanded ? <ExpandMoreIcon fontSize="small" /> : <ChevronRightIcon fontSize="small" />}
           </IconButton>
+
+          <KindIcon kind={node.kind} />
 
           {renaming ? (
             <TextField
@@ -198,7 +220,7 @@ function LocationTreeRow({
 
       {addingChild && (
         <ListItem disableGutters sx={{ pl: (depth + 1) * 3 + 4, py: 0.5 }}>
-          <Stack direction="row" spacing={1} sx={{ width: '100%' }}>
+          <Stack direction="row" spacing={1} sx={{ width: '100%' }} alignItems="center">
             <TextField
               size="small"
               autoFocus
@@ -212,6 +234,24 @@ function LocationTreeRow({
               inputProps={{ 'aria-label': `New child location name for ${node.name}` }}
               fullWidth
             />
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={childKind}
+              onChange={(_e, value: LocationKind | null) => value && setChildKind(value)}
+              aria-label={`New child kind for ${node.name}`}
+            >
+              <ToggleButton value="area" aria-label="Area">
+                <Tooltip title="Area (fixed shelf/room)">
+                  <FolderOutlinedIcon fontSize="small" />
+                </Tooltip>
+              </ToggleButton>
+              <ToggleButton value="container" aria-label="Container">
+                <Tooltip title="Container (movable box)">
+                  <Inventory2OutlinedIcon fontSize="small" />
+                </Tooltip>
+              </ToggleButton>
+            </ToggleButtonGroup>
             <IconButton size="small" aria-label="Confirm add child" onClick={submitChild}>
               <AddIcon fontSize="small" />
             </IconButton>

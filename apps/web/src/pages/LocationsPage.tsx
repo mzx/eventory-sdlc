@@ -1,5 +1,18 @@
 import AddIcon from '@mui/icons-material/Add';
-import { Alert, Box, Button, CircularProgress, Stack, TextField, Typography } from '@mui/material';
+import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
+import {
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  Stack,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
+} from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import {
@@ -7,6 +20,7 @@ import {
   deleteLocation,
   fetchLocations,
   renameLocation,
+  type LocationKind,
   type LocationListItem,
 } from '../api';
 import { LocationTree } from '../components/LocationTree';
@@ -23,6 +37,7 @@ export function LocationsPage() {
   const queryClient = useQueryClient();
   const [addingRoot, setAddingRoot] = useState(false);
   const [rootName, setRootName] = useState('');
+  const [rootKind, setRootKind] = useState<LocationKind>('area');
   const [mutationError, setMutationError] = useState<string | null>(null);
 
   const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
@@ -32,7 +47,8 @@ export function LocationsPage() {
   }
 
   const createMutation = useMutation({
-    mutationFn: (input: { name: string; parentId?: string }) => createLocation(input),
+    mutationFn: (input: { name: string; parentId?: string; kind?: LocationKind }) =>
+      createLocation(input),
     onSuccess: () => {
       setMutationError(null);
       return invalidate();
@@ -61,15 +77,16 @@ export function LocationsPage() {
       setMutationError(err instanceof Error ? err.message : 'Failed to delete location'),
   });
 
-  function handleAddChild(parentId: string | null, name: string) {
-    createMutation.mutate({ name, parentId: parentId ?? undefined });
+  function handleAddChild(parentId: string | null, name: string, kind: LocationKind = 'area') {
+    createMutation.mutate({ name, parentId: parentId ?? undefined, kind });
   }
 
   function submitRootAdd() {
     const trimmed = rootName.trim();
     if (!trimmed) return;
-    handleAddChild(null, trimmed);
+    handleAddChild(null, trimmed, rootKind);
     setRootName('');
+    setRootKind('area');
     setAddingRoot(false);
   }
 
@@ -93,7 +110,7 @@ export function LocationsPage() {
       </Stack>
 
       {addingRoot && (
-        <Stack direction="row" spacing={1}>
+        <Stack direction="row" spacing={1} alignItems="center">
           <TextField
             size="small"
             autoFocus
@@ -107,6 +124,24 @@ export function LocationsPage() {
             inputProps={{ 'aria-label': 'New root location name' }}
             fullWidth
           />
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={rootKind}
+            onChange={(_e, value: LocationKind | null) => value && setRootKind(value)}
+            aria-label="New root location kind"
+          >
+            <ToggleButton value="area" aria-label="Area">
+              <Tooltip title="Area (fixed shelf/room)">
+                <FolderOutlinedIcon fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+            <ToggleButton value="container" aria-label="Container">
+              <Tooltip title="Container (movable box)">
+                <Inventory2OutlinedIcon fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+          </ToggleButtonGroup>
           <Button onClick={submitRootAdd} variant="contained">
             Add
           </Button>

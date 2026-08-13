@@ -135,6 +135,15 @@ export interface Tag {
   itemCount: number;
 }
 
+/**
+ * `area` — a fixed room/shelf/cabinet. `container` — a movable box/case with
+ * a "Move to…" re-parent flow (EVT-30). Optional client-side (rather than
+ * required) so existing fixtures/tests that predate EVT-30 keep compiling —
+ * every real API response always includes it; UI code that cares should
+ * treat a missing value as `'area'`.
+ */
+export type LocationKind = 'area' | 'container';
+
 /** Row shape returned by `GET /api/locations` (flat list, materialized path). */
 export interface LocationListItem {
   id: string;
@@ -142,6 +151,8 @@ export interface LocationListItem {
   path: string;
   parentId: string | null;
   qrCode: string;
+  kind?: LocationKind;
+  /** Recursive: this location's own items PLUS every descendant's (EVT-30 AC 5). */
   itemCount: number;
 }
 
@@ -361,6 +372,7 @@ export interface LocationChildRef {
   id: string;
   name: string;
   path: string;
+  kind?: LocationKind;
 }
 
 export interface LocationBreadcrumbSegment {
@@ -376,6 +388,7 @@ export interface LocationDetail {
   parentId: string | null;
   notes: string | null;
   qrCode: string;
+  kind?: LocationKind;
   children: LocationChildRef[];
   items: Array<{ id: string; name: string; primaryPhoto: { id: string; filename: string } | null }>;
   breadcrumb: LocationBreadcrumbSegment[];
@@ -385,6 +398,8 @@ export interface CreateLocationInput {
   name: string;
   parentId?: string;
   notes?: string;
+  /** Defaults to `area` server-side when omitted (EVT-30). */
+  kind?: LocationKind;
 }
 
 /** GET /api/locations — flat list ordered by path. */
@@ -416,6 +431,61 @@ export async function renameLocation(id: string, name: string): Promise<Location
 /** DELETE /api/locations/:id */
 export async function deleteLocation(id: string): Promise<void> {
   return request<void>(`/locations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * POST /api/locations/:id/move — "Move to…" (EVT-30 AC 2). Re-parents a
+ * container location; `toParentId: null` moves it to root. 400 if `id` is
+ * not a container; 422 if the destination is the container itself or one of
+ * its own descendants (AC 4); 409 on a sibling-slug path conflict at the
+ * destination.
+ */
+export async function moveLocation(id: string, toParentId: string | null): Promise<LocationDetail> {
+  return request<LocationDetail>(`/locations/${encodeURIComponent(id)}/move`, {
+    method: 'POST',
+    body: JSON.stringify({ toParentId }),
+  });
+}
+
+/** Row shape returned by `GET /api/locations/:id/movements` (EVT-30 AC 3) — a container's own re-parent history. */
+export interface ContainerMovementRow {
+  id: string;
+  containerId: string;
+  kind: StockMovementKind;
+  delta: number;
+  fromLocationId: string | null;
+  toLocationId: string | null;
+  note: string | null;
+  createdById: string | null;
+  createdAt: string;
+  fromLocation: MovementLocationRef | null;
+  toLocation: MovementLocationRef | null;
+}
+
+/** Paginated envelope returned by `GET /api/locations/:id/movements`. */
+export interface ContainerMovementsPage {
+  data: ContainerMovementRow[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface FetchContainerMovementsParams {
+  page?: number;
+  pageSize?: number;
+}
+
+/** GET /api/locations/:id/movements?page=&pageSize= — newest first. 404 when `id` is not a container. */
+export async function fetchContainerMovements(
+  id: string,
+  params: FetchContainerMovementsParams = {},
+): Promise<ContainerMovementsPage> {
+  const qs = new URLSearchParams();
+  if (params.page) qs.set('page', String(params.page));
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<ContainerMovementsPage>(`/locations/${encodeURIComponent(id)}/movements${suffix}`);
 }
 
 // ---------------------------------------------------------------------------
