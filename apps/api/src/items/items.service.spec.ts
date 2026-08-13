@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { AiService, STUB_ANALYSIS, stubAnalysis } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { TagsService } from '../tags/tags.service';
 import {
   buildSearchTerms,
@@ -65,7 +66,7 @@ function makeLocationRow(overrides: Record<string, unknown> = {}) {
 }
 
 function makePrismaMock() {
-  return {
+  const mock = {
     item: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
@@ -77,7 +78,14 @@ function makePrismaMock() {
       findUnique: jest.fn(),
     },
     $queryRaw: jest.fn(),
+    // `create`/`update` (EVT-25) run inside `this.prisma.$transaction(...)`
+    // so the movement + item writes are atomic. The mock just invokes the
+    // callback with itself as `tx` — every `tx.item.*` call inside the
+    // callback lands on the exact same jest.fn()s asserted on below.
+    $transaction: jest.fn(),
   };
+  mock.$transaction.mockImplementation((cb: (tx: typeof mock) => unknown) => cb(mock));
+  return mock;
 }
 
 function makeTagsMock() {
@@ -92,6 +100,12 @@ function makeAiServiceMock() {
   };
 }
 
+function makeStockMovementsMock() {
+  return {
+    recordMovement: jest.fn(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -101,11 +115,13 @@ describe('ItemsService', () => {
   let prismaMock: ReturnType<typeof makePrismaMock>;
   let tagsMock: ReturnType<typeof makeTagsMock>;
   let aiMock: ReturnType<typeof makeAiServiceMock>;
+  let stockMovementsMock: ReturnType<typeof makeStockMovementsMock>;
 
   beforeEach(async () => {
     prismaMock = makePrismaMock();
     tagsMock = makeTagsMock();
     aiMock = makeAiServiceMock();
+    stockMovementsMock = makeStockMovementsMock();
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -113,6 +129,7 @@ describe('ItemsService', () => {
         { provide: PrismaService, useValue: prismaMock },
         { provide: TagsService, useValue: tagsMock },
         { provide: AiService, useValue: aiMock },
+        { provide: StockMovementsService, useValue: stockMovementsMock },
       ],
     }).compile();
 
@@ -643,24 +660,84 @@ describe('ItemsService', () => {
   // =========================================================================
 
   describe('create', () => {
-    it('creates an item and returns the detail', async () => {
-      const detail = makeItemDetail();
-      prismaMock.item.create.mockResolvedValue(detail);
+    /** Default `recordMovement` stub: brings quantity up to `quantity` and returns `detail`. */
+    function stubRecordMovement(detail: ReturnType<typeof makeItemDetail>) {
+      stockMovementsMock.recordMovement.mockResolvedValue({
+        movement: { id: 'mv-1', kind: 'add' },
+        item: detail,
+      });
+    }
+
+    it('creates the row with quantity: 0 and returns the recordMovement-stocked detail', async () => {
+      const detail = makeItemDetail({ quantity: 1 });
+      prismaMock.item.create.mockResolvedValue(makeItemRow({ quantity: 0, locationId: LOC_ID }));
       tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(detail);
 
       const result = await service.create({ name: 'Cordless Drill' });
 
+      // EVT-25: quantity is never written directly at create time — the row
+      // starts at 0 and recordMovement brings it up to the requested value.
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ name: 'Cordless Drill' }),
+          data: expect.objectContaining({ name: 'Cordless Drill', quantity: 0 }),
         }),
       );
       expect(result).toBe(detail);
     });
 
+    it('EVT-25: quantity omitted defaults to 1 and records an "add" movement for that delta', async () => {
+      const created = makeItemRow({ quantity: 0, locationId: LOC_ID });
+      prismaMock.item.create.mockResolvedValue(created);
+      tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(makeItemDetail());
+
+      await service.create({ name: 'Drill' });
+
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        prismaMock, // tx === prismaMock, since $transaction invokes the callback with itself
+        expect.objectContaining({
+          itemId: created.id,
+          kind: 'add',
+          delta: 1,
+          toLocationId: LOC_ID,
+          note: 'Initial intake',
+        }),
+        expect.anything(),
+      );
+    });
+
+    it('EVT-25 AC 1: an explicit starting quantity records an "add" movement with that exact delta', async () => {
+      const created = makeItemRow({ quantity: 0 });
+      prismaMock.item.create.mockResolvedValue(created);
+      tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(makeItemDetail({ quantity: 5 }));
+
+      await service.create({ name: 'Drill', quantity: 5 });
+
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ kind: 'add', delta: 5 }),
+        expect.anything(),
+      );
+    });
+
+    it('EVT-25: a starting quantity of 0 writes no movement and returns the created row directly', async () => {
+      const created = makeItemDetail({ quantity: 0 });
+      prismaMock.item.create.mockResolvedValue(created);
+      tagsMock.upsertMany.mockResolvedValue([]);
+
+      const result = await service.create({ name: 'Drill', quantity: 0 });
+
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      expect(result).toBe(created);
+    });
+
     it('upserts tags and connects them to the item', async () => {
       tagsMock.upsertMany.mockResolvedValue([TAG_ID]);
-      prismaMock.item.create.mockResolvedValue(makeItemDetail());
+      const created = makeItemRow({ quantity: 0 });
+      prismaMock.item.create.mockResolvedValue(created);
+      stubRecordMovement(makeItemDetail());
 
       await service.create({ name: 'Drill', tags: ['power-tool'] });
 
@@ -676,8 +753,10 @@ describe('ItemsService', () => {
 
     it('sets the first photoId as primaryPhotoId', async () => {
       const photoId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-      prismaMock.item.create.mockResolvedValue(makeItemDetail({ primaryPhotoId: photoId }));
+      const created = makeItemRow({ quantity: 0, primaryPhotoId: photoId });
+      prismaMock.item.create.mockResolvedValue(created);
       tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(makeItemDetail({ primaryPhotoId: photoId }));
 
       await service.create({ name: 'Item', photoIds: [photoId] });
 
@@ -689,8 +768,10 @@ describe('ItemsService', () => {
     });
 
     it('defaults properties to {} when not provided', async () => {
-      prismaMock.item.create.mockResolvedValue(makeItemDetail());
+      const created = makeItemRow({ quantity: 0 });
+      prismaMock.item.create.mockResolvedValue(created);
       tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(makeItemDetail());
 
       await service.create({ name: 'Drill' });
 
@@ -702,7 +783,9 @@ describe('ItemsService', () => {
     });
 
     it('does not call tagsService when tags array is empty or omitted', async () => {
-      prismaMock.item.create.mockResolvedValue(makeItemDetail());
+      const created = makeItemRow({ quantity: 0 });
+      prismaMock.item.create.mockResolvedValue(created);
+      stubRecordMovement(makeItemDetail());
 
       await service.create({ name: 'Drill' });
       expect(tagsMock.upsertMany).not.toHaveBeenCalled();
@@ -717,19 +800,29 @@ describe('ItemsService', () => {
 
     it('EVT-14: stamps createdById when provided', async () => {
       const userId = '99999999-9999-9999-9999-999999999999';
-      prismaMock.item.create.mockResolvedValue(makeItemDetail({ createdById: userId }));
+      const created = makeItemRow({ quantity: 0, createdById: userId });
+      prismaMock.item.create.mockResolvedValue(created);
       tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(makeItemDetail({ createdById: userId }));
 
       await service.create({ name: 'Drill' }, userId);
 
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ createdById: userId }) }),
       );
+      // Also attributed on the movement itself.
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ createdById: userId }),
+        expect.anything(),
+      );
     });
 
     it('EVT-14: omits createdById from the write when not provided', async () => {
-      prismaMock.item.create.mockResolvedValue(makeItemDetail());
+      const created = makeItemRow({ quantity: 0 });
+      prismaMock.item.create.mockResolvedValue(created);
       tagsMock.upsertMany.mockResolvedValue([]);
+      stubRecordMovement(makeItemDetail());
 
       await service.create({ name: 'Drill' });
 
@@ -811,17 +904,32 @@ describe('ItemsService', () => {
     // omitted key leaves the relation unchanged.
     // -------------------------------------------------------------------------
 
-    it('clears locationId when explicit null is provided', async () => {
-      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
-      prismaMock.item.update.mockResolvedValue(makeItemDetail({ locationId: null }));
+    it('EVT-25 AC 4: clearing locationId with explicit null records a "move" movement (LOC_ID -> null)', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail()); // current.locationId === LOC_ID
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+      stockMovementsMock.recordMovement.mockResolvedValue({
+        movement: { id: 'mv-1', kind: 'move' },
+        item: makeItemDetail({ locationId: null }),
+      });
 
-      await service.update(ITEM_ID, { locationId: null });
+      const result = await service.update(ITEM_ID, { locationId: null });
 
-      expect(prismaMock.item.update).toHaveBeenCalledWith(
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        prismaMock,
         expect.objectContaining({
-          data: expect.objectContaining({ locationId: null }),
+          itemId: ITEM_ID,
+          kind: 'move',
+          delta: 0,
+          fromLocationId: LOC_ID,
+          toLocationId: null,
         }),
+        expect.anything(),
       );
+      // The plain scalar update no longer carries locationId directly —
+      // recordMovement is the only path that writes it (AC 2).
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data).not.toHaveProperty('locationId');
+      expect(result.locationId).toBeNull();
     });
 
     it('clears categoryId when explicit null is provided', async () => {
@@ -846,6 +954,235 @@ describe('ItemsService', () => {
       const updateCall = prismaMock.item.update.mock.calls[0][0];
       expect(updateCall.data).not.toHaveProperty('locationId');
       expect(updateCall.data).not.toHaveProperty('categoryId');
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+    });
+
+    // -------------------------------------------------------------------------
+    // EVT-25 — stock movement ledger
+    // -------------------------------------------------------------------------
+
+    describe('EVT-25: stock movement ledger', () => {
+      it('AC 2/3: quantity is never written on the plain scalar update — only via recordMovement', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'adjust' },
+          item: makeItemDetail({ quantity: 7 }),
+        });
+
+        await service.update(ITEM_ID, { quantity: 7 });
+
+        const updateCall = prismaMock.item.update.mock.calls[0][0];
+        expect(updateCall.data).not.toHaveProperty('quantity');
+      });
+
+      it('AC 3: editing quantity from N to M records an "adjust" movement with delta M-N', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'adjust', delta: 4 },
+          item: makeItemDetail({ quantity: 7 }),
+        });
+
+        const result = await service.update(ITEM_ID, { quantity: 7 });
+
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({ itemId: ITEM_ID, kind: 'adjust', delta: 4 }),
+          expect.anything(),
+        );
+        expect(result.quantity).toBe(7);
+      });
+
+      it('AC 3: a negative delta (M < N) is passed through unchanged', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 10 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 10 }));
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'adjust', delta: -6 },
+          item: makeItemDetail({ quantity: 4 }),
+        });
+
+        await service.update(ITEM_ID, { quantity: 4 });
+
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({ kind: 'adjust', delta: -6 }),
+          expect.anything(),
+        );
+      });
+
+      it('writes no movement when quantity is present in the DTO but unchanged', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 5 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 5 }));
+
+        await service.update(ITEM_ID, { quantity: 5, name: 'Same qty, new name' });
+
+        expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      });
+
+      it('AC 4: moving to a new location records a "move" movement carrying both location ids', async () => {
+        const NEW_LOC_ID = '77777777-7777-7777-7777-777777777777';
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail()); // current.locationId === LOC_ID
+        prismaMock.item.update.mockResolvedValue(makeItemDetail());
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'move' },
+          item: makeItemDetail({ locationId: NEW_LOC_ID }),
+        });
+
+        const result = await service.update(ITEM_ID, { locationId: NEW_LOC_ID });
+
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({
+            itemId: ITEM_ID,
+            kind: 'move',
+            delta: 0,
+            fromLocationId: LOC_ID,
+            toLocationId: NEW_LOC_ID,
+          }),
+          expect.anything(),
+        );
+        expect(result.locationId).toBe(NEW_LOC_ID);
+      });
+
+      it('writes no movement when locationId is present in the DTO but unchanged', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail()); // locationId === LOC_ID
+        prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+        await service.update(ITEM_ID, { locationId: LOC_ID });
+
+        expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      });
+
+      it('AC 2: a PATCH changing both quantity and locationId writes exactly one movement for each', async () => {
+        const NEW_LOC_ID = '88888888-8888-8888-8888-888888888888';
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 2 })); // locationId === LOC_ID
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 2 }));
+        stockMovementsMock.recordMovement
+          .mockResolvedValueOnce({
+            movement: { id: 'mv-adjust', kind: 'adjust' },
+            item: makeItemDetail({ quantity: 9 }),
+          })
+          .mockResolvedValueOnce({
+            movement: { id: 'mv-move', kind: 'move' },
+            item: makeItemDetail({ quantity: 9, locationId: NEW_LOC_ID }),
+          });
+
+        const result = await service.update(ITEM_ID, { quantity: 9, locationId: NEW_LOC_ID });
+
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledTimes(2);
+        expect(stockMovementsMock.recordMovement).toHaveBeenNthCalledWith(
+          1,
+          prismaMock,
+          expect.objectContaining({ kind: 'adjust', delta: 7 }),
+          expect.anything(),
+        );
+        expect(stockMovementsMock.recordMovement).toHaveBeenNthCalledWith(
+          2,
+          prismaMock,
+          expect.objectContaining({
+            kind: 'move',
+            fromLocationId: LOC_ID,
+            toLocationId: NEW_LOC_ID,
+          }),
+          expect.anything(),
+        );
+        // Final result reflects the last recordMovement call's item.
+        expect(result.quantity).toBe(9);
+        expect(result.locationId).toBe(NEW_LOC_ID);
+      });
+
+      it('attributes the movement to createdById when provided by the caller', async () => {
+        const userId = '99999999-9999-9999-9999-999999999999';
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 1 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 1 }));
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'adjust' },
+          item: makeItemDetail({ quantity: 2 }),
+        });
+
+        await service.update(ITEM_ID, { quantity: 2 }, userId);
+
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({ createdById: userId }),
+          expect.anything(),
+        );
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // EVT-25 review round 2 — race-safe quantity/location reads (finding 1)
+    // -------------------------------------------------------------------------
+
+    describe('EVT-25 review round 2: race-safe current-state read', () => {
+      // Finding 4 — regression guard proving the delta is computed from a
+      // read that happens INSIDE the transaction, not via a pre-transaction
+      // `this.findById(id)` call. A stale, pre-transaction read is exactly
+      // the shape finding 1 flagged: it leaves a window where a concurrent
+      // PATCH to the same item can commit between the read and this
+      // transaction's write. Since the test's `$transaction` mock invokes
+      // its callback with itself as `tx`, `tx.item.findUnique` and
+      // `this.prisma.item.findUnique` land on the exact same jest.fn() — so
+      // identity can't distinguish the two shapes, but invocation ORDER
+      // can: a read inside the transaction is only ever observed AFTER
+      // `$transaction` itself is invoked (its mock synchronously calls the
+      // callback), whereas a pre-transaction read would be observed first.
+      it('finding 1/4: reads current quantity/locationId via the tx client, after $transaction opens', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        stockMovementsMock.recordMovement.mockResolvedValue({
+          movement: { id: 'mv-1', kind: 'adjust' },
+          item: makeItemDetail({ quantity: 7 }),
+        });
+
+        await service.update(ITEM_ID, { quantity: 7 });
+
+        expect(prismaMock.$transaction).toHaveBeenCalled();
+        expect(prismaMock.item.findUnique).toHaveBeenCalled();
+        const transactionCallOrder = prismaMock.$transaction.mock.invocationCallOrder[0];
+        const findUniqueCallOrder = prismaMock.item.findUnique.mock.invocationCallOrder[0];
+        expect(findUniqueCallOrder).toBeGreaterThan(transactionCallOrder);
+      });
+
+      it('throws NotFoundException when the in-transaction read finds no row (item deleted concurrently)', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(null);
+        await expect(service.update(ITEM_ID, { quantity: 5 })).rejects.toThrow(NotFoundException);
+        // No writes should be attempted once the item is known missing.
+        expect(prismaMock.item.update).not.toHaveBeenCalled();
+        expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      });
+
+      // Finding 5 — failure-path atomicity: if any write inside the
+      // transaction rejects, the whole `update()` call must reject too,
+      // rather than swallowing the error and returning a partial result.
+      it('finding 5: rejects the whole update when the scalar item write fails, without recording a movement', async () => {
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        const writeError = new Error('connection reset');
+        prismaMock.item.update.mockRejectedValue(writeError);
+
+        await expect(service.update(ITEM_ID, { quantity: 9 })).rejects.toThrow(writeError);
+
+        // The quantity movement must never be recorded on its own — the
+        // ledger row and the quantity change stand or fall together.
+        expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+      });
+
+      it('finding 5: rejects the whole update when recordMovement fails, and does not apply a second movement', async () => {
+        const NEW_LOC_ID = '99999999-9999-9999-9999-999999999999';
+        prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 3 }));
+        const movementError = new Error('movement write failed');
+        stockMovementsMock.recordMovement.mockRejectedValueOnce(movementError);
+
+        await expect(
+          service.update(ITEM_ID, { quantity: 9, locationId: NEW_LOC_ID }),
+        ).rejects.toThrow(movementError);
+
+        // The failed "adjust" call is the only recordMovement call — the
+        // "move" for the locationId change must never fire after it.
+        expect(stockMovementsMock.recordMovement).toHaveBeenCalledTimes(1);
+      });
     });
   });
 
@@ -899,8 +1236,14 @@ describe('ItemsService', () => {
     it('create → list → search hit → search miss → tag filter → location filter → patch tags → delete', async () => {
       // ---- 1. CREATE -------------------------------------------------------
       const created = makeItemDetail();
-      prismaMock.item.create.mockResolvedValue(created);
+      prismaMock.item.create.mockResolvedValue(makeItemRow({ quantity: 0 }));
       tagsMock.upsertMany.mockResolvedValue([TAG_ID]);
+      // EVT-25: the default starting quantity (1) is applied via
+      // recordMovement, not the create() call itself.
+      stockMovementsMock.recordMovement.mockResolvedValue({
+        movement: { id: 'mv-1', kind: 'add' },
+        item: created,
+      });
 
       const item = await service.create({ name: 'Cordless Drill', tags: ['power-tool'] });
       expect(item.id).toBe(ITEM_ID);

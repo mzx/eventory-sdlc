@@ -4,6 +4,9 @@
 // Auth + approval workflow (EVT-14): User, ownership FKs on Item/Photo.
 // Projects + BOM (EVT-16): Project, BomLine — workshop projects with a bill of
 // materials optionally linked back to inventory items.
+// Stock movement ledger (EVT-25): StockMovement — every `Item.quantity` /
+// `Item.locationId` change is routed through `StockMovementsService.recordMovement`
+// and recorded here as an immutable audit trail (see that service's doc comment).
 
 generator client {
   provider = "prisma-client-js"
@@ -54,8 +57,12 @@ model User {
   approvedBy    User?  @relation("UserApprovals", fields: [approvedById], references: [id], onDelete: SetNull)
   approvedUsers User[] @relation("UserApprovals")
 
-  createdItems   Item[]  @relation("ItemCreatedBy")
-  uploadedPhotos Photo[] @relation("PhotoUploadedBy")
+  createdItems   Item[]          @relation("ItemCreatedBy")
+  uploadedPhotos Photo[]         @relation("PhotoUploadedBy")
+  // Stock movements this user triggered (EVT-25). Nullable on StockMovement,
+  // same rationale as Item.createdById — a deleted user's past movements
+  // keep `null` rather than vanishing (onDelete: SetNull).
+  stockMovements StockMovement[] @relation("StockMovementCreatedBy")
 
   @@index([status])
 }
@@ -74,6 +81,11 @@ model Location {
   parent   Location?  @relation("LocationHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children Location[] @relation("LocationHierarchy")
   items    Item[]
+
+  // Stock movements that departed from / arrived at this location (EVT-25).
+  // Two named relations since a single move row references both sides.
+  movementsFrom StockMovement[] @relation("StockMovementFromLocation")
+  movementsTo   StockMovement[] @relation("StockMovementToLocation")
 
   @@index([parentId])
   @@index([path])
@@ -123,18 +135,23 @@ model Item {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  location     Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  category     Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  location     Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  category     Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   // Named relation to disambiguate from the reverse Photo.item relation below,
   // since Item and Photo reference each other (primary photo vs. photo's owning item).
-  primaryPhoto Photo?    @relation("ItemPrimaryPhoto", fields: [primaryPhotoId], references: [id], onDelete: SetNull)
-  photos       Photo[]   @relation("ItemPhotos")
+  primaryPhoto Photo?          @relation("ItemPrimaryPhoto", fields: [primaryPhotoId], references: [id], onDelete: SetNull)
+  photos       Photo[]         @relation("ItemPhotos")
   tags         ItemTag[]
-  createdBy    User?     @relation("ItemCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdBy    User?           @relation("ItemCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   // Reverse side of BomLine.item (EVT-16). Deleting an item does NOT delete
   // the BOM line — see BomLine.itemId (onDelete: SetNull) — the line keeps
   // its denormalized `name`.
   bomLines     BomLine[]
+  // Full movement ledger for this item (EVT-25), newest-first via
+  // StockMovementsService.listForItem. Cascades on item delete — itemId is
+  // required (not nullable) on StockMovement, so history cannot outlive the
+  // item it describes.
+  movements    StockMovement[]
 
   @@index([locationId])
   @@index([categoryId])
@@ -200,7 +217,12 @@ model Project {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
-  bomLines BomLine[]
+  bomLines       BomLine[]
+  // Stock movements linked to this project (EVT-25) — e.g. a future BOM
+  // backflush (EVT-28) recording `consume` movements against it. Unused by
+  // this task's endpoints but the FK exists so that work doesn't need its
+  // own migration.
+  stockMovements StockMovement[]
 
   @@index([status])
 }
@@ -225,4 +247,58 @@ model BomLine {
 
   @@index([projectId])
   @@index([itemId])
+}
+
+/// The stock movement ledger (EVT-25) — on-hand (`Item.quantity`) stays the
+/// authoritative snapshot for now (see StockMovementsService doc comment on
+/// the "ledger vs. snapshot" non-goal), but every change to it is written
+/// here first, in the same transaction, so the "where did my M3 screws go?"
+/// question always has an answer.
+///
+/// - `add`     — new stock entering the system (item creation / intake).
+/// - `consume` — stock leaving via use (e.g. a future BOM backflush, EVT-28).
+/// - `move`    — relocation between locations; `delta` is typically 0.
+/// - `adjust`  — a manual correction (e.g. editing quantity in the web form).
+/// - `build`   — stock produced by completing a project (future, EVT-28).
+enum StockMovementKind {
+  add
+  consume
+  move
+  adjust
+  build
+}
+
+model StockMovement {
+  id             String            @id @default(uuid()) @db.Uuid
+  itemId         String            @db.Uuid
+  kind           StockMovementKind
+  /// Signed change applied to `Item.quantity` (positive for `add`/`build`,
+  /// negative for `consume`, either sign for `adjust`, typically 0 for a
+  /// pure `move`).
+  delta          Int
+  /// Set only on `move` — the location the item left. Null for every other kind.
+  fromLocationId String?           @db.Uuid
+  /// Set only on `move` — the location the item arrived at. Null for every other kind.
+  toLocationId   String?           @db.Uuid
+  /// Optional link to the project this movement is associated with (future
+  /// `consume`/`build` backflush, EVT-28). Unused by this task's endpoints.
+  projectId      String?           @db.Uuid
+  /// Free-text context (e.g. "Initial intake", "Manual quantity edit").
+  note           String?
+  /// Who triggered this movement. Nullable — same rationale as
+  /// `Item.createdById` (predates auth, or the user was later deleted).
+  createdById    String?           @db.Uuid
+  createdAt      DateTime          @default(now())
+
+  item         Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  fromLocation Location? @relation("StockMovementFromLocation", fields: [fromLocationId], references: [id], onDelete: SetNull)
+  toLocation   Location? @relation("StockMovementToLocation", fields: [toLocationId], references: [id], onDelete: SetNull)
+  project      Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  createdBy    User?     @relation("StockMovementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // Primary read pattern: GET /api/items/:id/movements, newest first.
+  @@index([itemId, createdAt])
+  @@index([fromLocationId])
+  @@index([toLocationId])
+  @@index([projectId])
 }

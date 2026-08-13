@@ -20,6 +20,8 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
 import { uploadThrottlerConfig } from '../common/throttle.config';
 import { PayloadTooLargeFilter } from '../photos/photo-upload.helpers';
+import { ListMovementsQueryDto } from '../stock-movements/list-movements-query.dto';
+import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { CreateItemDto } from './create-item.dto';
 import { ItemsService } from './items.service';
 import { ListItemsQueryDto } from './list-items-query.dto';
@@ -28,7 +30,10 @@ import { UpdateItemDto } from './update-item.dto';
 
 @Controller('items')
 export class ItemsController {
-  constructor(private readonly itemsService: ItemsService) {}
+  constructor(
+    private readonly itemsService: ItemsService,
+    private readonly stockMovementsService: StockMovementsService,
+  ) {}
 
   /**
    * GET /api/items?search=&tag=&locationId=
@@ -67,6 +72,19 @@ export class ItemsController {
   @Get(':id')
   findById(@Param('id', ParseUUIDPipe) id: string) {
     return this.itemsService.findById(id);
+  }
+
+  /**
+   * GET /api/items/:id/movements?page=&pageSize=
+   *
+   * Paginated stock movement history for one item, newest first (EVT-25 AC
+   * 5). Each row carries the movement `kind`, signed `delta`, from/to
+   * location names (for `move`), the linked project summary when present,
+   * and `createdAt`. 404 when the item does not exist.
+   */
+  @Get(':id/movements')
+  listMovements(@Param('id', ParseUUIDPipe) id: string, @Query() query: ListMovementsQueryDto) {
+    return this.stockMovementsService.listForItem(id, query);
   }
 
   /**
@@ -117,11 +135,17 @@ export class ItemsController {
    * PATCH /api/items/:id
    *
    * Partial update. When `tags` is provided, the tag list is fully replaced.
-   * 404 when the item does not exist.
+   * A changed `quantity` or `locationId` writes a matching `adjust`/`move`
+   * stock movement (EVT-25 AC 3/4), attributed to the caller. 404 when the
+   * item does not exist.
    */
   @Patch(':id')
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateItemDto) {
-    return this.itemsService.update(id, dto);
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itemsService.update(id, dto, user.id);
   }
 
   /**
