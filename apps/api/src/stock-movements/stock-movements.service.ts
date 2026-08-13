@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, StockMovement, StockMovementKind } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ListMovementsQueryDto } from './list-movements-query.dto';
 
@@ -115,6 +116,15 @@ export class StockMovementsService {
         include: (itemInclude ?? {}) as Include,
       });
 
+      // EVT-26: any movement (of any kind — add/consume/move/adjust/build)
+      // that leaves the item's on-hand `quantity` at or below its
+      // `minQuantity` opens a `low-stock` shopping-list entry. `minQuantity`
+      // is `null` by default (no replenishment tracking), so this is a
+      // no-op for the vast majority of items/movements.
+      if (item.minQuantity != null && item.quantity <= item.minQuantity) {
+        await openLowStockEntry(tx, input.itemId);
+      }
+
       return { movement, item: item as Prisma.ItemGetPayload<{ include: Include }> };
     };
 
@@ -165,4 +175,36 @@ export class StockMovementsService {
 /** Distinguishes the top-level `PrismaService` from an open `Prisma.TransactionClient`. */
 function isPrismaService(client: PrismaClientOrTx): client is PrismaService {
   return typeof (client as PrismaService).$transaction === 'function';
+}
+
+// ---------------------------------------------------------------------------
+// EVT-26 — low-stock auto-trigger
+// ---------------------------------------------------------------------------
+
+/**
+ * Idempotently opens a `low-stock` `ShoppingListEntry` for `itemId`, via
+ * `INSERT ... ON CONFLICT (itemId) WHERE status = 'open' DO NOTHING` against
+ * the partial unique index the EVT-26 migration adds by hand (there is no
+ * `@@unique` on `ShoppingListEntry` in schema.prisma for Prisma to derive a
+ * `.upsert()` — or a "catch P2002" `.create()` — around; see that migration
+ * file's comment for why).
+ *
+ * Deliberately raw SQL rather than "try `.create()`, catch P2002": this runs
+ * INSIDE the same transaction as the `Item`/`StockMovement` write above, and
+ * catching a unique-violation from a *failed statement* does not undo that
+ * statement's effect on the surrounding Postgres transaction — the
+ * transaction is left aborted, and every subsequent statement in it
+ * (including the movement/item write's own COMMIT) would then fail too. A
+ * plain conflict-tolerant INSERT has no such failure mode: the loser of a
+ * genuine race is a silent no-op, not an aborted transaction, so a duplicate
+ * low-stock entry can never block or fail the movement it's a side effect of
+ * (EVT-26 risk: "duplicate-entry races when several movements dip below min
+ * in quick succession").
+ */
+async function openLowStockEntry(tx: PrismaClientOrTx, itemId: string): Promise<void> {
+  await tx.$executeRaw`
+    INSERT INTO "ShoppingListEntry" (id, "itemId", status, source, "createdAt")
+    VALUES (${randomUUID()}::uuid, ${itemId}::uuid, 'open', 'low-stock', now())
+    ON CONFLICT ("itemId") WHERE status = 'open' DO NOTHING
+  `;
 }

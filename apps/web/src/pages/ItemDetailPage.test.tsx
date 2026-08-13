@@ -11,6 +11,7 @@ const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
   name: 'Cordless drill',
   description: 'Great for shelving',
   quantity: 2,
+  minQuantity: null,
   unit: 'units',
   properties: { voltage: '18V', brand: 'Bosch' },
   qrCode: 'qr-token-1',
@@ -412,6 +413,59 @@ describe('ItemDetailPage', () => {
       renderDetailPage();
 
       expect(await screen.findByText('Failed to load history')).toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // "Running low" one-tap trigger (EVT-26 AC 3)
+  // =========================================================================
+
+  describe('"Running low" (EVT-26)', () => {
+    it('shows the minimum quantity alongside on-hand quantity when set', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ minQuantity: 5 }));
+
+      renderDetailPage();
+
+      expect(await screen.findByText(/Qty: 2 units \(min 5\)/)).toBeInTheDocument();
+    });
+
+    it('does not show a minimum when unset', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ minQuantity: null }));
+
+      renderDetailPage();
+
+      await screen.findByText('Cordless drill');
+      expect(screen.queryByText(/min/)).not.toBeInTheDocument();
+    });
+
+    it('tapping "Running low" calls the API and shows a confirmation toast', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      const markMock = vi.spyOn(api, 'markRunningLow').mockResolvedValue({
+        id: 'entry-1',
+        itemId: 'item-1',
+        status: 'open',
+        source: 'manual',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        resolvedAt: null,
+        item: {
+          id: 'item-1',
+          name: 'Cordless drill',
+          quantity: 2,
+          minQuantity: null,
+          qrCode: 'qr-token-1',
+          primaryPhoto: null,
+          location: null,
+        },
+      });
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await screen.findByText('Cordless drill');
+      await user.click(screen.getByRole('button', { name: /running low/i }));
+
+      await waitFor(() => expect(markMock).toHaveBeenCalledWith('item-1'));
+      expect(await screen.findByText('Added to shopping list')).toBeInTheDocument();
     });
   });
 });

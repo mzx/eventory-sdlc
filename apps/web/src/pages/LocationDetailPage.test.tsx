@@ -42,6 +42,7 @@ function item(overrides: Partial<api.ItemListRow> = {}): api.ItemListRow {
     name: 'Cordless drill',
     description: null,
     quantity: 1,
+    minQuantity: null,
     unit: null,
     properties: {},
     qrCode: 'qr-item-1',

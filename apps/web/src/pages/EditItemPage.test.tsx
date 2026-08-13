@@ -11,6 +11,7 @@ const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
   name: 'Cordless drill',
   description: 'Great for shelving',
   quantity: 2,
+  minQuantity: null,
   unit: 'units',
   properties: { voltage: '18V' },
   qrCode: 'qr-token-1',
@@ -84,6 +85,59 @@ describe('EditItemPage', () => {
       ),
     );
     expect(await screen.findByText('detail page')).toBeInTheDocument();
+  });
+
+  // =========================================================================
+  // Minimum quantity (EVT-26)
+  // =========================================================================
+
+  it('seeds the minimum-quantity field from the item and saves a new value', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ minQuantity: 5 }));
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail({ minQuantity: 8 }));
+    const user = userEvent.setup();
+
+    renderEditPage();
+
+    const minInput = await screen.findByLabelText(/minimum quantity/i);
+    await waitFor(() => expect(minInput).toHaveValue(5));
+
+    await user.clear(minInput);
+    await user.type(minInput, '8');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ minQuantity: 8 }),
+      ),
+    );
+  });
+
+  it('clearing the minimum-quantity field sends an explicit null', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ minQuantity: 5 }));
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    const updateMock = vi.spyOn(api, 'updateItem').mockResolvedValue(detail({ minQuantity: null }));
+    const user = userEvent.setup();
+
+    renderEditPage();
+
+    const minInput = await screen.findByLabelText(/minimum quantity/i);
+    await waitFor(() => expect(minInput).toHaveValue(5));
+
+    await user.clear(minInput);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(updateMock).toHaveBeenCalledWith(
+        'item-1',
+        expect.objectContaining({ minQuantity: null }),
+      ),
+    );
   });
 
   it('uploads a new photo linked to the item', async () => {

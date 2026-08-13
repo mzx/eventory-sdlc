@@ -8,6 +8,7 @@ const baseItem: ItemListRow = {
   name: 'Cordless drill',
   description: '18V brushless driver drill',
   quantity: 1,
+  minQuantity: null,
   unit: null,
   properties: {},
   qrCode: 'demo-item.png',

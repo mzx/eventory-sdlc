@@ -44,6 +44,8 @@ function makeTxMock() {
   return {
     stockMovement: { create: jest.fn() },
     item: { update: jest.fn(), findUnique: jest.fn() },
+    // EVT-26 low-stock auto-trigger — raw `INSERT ... ON CONFLICT DO NOTHING`.
+    $executeRaw: jest.fn().mockResolvedValue(0),
   };
 }
 
@@ -319,6 +321,101 @@ describe('StockMovementsService', () => {
       expect(openTx.item.update).toHaveBeenCalled();
       // The top-level mock's $transaction was never touched.
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-26 AC 2 — the low-stock auto-trigger
+    // -----------------------------------------------------------------------
+
+    describe('EVT-26: low-stock auto-trigger', () => {
+      it('opens a low-stock entry when the resulting quantity drops to minQuantity', async () => {
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 5, minQuantity: 5 }));
+
+        await service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          delta: -2,
+        });
+
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+        // Tagged-template call: first arg is the strings array, remaining
+        // args are the interpolated values — itemId must be among them.
+        const rawArgs = tx.$executeRaw.mock.calls[0];
+        expect(rawArgs).toContain(ITEM_ID);
+      });
+
+      it('opens a low-stock entry when the resulting quantity drops BELOW minQuantity', async () => {
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -5 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 1, minQuantity: 5 }));
+
+        await service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          delta: -5,
+        });
+
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      });
+
+      it('does nothing when minQuantity is null (no replenishment tracking)', async () => {
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 0, minQuantity: null }));
+
+        await service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          delta: -2,
+        });
+
+        expect(tx.$executeRaw).not.toHaveBeenCalled();
+      });
+
+      it('does nothing when the resulting quantity is still above minQuantity', async () => {
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -1 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 6, minQuantity: 5 }));
+
+        await service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          delta: -1,
+        });
+
+        expect(tx.$executeRaw).not.toHaveBeenCalled();
+      });
+
+      it('AC 2: a further drop below minQuantity does not throw or duplicate — the raw INSERT is idempotent by construction (ON CONFLICT DO NOTHING)', async () => {
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -1 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 3, minQuantity: 5 }));
+        // Simulates the partial unique index already having an open row for
+        // this item: the statement executes (0 rows affected), never throws.
+        tx.$executeRaw.mockResolvedValue(0);
+
+        await expect(
+          service.recordMovement(asClient(prismaMock), {
+            itemId: ITEM_ID,
+            kind: 'consume',
+            delta: -1,
+          }),
+        ).resolves.toBeDefined();
+
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      });
+
+      it('checks the trigger on every movement kind, not just "consume" (e.g. a "move" that happens to already be at/under min)', async () => {
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'move', delta: 0 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 5, minQuantity: 5 }));
+
+        await service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'move',
+          delta: 0,
+          fromLocationId: FROM_LOC_ID,
+          toLocationId: TO_LOC_ID,
+        });
+
+        expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      });
     });
   });
 

@@ -7,6 +7,12 @@
 // Stock movement ledger (EVT-25): StockMovement — every `Item.quantity` /
 // `Item.locationId` change is routed through `StockMovementsService.recordMovement`
 // and recorded here as an immutable audit trail (see that service's doc comment).
+// Replenishment / personal e-kanban (EVT-26): `Item.minQuantity` + ShoppingListEntry
+// — a movement that leaves `quantity <= minQuantity` auto-opens a shopping-list
+// entry (StockMovementsService), and a one-tap "Running low" action opens a manual
+// one. At most one OPEN entry per item is enforced by a partial unique index added
+// by raw SQL in the migration (Prisma's schema DSL has no `@@unique(..., where:)`),
+// so `@@unique` is intentionally NOT declared on `ShoppingListEntry` below.
 
 generator client {
   provider = "prisma-client-js"
@@ -122,6 +128,11 @@ model Item {
   name           String
   description    String?
   quantity       Int      @default(1)
+  /// Replenishment threshold (EVT-26). `null` = no replenishment tracking for
+  /// this item. When a movement leaves `quantity <= minQuantity`, an open
+  /// `low-stock` ShoppingListEntry is created (idempotent — see
+  /// StockMovementsService.recordMovement).
+  minQuantity    Int?
   unit           String?
   /// Notion-style free-form attributes (e.g. { "voltage": "12V", "brand": "Bosch" }).
   properties     Json     @default("{}")
@@ -152,6 +163,10 @@ model Item {
   // required (not nullable) on StockMovement, so history cannot outlive the
   // item it describes.
   movements    StockMovement[]
+  // Shopping-list entries for this item (EVT-26) — at most one `open` at a
+  // time (see the partial unique index note above the imports). Cascades on
+  // item delete, same rationale as `movements`.
+  shoppingListEntries ShoppingListEntry[]
 
   @@index([locationId])
   @@index([categoryId])
@@ -301,4 +316,41 @@ model StockMovement {
   @@index([fromLocationId])
   @@index([toLocationId])
   @@index([projectId])
+}
+
+/// A shopping-list / replenishment entry (EVT-26) — the personal e-kanban.
+/// `open` entries are the shopping list; `done` entries are history.
+enum ShoppingListEntryStatus {
+  open
+  done
+}
+
+/// - `manual`    — a "Running low" one-tap action (item detail / scan landing).
+/// - `low-stock` — auto-created by `StockMovementsService.recordMovement` when
+///   a movement leaves `quantity <= minQuantity`.
+enum ShoppingListEntrySource {
+  manual
+  low_stock @map("low-stock")
+}
+
+/// At most one `open` entry per item is enforced at the database level by a
+/// partial unique index (`CREATE UNIQUE INDEX ... WHERE status = 'open'`),
+/// added via raw SQL in the migration since Prisma's schema DSL has no
+/// `@@unique(..., where:)` — see the schema-header note. That's what makes
+/// both the auto-trigger and the manual "Running low" button idempotent
+/// under concurrent/racing writes (EVT-26 risk).
+model ShoppingListEntry {
+  id         String                  @id @default(uuid()) @db.Uuid
+  itemId     String                  @db.Uuid
+  status     ShoppingListEntryStatus @default(open)
+  source     ShoppingListEntrySource
+  createdAt  DateTime                @default(now())
+  resolvedAt DateTime?
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  // Query pattern: GET /api/shopping-list (open entries, oldest first) and
+  // the per-item idempotency check both filter/sort on these.
+  @@index([itemId])
+  @@index([status, createdAt])
 }

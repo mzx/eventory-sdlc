@@ -73,6 +73,8 @@ export function EditItemPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [quantity, setQuantity] = useState(1);
+  /** Replenishment threshold (EVT-26). Empty string = no tracking (`null`). */
+  const [minQuantity, setMinQuantity] = useState('');
   const [unit, setUnit] = useState('');
   const [tags, setTags] = useState<string[]>([]);
   const [locationId, setLocationId] = useState('');
@@ -88,6 +90,7 @@ export function EditItemPage() {
       setName(item.name);
       setDescription(item.description ?? '');
       setQuantity(item.quantity);
+      setMinQuantity(item.minQuantity != null ? String(item.minQuantity) : '');
       setUnit(item.unit ?? '');
       setTags(item.tags.map((t) => t.tag.name));
       setLocationId(item.locationId ?? '');
@@ -107,6 +110,11 @@ export function EditItemPage() {
         name,
         description,
         quantity,
+        // Empty string ("no replenishment tracking") must send an explicit
+        // `null`, same undefined-vs-null convention as locationId/categoryId
+        // below — omitting the key would leave a previously-set threshold
+        // unchanged instead of clearing it.
+        minQuantity: minQuantity.trim() === '' ? null : Number(minQuantity),
         unit,
         tags,
         // Empty string ("No location"/"No category" selected) must send an
@@ -222,6 +230,15 @@ export function EditItemPage() {
         />
         <TextField label="Unit" value={unit} onChange={(e) => setUnit(e.target.value)} fullWidth />
       </Stack>
+
+      <TextField
+        label="Minimum quantity"
+        helperText="Optional. When on-hand drops to this level or below, Eventory adds it to the shopping list automatically."
+        type="number"
+        value={minQuantity}
+        onChange={(e) => setMinQuantity(e.target.value)}
+        inputProps={{ min: 0 }}
+      />
 
       <Autocomplete
         multiple
