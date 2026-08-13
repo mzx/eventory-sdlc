@@ -574,7 +574,17 @@ describe('LocationsService', () => {
     // This asserts the fix: ONE `$queryRaw` call whose SQL text contains
     // BOTH the id-array condition AND the path-prefix condition, still
     // FOR UPDATE / ORDER BY id.
-    it('acquires the container+destination+subtree lock in ONE statement (id-array OR path-prefix, FOR UPDATE, ORDER BY id)', async () => {
+    //
+    // EVT-30 round 5 (staleness regression fix): the subtree path predicate
+    // must be derived FROM THE ID inside the same statement (a `WITH c AS
+    // (SELECT path FROM "Location" WHERE id = ...)` CTE joined against the
+    // base table) rather than an interpolated path value read outside the
+    // lock — otherwise a concurrent move/rename between the pre-read and
+    // the lock leaves the path predicate stale. Assert the CTE shape,
+    // `FOR UPDATE OF l` (never locking the CTE), `ORDER BY l.id`, and —
+    // critically — that NO path string is ever interpolated as a query
+    // parameter; only ids are bound.
+    it('acquires the container+destination+subtree lock in ONE statement, deriving the subtree path from id in-statement (CTE, FOR UPDATE OF l, ORDER BY l.id, no interpolated path)', async () => {
       const box = makeLocation({
         id: 'box-1',
         name: 'Tote Box',
@@ -604,17 +614,21 @@ describe('LocationsService', () => {
 
       expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
       const [lockQuery] = txClient.$queryRaw.mock.calls[0] as [Prisma.Sql];
-      expect(lockQuery.sql).toContain('FOR UPDATE');
-      expect(lockQuery.sql).toContain('ORDER BY id');
+      expect(lockQuery.sql).toContain('FOR UPDATE OF l');
+      expect(lockQuery.sql).toContain('ORDER BY l.id');
       expect(lockQuery.sql).toContain('id = ANY(ARRAY[');
       expect(lockQuery.sql).toContain('::uuid[]');
-      expect(lockQuery.sql).toContain('path =');
-      expect(lockQuery.sql).toContain('path LIKE');
-      // Interpolated params: the sorted, deduped lock ids first, then the
-      // container's own (pre-transaction-read) path twice — `path = <old>`
-      // (the container's own row) OR `path LIKE <old> || '.%'` (every
-      // descendant).
-      expect(lockQuery.values).toEqual(['box-1', 'shelf-2', 'garage.box-1', 'garage.box-1']);
+      // The subtree predicate is derived from the `c` CTE, not an
+      // interpolated path literal.
+      expect(lockQuery.sql).toContain('WITH c AS');
+      expect(lockQuery.sql).toContain('l.path = c.path');
+      expect(lockQuery.sql).toContain('l.path LIKE c.path');
+      // Interpolated params: the CTE's own id lookup, then the sorted,
+      // deduped lock ids — ALL of them ids, never a path value.
+      expect(lockQuery.values).toEqual(['box-1', 'box-1', 'shelf-2']);
+      for (const value of lockQuery.values) {
+        expect(value).not.toContain('.'); // a path would contain a "." segment separator
+      }
     });
 
     // Test-reviewer cheap win: prove the lock ids are actually sorted
@@ -651,9 +665,13 @@ describe('LocationsService', () => {
       const [lockQuery] = txClient.$queryRaw.mock.calls[0] as [Prisma.Sql];
       // Called as moveContainer('zzz-box', 'aaa-shelf') — argument order is
       // [zzz-box, aaa-shelf], but the ascending-id lock discipline the fix
-      // relies on requires the interpolated array to be sorted, so the
-      // FIRST two values must come back alphabetically ascending.
-      expect(lockQuery.values.slice(0, 2)).toEqual(['aaa-shelf', 'zzz-box']);
+      // relies on requires the interpolated `id = ANY(ARRAY[...])` array to
+      // be sorted. The FIRST value is the CTE's own id-lookup parameter
+      // (round 5 — always the container's own id, unsorted since it's a
+      // singleton); the NEXT two values are the lock-id array and must come
+      // back alphabetically ascending regardless of call-argument order.
+      expect(lockQuery.values[0]).toBe('zzz-box');
+      expect(lockQuery.values.slice(1, 3)).toEqual(['aaa-shelf', 'zzz-box']);
     });
 
     it('rewrites descendant paths via the same SUBSTRING-based $executeRaw as rename', async () => {
@@ -893,10 +911,19 @@ describe('LocationsService', () => {
       });
       const finalDetail = { ...box, path: 'garage.shelf-2.box-1', children: [], items: [] };
 
+      // EVT-30 round 5 (staleness regression fix): the fast-fail
+      // container/destination reads now happen fresh at the top of EVERY
+      // attempt, not once before the loop — so each of the 3 attempts below
+      // (2 failed + 1 that succeeds) re-reads self + destination, followed
+      // by one final read inside `findOne()` once the transaction commits.
       locationMock.findUnique
-        .mockResolvedValueOnce(box)
-        .mockResolvedValueOnce({ id: 'shelf-2' })
-        .mockResolvedValueOnce(finalDetail);
+        .mockResolvedValueOnce(box) // attempt 0: self (fresh per-attempt read)
+        .mockResolvedValueOnce({ id: 'shelf-2' }) // attempt 0: destination
+        .mockResolvedValueOnce(box) // attempt 1: self
+        .mockResolvedValueOnce({ id: 'shelf-2' }) // attempt 1: destination
+        .mockResolvedValueOnce(box) // attempt 2: self
+        .mockResolvedValueOnce({ id: 'shelf-2' }) // attempt 2: destination
+        .mockResolvedValueOnce(finalDetail); // findOne() after the transaction succeeds
       txClient.$queryRaw.mockResolvedValue([
         lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage', name: 'Tote Box' }),
         lockedRow({ id: 'shelf-2', path: 'garage.shelf-2', parentId: 'garage', kind: 'area' }),
@@ -926,6 +953,12 @@ describe('LocationsService', () => {
       // itself was retried, not just re-thrown.
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
       expect(result).toMatchObject({ id: 'box-1', path: 'garage.shelf-2.box-1' });
+      // Belt-and-braces (round 5): the container's fast-fail state is
+      // re-read fresh on every attempt, so the plain `findUnique` call
+      // count grows with the number of attempts (2 reads/attempt × 3
+      // attempts + 1 final `findOne()` read = 7), not a flat count fixed
+      // at "once before the loop".
+      expect(locationMock.findUnique).toHaveBeenCalledTimes(7);
     });
 
     it('gives up after the retry budget and maps a persistent P2034 to 409 Conflict, never an unhandled 500', async () => {
@@ -937,7 +970,15 @@ describe('LocationsService', () => {
         kind: 'container',
       });
 
-      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce({ id: 'shelf-2' });
+      // EVT-30 round 5: the fast-fail self/destination reads happen fresh
+      // on EVERY attempt now (not once before the loop), so this needs to
+      // keep answering across all 5 attempts, not just the first — matched
+      // by `where.id` rather than a fixed positional queue since the exact
+      // call count depends on `MAX_MOVE_RETRIES`.
+      locationMock.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+        if (where.id === 'shelf-2') return { id: 'shelf-2' };
+        return box;
+      });
       prismaMock.$transaction.mockRejectedValue(p2034Error());
 
       await expect(service.moveContainer('box-1', 'shelf-2')).rejects.toBeInstanceOf(
@@ -946,6 +987,10 @@ describe('LocationsService', () => {
       // Bounded — matches `recordConsumption`'s retry bound (5) in
       // stock-movements.service.ts, not an unbounded/single-shot retry.
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(5);
+      // Belt-and-braces (round 5): 2 fresh reads (self + destination) per
+      // attempt × 5 attempts = 10 — the per-attempt re-read count grows
+      // in lockstep with the retry count instead of staying flat at 2.
+      expect(locationMock.findUnique).toHaveBeenCalledTimes(10);
     });
   });
 

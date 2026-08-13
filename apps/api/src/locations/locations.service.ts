@@ -311,12 +311,47 @@ export class LocationsService {
    * `id = ANY(...) OR path = <old> OR path LIKE <old> || '.%'` — so the
    * whole union set (container + destination + entire subtree) is locked
    * in a single ascending-id sweep, restoring the deterministic global lock
-   * order two concurrent movers rely on to avoid deadlocking. `<old>` here
-   * is the container's path as read by the pre-transaction fast-fail lookup
-   * above — it only seeds which rows this one statement locks; every
-   * decision this method makes afterwards (the cycle check, the new path,
-   * the descendant rewrite) always uses the FRESH, post-lock
-   * `freshContainer.path` instead, never this pre-lock hint.
+   * order two concurrent movers rely on to avoid deadlocking.
+   *
+   * Staleness fix (EVT-30 round 5 — code + security reviewers, round 4's
+   * lock query interpolated `location.path` from a plain, non-locked
+   * `findUnique` read taken ONCE, before the retry loop, and never
+   * refreshed. If the container's path changed between that pre-read and
+   * the lock — a concurrent move of the SAME container, or an ancestor
+   * `rename` (which takes no locks) — the interpolated path predicate
+   * matched nothing: only {container, destination} got locked by the
+   * `id = ANY(...)` arm, while the `path = <stale>` / `path LIKE <stale>
+   * || '.%'` arms silently locked zero subtree rows. The later SUBSTRING
+   * rewrite (which correctly uses the FRESH, post-lock
+   * `freshContainer.path`) would then rewrite descendants it never
+   * locked — a lost-update / corrupted-materialized-path window. Retries
+   * made it worse: every P2034 retry re-seeded the SAME stale path, so the
+   * bug didn't self-heal across attempts.
+   *
+   * Fixed by deriving the subtree predicate INSIDE the locking statement
+   * itself, keyed only by the container's id — never by an interpolated
+   * path value — via a `WITH c AS (SELECT path FROM "Location" WHERE
+   * id = ...)` CTE joined against the base table. Because `c.path` is read
+   * in the exact same statement (and hence the same MVCC snapshot) that
+   * acquires the row locks, there is no window between "read the path" and
+   * "lock the rows" for a concurrent writer to invalidate it — the two
+   * happen atomically as far as this statement is concerned. `FOR UPDATE
+   * OF l` locks only the base-table alias, never the (unlockable) CTE.  If
+   * the container row has since been deleted, `c` yields zero rows; since
+   * `FROM "Location" l, c` is an implicit inner join, the WHOLE result set
+   * — including the `id = ANY(...)` arm — comes back empty, and the
+   * subsequent `lockedById.get(id)` miss below correctly falls through to
+   * `NotFoundException`, matching the pre-fix behavior for that case.
+   *
+   * Belt-and-braces (round 5, security reviewer): the container's fast-fail
+   * state (existence, `kind`, destination existence, the no-op short
+   * circuit) is now re-read fresh at the top of EVERY retry attempt, not
+   * just once before the loop — so a P2034 retry never reasons from
+   * attempt-0's now-possibly-stale snapshot. This is still only a
+   * fast-fail convenience, exactly like the original pre-loop reads it
+   * replaces: the actual subtree lock and its path predicate are derived
+   * from the SAME in-transaction snapshot via the CTE above, which is the
+   * real fix; this per-attempt re-read is defense in depth on top of it.
    *
    * P2034 resilience (EVT-30 round 4): even with correct lock ordering,
    * transient serialization conflicts between overlapping subtree locks
@@ -335,54 +370,66 @@ export class LocationsService {
     toParentId: string | null,
     createdById?: string,
   ): Promise<LocationDetail> {
-    const location = await this.prisma.location.findUnique({ where: { id } });
-    if (!location) {
-      throw new NotFoundException(`Location ${id} not found`);
-    }
-    if (location.kind !== 'container') {
-      throw new BadRequestException(
-        `Only container locations can be moved; "${location.name}" is an area. Area locations keep the existing add/rename/delete flows.`,
-      );
-    }
-    if (toParentId === id) {
-      throw new UnprocessableEntityException(`Cannot move "${location.name}" into itself`);
-    }
-
-    if (toParentId) {
-      const parentExists = await this.prisma.location.findUnique({
-        where: { id: toParentId },
-        select: { id: true },
-      });
-      if (!parentExists) {
-        throw new NotFoundException(`Location ${toParentId} not found`);
-      }
-    }
-
-    // Already at the requested destination — fast-path no-op that skips
-    // opening a transaction. This is only a convenience short-circuit for
-    // the common case; it is NOT relied on for correctness — the real
-    // no-op/cycle checks are re-run against locked reads inside the
-    // transaction below, since this outer `location.parentId` read can be
-    // stale by the time we'd act on it.
-    if ((toParentId ?? null) === location.parentId) {
-      return this.findOne(id);
-    }
-
     // Bounded retry: a transaction that aborts with Prisma P2034 (Postgres
     // serialization failure / deadlock victim) is safe to retry outright —
     // it made no committed writes — see the doc comment above for why this
-    // remains possible even with the single-statement lock below.
+    // remains possible even with the single-statement lock below. Every
+    // fast-fail pre-check (container existence/kind, destination existence,
+    // the already-at-destination no-op) is INSIDE this loop and re-reads
+    // fresh state on every attempt (round 5 belt-and-braces, see doc
+    // comment above) rather than trusting a single read taken once before
+    // the first attempt.
     for (let attempt = 0; ; attempt++) {
+      const location = await this.prisma.location.findUnique({ where: { id } });
+      if (!location) {
+        throw new NotFoundException(`Location ${id} not found`);
+      }
+      if (location.kind !== 'container') {
+        throw new BadRequestException(
+          `Only container locations can be moved; "${location.name}" is an area. Area locations keep the existing add/rename/delete flows.`,
+        );
+      }
+      if (toParentId === id) {
+        throw new UnprocessableEntityException(`Cannot move "${location.name}" into itself`);
+      }
+
+      if (toParentId) {
+        const parentExists = await this.prisma.location.findUnique({
+          where: { id: toParentId },
+          select: { id: true },
+        });
+        if (!parentExists) {
+          throw new NotFoundException(`Location ${toParentId} not found`);
+        }
+      }
+
+      // Already at the requested destination — fast-path no-op that skips
+      // opening a transaction. This is only a convenience short-circuit for
+      // the common case; it is NOT relied on for correctness — the real
+      // no-op/cycle checks are re-run against locked reads inside the
+      // transaction below, since this outer `location.parentId` read can be
+      // stale by the time we'd act on it.
+      if ((toParentId ?? null) === location.parentId) {
+        return this.findOne(id);
+      }
+
       try {
         await this.prisma.$transaction(async (tx) => {
           // Single-statement lock over the UNION of (a) the container and
           // destination rows, by id, and (b) the container's entire
           // subtree, by path prefix — see the doc comment above for why
-          // this MUST be one statement rather than two. `ORDER BY id`
+          // this MUST be one statement rather than two. `ORDER BY l.id`
           // makes the whole union set's acquisition order deterministic,
           // so two concurrent movers that touch overlapping rows always
           // request their locks in the same relative order and block
           // instead of deadlocking.
+          //
+          // The subtree path predicate is derived from `id` INSIDE this
+          // statement via the `c` CTE (EVT-30 round 5) — never from an
+          // interpolated path value read outside the lock — so it reflects
+          // the exact snapshot this statement locks, not a possibly-stale
+          // pre-read. `FOR UPDATE OF l` locks only the base-table alias;
+          // the CTE itself is not lockable.
           //
           // `= ANY(ARRAY[...]::uuid[])`, not a bare `IN (...)` (EVT-30
           // round 3 regression, caught by the new locations.e2e-spec.ts
@@ -404,13 +451,16 @@ export class LocationsService {
               name: string;
             }>
           >(Prisma.sql`
-            SELECT id, path, "parentId", kind, name
-            FROM "Location"
-            WHERE id = ANY(ARRAY[${Prisma.join(lockIds)}]::uuid[])
-               OR path = ${location.path}
-               OR path LIKE ${location.path} || '.%'
-            ORDER BY id
-            FOR UPDATE
+            WITH c AS (
+              SELECT path FROM "Location" WHERE id = ${id}::uuid
+            )
+            SELECT l.id, l.path, l."parentId", l.kind, l.name
+            FROM "Location" l, c
+            WHERE l.id = ANY(ARRAY[${Prisma.join(lockIds)}]::uuid[])
+               OR l.path = c.path
+               OR l.path LIKE c.path || '.%'
+            ORDER BY l.id
+            FOR UPDATE OF l
           `);
           const lockedById = new Map(lockedRows.map((row) => [row.id, row]));
 
