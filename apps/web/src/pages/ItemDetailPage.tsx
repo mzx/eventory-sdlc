@@ -6,6 +6,7 @@ import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
 import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
 import TuneIcon from '@mui/icons-material/Tune';
+import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined';
 import {
   Alert,
   Box,
@@ -39,6 +40,7 @@ import {
   deleteItem,
   fetchItem,
   fetchItemMovements,
+  markRunningLow,
   photoUrl,
   type ItemDetail,
   type PhotoRef,
@@ -178,6 +180,22 @@ export function ItemDetailPage() {
     },
   });
 
+  // "Running low" — one-tap manual shopping-list trigger (EVT-26 AC 3). This
+  // is the same action offered on the scan-landing page — a scanned item QR
+  // redirects here (see ScanPage), so this one button covers both spots the
+  // task calls out rather than duplicating it on a page that immediately
+  // navigates away.
+  const [runningLowToastOpen, setRunningLowToastOpen] = useState(false);
+  const runningLowMutation = useMutation({
+    mutationFn: () => markRunningLow(id as string),
+    onSuccess: () => {
+      // The nav badge (AC 6) and the Shopping List page (AC 4) both read
+      // this query key.
+      queryClient.invalidateQueries({ queryKey: ['shopping-list'] });
+      setRunningLowToastOpen(true);
+    },
+  });
+
   if (itemQuery.isLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
@@ -222,12 +240,24 @@ export function ItemDetailPage() {
           <Typography variant="body1" color="text.secondary">
             Qty: {item.quantity}
             {item.unit ? ` ${item.unit}` : ''}
+            {item.minQuantity != null && ` (min ${item.minQuantity})`}
           </Typography>
           {item.description && (
             <Typography variant="body2" sx={{ mt: 1 }}>
               {item.description}
             </Typography>
           )}
+          <Button
+            size="small"
+            variant="outlined"
+            color="warning"
+            startIcon={<WarningAmberOutlinedIcon fontSize="small" />}
+            onClick={() => runningLowMutation.mutate()}
+            disabled={runningLowMutation.isPending}
+            sx={{ mt: 1 }}
+          >
+            Running low
+          </Button>
         </Box>
         <Stack direction="row" spacing={1}>
           <Button
@@ -448,6 +478,25 @@ export function ItemDetailPage() {
             }}
           >
             Print QR
+          </Button>
+        }
+      />
+
+      <Snackbar
+        open={runningLowToastOpen}
+        autoHideDuration={4000}
+        onClose={() => setRunningLowToastOpen(false)}
+        message="Added to shopping list"
+        action={
+          <Button
+            color="inherit"
+            size="small"
+            onClick={() => {
+              setRunningLowToastOpen(false);
+              navigate('/shopping-list');
+            }}
+          >
+            View
           </Button>
         }
       />

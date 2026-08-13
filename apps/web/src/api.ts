@@ -107,6 +107,8 @@ export interface ItemListRow {
   name: string;
   description: string | null;
   quantity: number;
+  /** Replenishment threshold (EVT-26). `null` = no replenishment tracking. */
+  minQuantity: number | null;
   unit: string | null;
   properties: Record<string, unknown>;
   qrCode: string;
@@ -256,6 +258,11 @@ export interface UpdateItemInput {
   name?: string;
   description?: string;
   quantity?: number;
+  /**
+   * Replenishment threshold (EVT-26). `undefined` (omitted) leaves it
+   * unchanged; `null` clears it back to "no replenishment tracking".
+   */
+  minQuantity?: number | null;
   unit?: string;
   properties?: Record<string, unknown>;
   /** `undefined` (omitted) leaves the relation unchanged; `null` clears it. */
@@ -747,5 +754,72 @@ export async function updateUserRole(id: string, role: UserRole): Promise<AdminU
   return request<AdminUserRow>(`/users/${encodeURIComponent(id)}/role`, {
     method: 'PATCH',
     body: JSON.stringify({ role }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// shopping list / min-level replenishment (EVT-26)
+// ---------------------------------------------------------------------------
+
+export type ShoppingListEntryStatus = 'open' | 'done';
+
+/**
+ * `manual` — the "Running low" one-tap action.
+ * `low_stock` — auto-created when a movement leaves `quantity <= minQuantity`.
+ * (The API's Prisma enum maps this client-facing name to the `'low-stock'`
+ * value stored in Postgres — see apps/api schema.prisma — but every JSON
+ * response uses this underscored form.)
+ */
+export type ShoppingListEntrySource = 'manual' | 'low_stock';
+
+/** Item summary embedded on a shopping-list entry (EVT-26 AC 4). */
+export interface ShoppingListItemRef {
+  id: string;
+  name: string;
+  quantity: number;
+  minQuantity: number | null;
+  qrCode: string;
+  primaryPhoto: PhotoRef | null;
+  location: LocationRef | null;
+}
+
+/** Row shape returned by `GET /api/shopping-list`. */
+export interface ShoppingListEntry {
+  id: string;
+  itemId: string;
+  status: ShoppingListEntryStatus;
+  source: ShoppingListEntrySource;
+  createdAt: string;
+  resolvedAt: string | null;
+  item: ShoppingListItemRef;
+}
+
+/** GET /api/shopping-list — open entries, oldest first. */
+export async function fetchShoppingList(): Promise<ShoppingListEntry[]> {
+  return request<ShoppingListEntry[]>('/shopping-list');
+}
+
+/**
+ * POST /api/shopping-list — the "Running low" one-tap action (EVT-26 AC 3).
+ * Idempotent: returns the item's existing open entry if it already has one.
+ */
+export async function markRunningLow(itemId: string): Promise<ShoppingListEntry> {
+  return request<ShoppingListEntry>('/shopping-list', {
+    method: 'POST',
+    body: JSON.stringify({ itemId }),
+  });
+}
+
+/**
+ * POST /api/shopping-list/:id/restock — records an `add` movement for the
+ * counted quantity and closes the entry (EVT-26 AC 5).
+ */
+export async function restockShoppingListEntry(
+  entryId: string,
+  quantity: number,
+): Promise<ShoppingListEntry> {
+  return request<ShoppingListEntry>(`/shopping-list/${encodeURIComponent(entryId)}/restock`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity }),
   });
 }

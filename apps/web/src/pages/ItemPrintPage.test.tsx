@@ -10,6 +10,7 @@ const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
   name: 'Cordless drill',
   description: 'Great for shelving',
   quantity: 2,
+  minQuantity: null,
   unit: 'units',
   properties: { voltage: '18V' },
   qrCode: 'qr-token-1',

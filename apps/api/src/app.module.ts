@@ -15,6 +15,7 @@ import { PhotosModule } from './photos/photos.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProjectsModule } from './projects/projects.module';
 import { QrModule } from './qr/qr.module';
+import { ShoppingListModule } from './shopping-list/shopping-list.module';
 import { TagsModule } from './tags/tags.module';
 import { UsersModule } from './users/users.module';
 
@@ -38,6 +39,7 @@ import { UsersModule } from './users/users.module';
     AiModule,
     PhotosModule,
     ProjectsModule,
+    ShoppingListModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

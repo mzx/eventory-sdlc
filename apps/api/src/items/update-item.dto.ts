@@ -28,6 +28,16 @@ export class UpdateItemDto {
   @Min(0)
   quantity?: number;
 
+  /**
+   * Replenishment threshold (EVT-26). `undefined` (key omitted) leaves it
+   * unchanged; explicit `null` clears it back to "no replenishment
+   * tracking" — same undefined-vs-null convention as `locationId` below.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  minQuantity?: number | null;
+
   @IsOptional()
   @IsString()
   unit?: string;
