@@ -50,6 +50,8 @@ describe('ProjectsController', () => {
     addBomLine: jest.fn(),
     updateBomLine: jest.fn(),
     removeBomLine: jest.fn(),
+    previewBackflush: jest.fn(),
+    backflush: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -180,6 +182,35 @@ describe('ProjectsController', () => {
       await controller.removeBomLine('project-1', 'line-1');
 
       expect(serviceMock.removeBomLine).toHaveBeenCalledWith('project-1', 'line-1');
+    });
+  });
+
+  // ── previewBackflush (EVT-28) ────────────────────────────────────────────
+
+  describe('GET /projects/:id/backflush-preview (previewBackflush)', () => {
+    it('delegates to ProjectsService.previewBackflush with the id', async () => {
+      const preview = { projectId: 'project-1', alreadyBackflushed: false, lines: [] };
+      serviceMock.previewBackflush.mockResolvedValue(preview);
+
+      const result = await controller.previewBackflush('project-1');
+
+      expect(serviceMock.previewBackflush).toHaveBeenCalledWith('project-1');
+      expect(result).toBe(preview);
+    });
+  });
+
+  // ── backflush (EVT-28) ───────────────────────────────────────────────────
+
+  describe('POST /projects/:id/backflush (backflush)', () => {
+    it('delegates to ProjectsService.backflush with id and body', async () => {
+      const body = { lines: [{ lineId: 'line-1', consumeQuantity: 2 }] };
+      const response = { project: makeProject({ status: 'completed' }), consumed: [] };
+      serviceMock.backflush.mockResolvedValue(response);
+
+      const result = await controller.backflush('project-1', body);
+
+      expect(serviceMock.backflush).toHaveBeenCalledWith('project-1', body);
+      expect(result).toBe(response);
     });
   });
 });

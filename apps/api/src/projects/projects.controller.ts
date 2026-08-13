@@ -11,6 +11,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { BackflushDto } from './backflush.dto';
 import { CreateBomLineDto } from './create-bom-line.dto';
 import { CreateProjectDto } from './create-project.dto';
 import { ListProjectsQueryDto } from './list-projects-query.dto';
@@ -82,5 +83,27 @@ export class ProjectsController {
     @Param('lineId', ParseUUIDPipe) lineId: string,
   ): Promise<void> {
     return this.projectsService.removeBomLine(id, lineId);
+  }
+
+  /**
+   * GET /api/projects/:id/backflush-preview — read-only confirmation-screen
+   * data for completing a project (EVT-28 AC 1): per-line on-hand,
+   * suggested consume quantity, shortage flags, and whether this project was
+   * already backflushed (idempotency guard, AC 6).
+   */
+  @Get(':id/backflush-preview')
+  previewBackflush(@Param('id', ParseUUIDPipe) id: string) {
+    return this.projectsService.previewBackflush(id);
+  }
+
+  /**
+   * POST /api/projects/:id/backflush — confirms the backflush: writes one
+   * `build` movement per consumed line and marks the project `completed`,
+   * atomically (EVT-28 AC 2). 409s if already backflushed unless
+   * `confirmAgain` is set (AC 6).
+   */
+  @Post(':id/backflush')
+  backflush(@Param('id', ParseUUIDPipe) id: string, @Body() dto: BackflushDto) {
+    return this.projectsService.backflush(id, dto);
   }
 }

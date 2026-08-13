@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,7 @@ function project(overrides: Partial<api.ProjectDetail> = {}): api.ProjectDetail 
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     bomLines: [],
+    consumed: [],
     ...overrides,
   };
 }
@@ -36,6 +37,50 @@ function bomLine(overrides: Partial<api.BomLine> = {}): api.BomLine {
     item: null,
     ...overrides,
   };
+}
+
+function previewLine(overrides: Partial<api.BackflushPreviewLine> = {}): api.BackflushPreviewLine {
+  return {
+    lineId: 'line-1',
+    itemId: 'item-1',
+    name: 'Cordless drill',
+    quantity: 3,
+    unit: null,
+    onHand: 5,
+    suggestedConsumeQuantity: 3,
+    shortage: false,
+    skipped: false,
+    ...overrides,
+  };
+}
+
+function preview(overrides: Partial<api.BackflushPreview> = {}): api.BackflushPreview {
+  return {
+    projectId: 'project-1',
+    alreadyBackflushed: false,
+    lines: [previewLine()],
+    ...overrides,
+  };
+}
+
+function consumedMovement(overrides: Partial<api.ConsumedMovement> = {}): api.ConsumedMovement {
+  return {
+    id: 'mv-1',
+    itemId: 'item-1',
+    kind: 'build',
+    delta: -2,
+    projectId: 'project-1',
+    note: 'Backflush: project completion',
+    createdAt: '2026-02-01T00:00:00.000Z',
+    item: { id: 'item-1', name: 'Cordless drill', qrCode: 'qr-1' },
+    ...overrides,
+  };
+}
+
+/** Opens the Status select and picks the given option label. */
+async function selectStatus(user: ReturnType<typeof userEvent.setup>, label: string) {
+  await user.click(screen.getByLabelText('Status'));
+  await user.click(await screen.findByRole('option', { name: label }));
 }
 
 function item(overrides: Partial<api.ItemListRow> = {}): api.ItemListRow {
@@ -315,5 +360,248 @@ describe('ProjectDetailPage', () => {
     await user.click(screen.getByRole('button', { name: 'Delete project' }));
 
     await waitFor(() => expect(deleteProjectMock).toHaveBeenCalledWith('project-1'));
+  });
+
+  // ── backflush — build completion consumes BOM stock (EVT-28) ────────────
+
+  describe('backflush confirmation (EVT-28)', () => {
+    it('selecting Completed with an item-linked BOM line shows the confirmation screen (AC 1)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ lines: [previewLine({ quantity: 3, onHand: 5 })] }),
+      );
+      const updateProjectMock = vi.spyOn(api, 'updateProject');
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+
+      await selectStatus(user, 'Completed');
+
+      expect(
+        await screen.findByText('Complete project — confirm stock consumption'),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Cordless drill')).toBeInTheDocument();
+      expect(screen.getByLabelText('Consume quantity for Cordless drill')).toHaveValue(3);
+      // The plain status PATCH must not fire — only the backflush confirm does.
+      expect(updateProjectMock).not.toHaveBeenCalled();
+    });
+
+    it('shortage lines are highlighted (AC 4)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 5 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ lines: [previewLine({ quantity: 5, onHand: 2, shortage: true })] }),
+      );
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      await screen.findByText('Complete project — confirm stock consumption');
+      expect(screen.getByText('Shortage')).toBeInTheDocument();
+    });
+
+    it('free-text lines are listed as skipped, not editable (AC 3)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({
+          bomLines: [
+            bomLine({ id: 'line-1', itemId: 'item-1', quantity: 3 }),
+            bomLine({ id: 'line-2', itemId: null, name: '2x4 lumber' }),
+          ],
+        }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({
+          lines: [
+            previewLine({ lineId: 'line-1' }),
+            previewLine({
+              lineId: 'line-2',
+              itemId: null,
+              name: '2x4 lumber',
+              onHand: null,
+              suggestedConsumeQuantity: 0,
+              skipped: true,
+            }),
+          ],
+        }),
+      );
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      const dialog = within(await screen.findByRole('dialog'));
+      await dialog.findByText('Not tracked — skipped:');
+      expect(dialog.getByText('2x4 lumber')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Consume quantity for 2x4 lumber')).not.toBeInTheDocument();
+    });
+
+    it('confirming calls confirmBackflush with the (editable) per-line quantities and closes the dialog (AC 2)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ lines: [previewLine({ lineId: 'line-1', quantity: 3, onHand: 5 })] }),
+      );
+      const confirmBackflushMock = vi.spyOn(api, 'confirmBackflush').mockResolvedValue({
+        project: project({ status: 'completed' }),
+        consumed: [],
+      });
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      const qtyInput = await screen.findByLabelText('Consume quantity for Cordless drill');
+      await user.clear(qtyInput);
+      await user.type(qtyInput, '2');
+
+      await user.click(screen.getByRole('button', { name: 'Confirm' }));
+
+      await waitFor(() =>
+        expect(confirmBackflushMock).toHaveBeenCalledWith('project-1', {
+          lines: [{ lineId: 'line-1', consumeQuantity: 2 }],
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          screen.queryByText('Complete project — confirm stock consumption'),
+        ).not.toBeInTheDocument(),
+      );
+    });
+
+    it('cancelling the dialog writes nothing', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(preview());
+      const confirmBackflushMock = vi.spyOn(api, 'confirmBackflush');
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      await screen.findByText('Complete project — confirm stock consumption');
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() =>
+        expect(
+          screen.queryByText('Complete project — confirm stock consumption'),
+        ).not.toBeInTheDocument(),
+      );
+      expect(confirmBackflushMock).not.toHaveBeenCalled();
+    });
+
+    it('a project with no item-linked BOM lines completes directly, without the confirmation screen', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: null, name: '2x4 lumber' })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({
+          lines: [
+            previewLine({
+              itemId: null,
+              name: '2x4 lumber',
+              onHand: null,
+              suggestedConsumeQuantity: 0,
+              skipped: true,
+            }),
+          ],
+        }),
+      );
+      const updateProjectMock = vi
+        .spyOn(api, 'updateProject')
+        .mockResolvedValue(project({ status: 'completed' }));
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      await waitFor(() =>
+        expect(updateProjectMock).toHaveBeenCalledWith('project-1', { status: 'completed' }),
+      );
+      expect(
+        screen.queryByText('Complete project — confirm stock consumption'),
+      ).not.toBeInTheDocument();
+    });
+
+    it('idempotency: Confirm is disabled until "Consume again" is checked when already backflushed (AC 6)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ alreadyBackflushed: true }),
+      );
+      const confirmBackflushMock = vi.spyOn(api, 'confirmBackflush').mockResolvedValue({
+        project: project({ status: 'completed' }),
+        consumed: [],
+      });
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      await screen.findByText('Complete project — confirm stock consumption');
+      const confirmButton = screen.getByRole('button', { name: 'Confirm' });
+      expect(confirmButton).toBeDisabled();
+
+      await user.click(screen.getByRole('checkbox', { name: 'Consume again' }));
+      expect(confirmButton).toBeEnabled();
+
+      await user.click(confirmButton);
+
+      await waitFor(() =>
+        expect(confirmBackflushMock).toHaveBeenCalledWith(
+          'project-1',
+          expect.objectContaining({ confirmAgain: true }),
+        ),
+      );
+    });
+  });
+
+  // ── Consumed section (EVT-28 AC 5) ───────────────────────────────────────
+
+  describe('Consumed section (EVT-28 AC 5)', () => {
+    it('shows the consumed record, linking back to the item', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ status: 'completed', consumed: [consumedMovement({ delta: -2 })] }),
+      );
+
+      renderPage();
+
+      expect(await screen.findByText('Consumed')).toBeInTheDocument();
+      const link = screen.getByRole('link', { name: 'Cordless drill' });
+      expect(link).toHaveAttribute('href', '/items/item-1');
+      expect(screen.getByText('2')).toBeInTheDocument();
+    });
+
+    it('renders nothing when the project has never been backflushed', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project({ consumed: [] }));
+
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      expect(screen.queryByText('Consumed')).not.toBeInTheDocument();
+    });
+
+    it('re-opening a completed project shows a notice that consumption stands (AC 6 non-goal)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ status: 'planned', consumed: [consumedMovement()] }),
+      );
+
+      renderPage();
+
+      expect(await screen.findByText(/does not reverse that consumption/i)).toBeInTheDocument();
+    });
   });
 });
