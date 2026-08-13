@@ -70,11 +70,26 @@ services:
       - ./apps/api/certs:/workspace/apps/api/certs:ro
     # Starts the real Nest watch server (`start:dev`, not the baked
     # `dist/main.js`) so edits under the bind mount above hot-restart the
-    # process. Before that: if pnpm-lock.yaml changed since this
-    # node_modules volume was last populated (hash stamped into the volume
-    # itself), reinstall automatically; a failed install fails loudly
-    # instead of silently running against a stale/missing dependency tree
-    # (EVT-21 AC2).
+    # process. Before that, in order:
+    #   1. if pnpm-lock.yaml changed since this node_modules volume was last
+    #      populated (hash stamped into the volume itself), reinstall
+    #      automatically; a failed install fails loudly instead of silently
+    #      running against a stale/missing dependency tree (EVT-21 AC2).
+    #   2. `prisma generate` — the source is bind-mounted (EVT-21) but the
+    #      generated Prisma client lives in the node_modules volume, so a
+    #      schema change pulled from git (new model/field) leaves the client
+    #      stale until this runs (EVT-32).
+    #   3. `prisma migrate deploy` — applies any migrations merged from git
+    #      that haven't been applied to this dev database yet (EVT-1's
+    #      original design; EVT-32 makes it actually happen on every start,
+    #      not just image builds). Deploy only, never `migrate dev` — dev
+    #      containers must never create migrations.
+    # Each step logs a distinct success/failure line so `docker compose logs
+    # api` shows exactly which stage ran; `set -e` plus the explicit
+    # `exit 1` guards mean a failure here keeps the container
+    # restarting/unhealthy (never half-running with a stale client or an
+    # unmigrated schema) — see apps/api/healthcheck.js, which only reports
+    # healthy once the app is actually serving requests.
     command:
       - sh
       - -c
@@ -90,6 +105,18 @@ services:
           fi
           echo "$$NEW_HASH" > "$$HASH_FILE"
         fi
+        echo "[dev] running prisma generate..."
+        if ! pnpm --filter=@eventory/api run prisma:generate; then
+          echo "[dev] ERROR: prisma generate failed - fix apps/api/prisma/schema.prisma, then restart this container (docker compose restart api)." >&2
+          exit 1
+        fi
+        echo "[dev] prisma generate complete."
+        echo "[dev] running prisma migrate deploy..."
+        if ! pnpm --filter=@eventory/api run prisma:migrate:deploy; then
+          echo "[dev] ERROR: prisma migrate deploy failed - check the failing migration under apps/api/prisma/migrations, fix it, then restart this container (docker compose restart api)." >&2
+          exit 1
+        fi
+        echo "[dev] prisma migrate deploy complete - no pending migrations."
         exec pnpm --filter=@eventory/api run start:dev
     depends_on:
       db:

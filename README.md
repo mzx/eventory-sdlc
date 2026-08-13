@@ -56,6 +56,35 @@ next container start/restart, per above).
 To fully reset the installed-dependency volumes (equivalent to deleting `node_modules`
 locally): `docker compose down -v`.
 
+### Schema changes just work — auto `prisma generate` + `migrate deploy` on api start (EVT-32)
+
+`git pull`ing a schema-touching merge is enough — `docker compose up -d --build` (or a plain
+restart of an already-running stack) brings the `api` container up with the schema fully
+applied, no manual steps. Before the dev server starts, the `api` container's startup script
+(`docker-compose.yml`, same idiom as the pnpm-lock reinstall check above) runs, in order:
+
+1. `prisma generate` — regenerates the Prisma client so newly pulled models/fields are
+   available. Needed because the generated client lives in the `node_modules` volume, not the
+   bind-mounted source (EVT-21) — a schema change alone doesn't update it.
+2. `prisma migrate deploy` — applies any migrations merged from git that aren't yet applied to
+   the dev database. Deploy only, never `migrate dev` — the dev container must never create a
+   migration.
+
+Both steps log a distinct `[dev] ...` line in `docker compose logs api`, and each fails loudly
+(a clear `[dev] ERROR: ...` message, non-zero exit) rather than letting the app start against a
+stale client or an unmigrated schema — a failed step keeps the container restarting/unhealthy
+instead of silently half-running. When nothing changed, both steps are a no-op that adds only a
+few seconds to startup.
+
+**Manual escape hatches** (e.g. to inspect state without waiting for a container restart):
+
+```bash
+docker compose exec api npx prisma migrate status   # check for pending migrations
+docker compose exec api npx prisma generate          # regenerate the client by hand
+docker compose exec api npx prisma migrate deploy     # apply pending migrations by hand
+docker compose restart api                            # re-run the full startup sequence
+```
+
 ## Phone-on-LAN dev setup (HTTPS via mkcert)
 
 Both dev servers can serve HTTPS using locally-trusted certificates from
