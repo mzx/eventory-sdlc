@@ -18,4 +18,8 @@ ALTER TABLE "StockMovement" ADD COLUMN "containerId" UUID;
 CREATE INDEX "StockMovement_containerId_createdAt_idx" ON "StockMovement"("containerId", "createdAt");
 
 -- AddForeignKey
-ALTER TABLE "StockMovement" ADD CONSTRAINT "StockMovement_containerId_fkey" FOREIGN KEY ("containerId") REFERENCES "Location"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- ON DELETE SET NULL, not CASCADE (EVT-30 review round 2, finding 4): a
+-- deleted container must not silently erase its own move-history ledger
+-- rows, matching the "immutable audit trail" contract and the SetNull
+-- already used for fromLocationId/toLocationId.
+ALTER TABLE "StockMovement" ADD CONSTRAINT "StockMovement_containerId_fkey" FOREIGN KEY ("containerId") REFERENCES "Location"("id") ON DELETE SET NULL ON UPDATE CASCADE;

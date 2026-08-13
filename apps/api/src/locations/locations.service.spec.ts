@@ -79,9 +79,34 @@ describe('LocationsService', () => {
   const txClient = {
     location: {
       update: jest.fn(),
+      findFirst: jest.fn(),
     },
     $executeRaw: jest.fn(),
+    $queryRaw: jest.fn(),
   };
+
+  /**
+   * Row shape returned by the `SELECT ... FOR UPDATE` lock query inside
+   * `moveContainer` (EVT-30 review round 2, finding 1).
+   */
+  function lockedRow(
+    overrides: Partial<{
+      id: string;
+      path: string;
+      parentId: string | null;
+      kind: 'area' | 'container';
+      name: string;
+    }> = {},
+  ) {
+    return {
+      id: 'box-1',
+      path: 'garage.box-1',
+      parentId: 'garage',
+      kind: 'container' as const,
+      name: 'Tote Box',
+      ...overrides,
+    };
+  }
 
   const prismaMock = {
     location: locationMock,
@@ -498,14 +523,17 @@ describe('LocationsService', () => {
         parentId: 'garage',
         kind: 'container',
       });
-      const targetParent = { id: 'shelf-2', path: 'garage.shelf-2' };
       const finalDetail = { ...box, path: 'garage.shelf-2.box-1', children: [], items: [] };
 
       locationMock.findUnique
-        .mockResolvedValueOnce(box) // self lookup
-        .mockResolvedValueOnce(targetParent) // destination parent lookup
+        .mockResolvedValueOnce(box) // self lookup (fast-fail pre-check)
+        .mockResolvedValueOnce({ id: 'shelf-2' }) // destination existence-only pre-check
         .mockResolvedValueOnce(finalDetail); // findOne() after the transaction
-      locationMock.findFirst.mockResolvedValue(null); // no path conflict
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage', name: 'Tote Box' }),
+        lockedRow({ id: 'shelf-2', path: 'garage.shelf-2', parentId: 'garage', kind: 'area' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue(null); // no path conflict
       txClient.location.update.mockResolvedValue({
         ...box,
         parentId: 'shelf-2',
@@ -516,6 +544,7 @@ describe('LocationsService', () => {
       const result = await service.moveContainer('box-1', 'shelf-2', 'user-1');
 
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
       expect(txClient.location.update).toHaveBeenCalledWith({
         where: { id: 'box-1' },
         data: { parentId: 'shelf-2', path: 'garage.shelf-2.box-1' },
@@ -525,6 +554,7 @@ describe('LocationsService', () => {
         fromLocationId: 'garage',
         toLocationId: 'shelf-2',
         createdById: 'user-1',
+        note: 'Container "Tote Box" moved',
       });
       expect(result).toMatchObject({ id: 'box-1', path: 'garage.shelf-2.box-1' });
     });
@@ -536,13 +566,16 @@ describe('LocationsService', () => {
         parentId: 'garage',
         kind: 'container',
       });
-      const targetParent = { id: 'shelf-2', path: 'shelf-2' };
 
       locationMock.findUnique
         .mockResolvedValueOnce(box)
-        .mockResolvedValueOnce(targetParent)
+        .mockResolvedValueOnce({ id: 'shelf-2' })
         .mockResolvedValueOnce({ ...box, path: 'shelf-2.box-1', children: [], items: [] });
-      locationMock.findFirst.mockResolvedValue(null);
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage' }),
+        lockedRow({ id: 'shelf-2', path: 'shelf-2', parentId: null, kind: 'area' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue(null);
       txClient.location.update.mockResolvedValue(box);
       txClient.$executeRaw.mockResolvedValue(2);
 
@@ -562,7 +595,10 @@ describe('LocationsService', () => {
       locationMock.findUnique
         .mockResolvedValueOnce(box) // self lookup — no parent lookup since toParentId is null
         .mockResolvedValueOnce({ ...box, parentId: null, path: 'box-1', children: [], items: [] });
-      locationMock.findFirst.mockResolvedValue(null);
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue(null);
       txClient.location.update.mockResolvedValue({ ...box, parentId: null, path: 'box-1' });
       txClient.$executeRaw.mockResolvedValue(0);
 
@@ -588,16 +624,57 @@ describe('LocationsService', () => {
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
     });
 
-    it('AC 4: rejects moving a container into one of its own descendants with 422', async () => {
+    it('AC 4: rejects moving a container into one of its own descendants with 422 — enforced against the LOCKED read inside the transaction', async () => {
       const box = makeLocation({ id: 'box-1', path: 'garage.box-1', kind: 'container' });
-      const descendant = { id: 'box-2', path: 'garage.box-1.box-2' };
 
-      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce(descendant);
+      locationMock.findUnique
+        .mockResolvedValueOnce(box) // self lookup
+        .mockResolvedValueOnce({ id: 'box-2' }); // destination existence-only pre-check
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage' }),
+        lockedRow({ id: 'box-2', path: 'garage.box-1.box-2', parentId: 'box-1' }),
+      ]);
 
       await expect(service.moveContainer('box-1', 'box-2')).rejects.toBeInstanceOf(
         UnprocessableEntityException,
       );
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      // The transaction IS opened — the guard now runs against the locked
+      // read inside it, not the pre-transaction snapshot (EVT-30 review
+      // round 2, finding 1).
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(txClient.location.update).not.toHaveBeenCalled();
+    });
+
+    // EVT-30 review round 2, finding 1 — regression test for the TOCTOU fix.
+    // The outer, non-locked pre-checks (self lookup + destination
+    // existence-only check) have no way to see a cycle because they never
+    // look at the destination's path. This simulates a concurrent move
+    // having already landed the destination as a descendant of the
+    // container by the time this call's `SELECT ... FOR UPDATE` acquires
+    // its locks — proving the guard is enforced against the in-transaction
+    // locked read, not any pre-transaction snapshot.
+    it('TOCTOU: enforces the cycle guard against the row-locked read inside the transaction, not the pre-transaction snapshot', async () => {
+      const box = makeLocation({ id: 'box-1', path: 'garage.box-1', kind: 'container' });
+
+      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce({ id: 'box-2' });
+      // By the time locks are acquired, box-2 has already become a
+      // descendant of box-1 via a concurrent move that committed in between.
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage', name: 'Tote Box' }),
+        lockedRow({
+          id: 'box-2',
+          path: 'garage.box-1.box-2',
+          parentId: 'box-1',
+          name: 'Inner Box',
+        }),
+      ]);
+
+      await expect(service.moveContainer('box-1', 'box-2')).rejects.toBeInstanceOf(
+        UnprocessableEntityException,
+      );
+      expect(txClient.location.update).not.toHaveBeenCalled();
+      expect(stockMovementsServiceMock.recordContainerMove).not.toHaveBeenCalled();
     });
 
     it('rejects moving an AREA location — only containers use this flow', async () => {
@@ -651,15 +728,22 @@ describe('LocationsService', () => {
         parentId: 'garage',
         kind: 'container',
       });
-      const targetParent = { id: 'shelf-2', path: 'garage.shelf-2' };
 
-      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce(targetParent);
-      locationMock.findFirst.mockResolvedValue({ id: 'other', path: 'garage.shelf-2.box-1' });
+      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce({ id: 'shelf-2' });
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage' }),
+        lockedRow({ id: 'shelf-2', path: 'garage.shelf-2', parentId: 'garage', kind: 'area' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue({ id: 'other', path: 'garage.shelf-2.box-1' });
 
       await expect(service.moveContainer('box-1', 'shelf-2')).rejects.toBeInstanceOf(
         ConflictException,
       );
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      // The transaction IS opened (the conflict is only detectable once we
+      // have the fresh, locked path for the destination); it rolls back
+      // when the in-transaction conflict check fails.
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(txClient.location.update).not.toHaveBeenCalled();
     });
 
     it('maps P2002 thrown inside $transaction to ConflictException (TOCTOU guard)', async () => {
@@ -669,10 +753,8 @@ describe('LocationsService', () => {
         parentId: 'garage',
         kind: 'container',
       });
-      const targetParent = { id: 'shelf-2', path: 'garage.shelf-2' };
 
-      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce(targetParent);
-      locationMock.findFirst.mockResolvedValue(null);
+      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce({ id: 'shelf-2' });
 
       const uniqueError = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',

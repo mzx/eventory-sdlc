@@ -11,6 +11,7 @@ import {
   RecordContainerMoveInput,
   StockMovementsService,
 } from '../stock-movements/stock-movements.service';
+import { CreateLocationDto } from './create-location.dto';
 
 /**
  * Convert a human name into a URL/path-safe slug.
@@ -55,18 +56,6 @@ export interface LocationDetail {
     primaryPhoto: { id: string; filename: string } | null;
   }>;
   breadcrumb: Array<{ segment: string; path: string }>;
-}
-
-export interface CreateLocationDto {
-  name: string;
-  parentId?: string;
-  notes?: string;
-  /** Defaults to `area` (matches the Prisma column default) when omitted. */
-  kind?: LocationKind;
-}
-
-export interface RenameLocationDto {
-  name: string;
 }
 
 @Injectable()
@@ -281,9 +270,20 @@ export class LocationsService {
    * throws 400.
    *
    * Guard rails (EVT-30 AC 4, risk register): rejects moving a container
-   * into itself or any of its own descendants with 422 — validated
-   * server-side against the freshly-read `path`, not just trusted from a
-   * client-side picker.
+   * into itself or any of its own descendants with 422.
+   *
+   * TOCTOU fix (EVT-30 review round 2, finding 1): a plain, non-locked read
+   * of the ancestry outside the transaction is NOT sufficient — two
+   * concurrent moves (`A.move({toParentId:B})` racing `B.move({toParentId:A})`)
+   * can both read pre-move paths, both pass the cycle check, and both
+   * commit, producing a parent cycle. The cycle check below is therefore
+   * re-run INSIDE the transaction against rows read with
+   * `SELECT ... FOR UPDATE` (see the transaction body for the locking
+   * details) — the pre-transaction read above is only a fast-fail
+   * convenience for the common "obviously invalid" cases (missing
+   * location/parent, self-move, already-at-destination) so we don't open a
+   * transaction for requests that can never succeed; it is never trusted for
+   * the actual cycle decision.
    *
    * Records exactly ONE itemless `move` `StockMovement` for the container
    * itself (EVT-30 AC 3) — never one row per contained item.
@@ -306,44 +306,107 @@ export class LocationsService {
       throw new UnprocessableEntityException(`Cannot move "${location.name}" into itself`);
     }
 
-    let parent: { id: string; path: string } | null = null;
     if (toParentId) {
-      parent = await this.prisma.location.findUnique({
+      const parentExists = await this.prisma.location.findUnique({
         where: { id: toParentId },
-        select: { id: true, path: true },
+        select: { id: true },
       });
-      if (!parent) {
+      if (!parentExists) {
         throw new NotFoundException(`Location ${toParentId} not found`);
-      }
-      if (parent.path === location.path || parent.path.startsWith(`${location.path}.`)) {
-        throw new UnprocessableEntityException(
-          `Cannot move "${location.name}" into itself or one of its own descendants`,
-        );
       }
     }
 
-    // Already at the requested destination — no-op, no movement recorded.
+    // Already at the requested destination — fast-path no-op that skips
+    // opening a transaction. This is only a convenience short-circuit for
+    // the common case; it is NOT relied on for correctness — the real
+    // no-op/cycle checks are re-run against locked reads inside the
+    // transaction below, since this outer `location.parentId` read can be
+    // stale by the time we'd act on it.
     if ((toParentId ?? null) === location.parentId) {
       return this.findOne(id);
     }
 
-    const oldPath = location.path;
-    const leafSlug = oldPath.split('.').pop() as string;
-    const newPath = parent ? `${parent.path}.${leafSlug}` : leafSlug;
-
-    if (newPath !== oldPath) {
-      const conflict = await this.prisma.location.findFirst({
-        where: { path: newPath, id: { not: id } },
-      });
-      if (conflict) {
-        throw new ConflictException(`A location with path "${newPath}" already exists`);
-      }
-    }
-
-    const fromLocationId = location.parentId;
-
     try {
       await this.prisma.$transaction(async (tx) => {
+        // Row-lock BOTH the container and the destination parent (when one
+        // is given) with `SELECT ... FOR UPDATE`, in ascending-id order.
+        // Locking in a deterministic order — regardless of which row is the
+        // "container" and which is the "destination" from this call's point
+        // of view — means two concurrent moveContainer calls that touch the
+        // same two rows (e.g. A→B and, concurrently, B→A) always request
+        // their locks in the same order, so the second call blocks until
+        // the first commits/rolls back instead of deadlocking. Once
+        // unblocked, the second call re-reads the POST-first-move state and
+        // re-runs the cycle check against it — this is what closes the
+        // TOCTOU window.
+        const lockIds = Array.from(new Set(toParentId ? [id, toParentId] : [id])).sort();
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            id: string;
+            path: string;
+            parentId: string | null;
+            kind: LocationKind;
+            name: string;
+          }>
+        >(Prisma.sql`
+          SELECT id, path, "parentId", kind, name
+          FROM "Location"
+          WHERE id IN (${Prisma.join(lockIds)})
+          ORDER BY id
+          FOR UPDATE
+        `);
+        const lockedById = new Map(lockedRows.map((row) => [row.id, row]));
+
+        const freshContainer = lockedById.get(id);
+        if (!freshContainer) {
+          throw new NotFoundException(`Location ${id} not found`);
+        }
+        if (freshContainer.kind !== 'container') {
+          throw new BadRequestException(
+            `Only container locations can be moved; "${freshContainer.name}" is an area. Area locations keep the existing add/rename/delete flows.`,
+          );
+        }
+
+        let freshParent: { id: string; path: string } | null = null;
+        if (toParentId) {
+          const candidate = lockedById.get(toParentId);
+          if (!candidate) {
+            throw new NotFoundException(`Location ${toParentId} not found`);
+          }
+          if (
+            candidate.path === freshContainer.path ||
+            candidate.path.startsWith(`${freshContainer.path}.`)
+          ) {
+            throw new UnprocessableEntityException(
+              `Cannot move "${freshContainer.name}" into itself or one of its own descendants`,
+            );
+          }
+          freshParent = { id: candidate.id, path: candidate.path };
+        }
+
+        // Re-check the no-op condition against the LOCKED read — a
+        // concurrent move could have already landed the container at this
+        // exact destination between the outer fast-path check and
+        // acquiring the lock here.
+        if ((toParentId ?? null) === freshContainer.parentId) {
+          return;
+        }
+
+        const oldPath = freshContainer.path;
+        const leafSlug = oldPath.split('.').pop() as string;
+        const newPath = freshParent ? `${freshParent.path}.${leafSlug}` : leafSlug;
+
+        if (newPath !== oldPath) {
+          const conflict = await tx.location.findFirst({
+            where: { path: newPath, id: { not: id } },
+          });
+          if (conflict) {
+            throw new ConflictException(`A location with path "${newPath}" already exists`);
+          }
+        }
+
+        const fromLocationId = freshContainer.parentId;
+
         await tx.location.update({
           where: { id },
           data: { parentId: toParentId, path: newPath },
@@ -367,12 +430,19 @@ export class LocationsService {
           fromLocationId,
           toLocationId: toParentId,
           createdById,
+          // Denormalize the container's name into `note` (EVT-30 review
+          // round 2, finding 4) — `StockMovement.container` now uses
+          // `onDelete: SetNull` rather than `Cascade` (the audit trail must
+          // survive the container being deleted later), so once
+          // `containerId` is nulled out this is the only remaining
+          // human-readable trace of which container this row was about.
+          note: `Container "${freshContainer.name}" moved`,
         };
         await this.stockMovementsService.recordContainerMove(tx, input);
       });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        throw new ConflictException(`A location with path "${newPath}" already exists`);
+        throw new ConflictException(`A location with the target path already exists`);
       }
       throw err;
     }

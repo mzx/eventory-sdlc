@@ -356,7 +356,14 @@ model StockMovement {
   createdAt      DateTime          @default(now())
 
   item         Item?     @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  container    Location? @relation("StockMovementContainer", fields: [containerId], references: [id], onDelete: Cascade)
+  /// `SetNull`, not `Cascade` (EVT-30 review round 2, finding 4) — deleting a
+  /// container must NOT erase its own move-history ledger rows, matching the
+  /// "immutable audit trail" contract (EVT-25) and the `SetNull` already
+  /// used on `fromLocationId`/`toLocationId` below. `note` is populated with
+  /// the container's name at record time (see
+  /// `LocationsService.moveContainer`) so a row remains human-readable even
+  /// after `containerId` is nulled out by a later container deletion.
+  container    Location? @relation("StockMovementContainer", fields: [containerId], references: [id], onDelete: SetNull)
   fromLocation Location? @relation("StockMovementFromLocation", fields: [fromLocationId], references: [id], onDelete: SetNull)
   toLocation   Location? @relation("StockMovementToLocation", fields: [toLocationId], references: [id], onDelete: SetNull)
   project      Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)

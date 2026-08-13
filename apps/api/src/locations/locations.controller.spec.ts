@@ -1,4 +1,4 @@
-import { HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpStatus, ParseUUIDPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { LocationsController } from './locations.controller';
 import { LocationsService } from './locations.service';
@@ -207,6 +207,30 @@ describe('LocationsController', () => {
         page: 2,
       });
       expect(result).toBe(page);
+    });
+  });
+
+  // ── ParseUUIDPipe (EVT-30 review round 2, finding 2) ────────────────────
+  //
+  // `:id/movements` and `:id/move` previously lacked `ParseUUIDPipe`, so a
+  // non-UUID id reached Prisma's `@db.Uuid` column and raised P2023 → 500
+  // instead of a 400. Verified here at the pipe level (unit tests call
+  // controller methods directly, bypassing Nest's request pipeline, so this
+  // is the same style of regression test as items.controller.spec.ts).
+
+  describe('ParseUUIDPipe', () => {
+    const uuidPipe = new ParseUUIDPipe();
+    const VALID_UUID = '11111111-1111-4111-8111-111111111111';
+
+    it('throws BadRequestException for a non-UUID id param', async () => {
+      await expect(uuidPipe.transform('not-a-uuid', { type: 'param', data: 'id' })).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('accepts a valid UUID', async () => {
+      const result = await uuidPipe.transform(VALID_UUID, { type: 'param', data: 'id' });
+      expect(result).toBe(VALID_UUID);
     });
   });
 });
