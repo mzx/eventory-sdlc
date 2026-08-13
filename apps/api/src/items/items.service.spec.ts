@@ -832,6 +832,59 @@ describe('ItemsService', () => {
   });
 
   // =========================================================================
+  // receive (EVT-31 AC 4) — "add to existing" barcode receiving
+  // =========================================================================
+
+  describe('receive', () => {
+    it('records an "add" movement for the given quantity against an existing item', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, locationId: LOC_ID });
+      const received = makeItemDetail({ quantity: 125 });
+      stockMovementsMock.recordMovement.mockResolvedValue({
+        movement: { id: 'mv-1', kind: 'add' },
+        item: received,
+      });
+
+      const result = await service.receive(ITEM_ID, 25);
+
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          itemId: ITEM_ID,
+          kind: 'add',
+          delta: 25,
+          toLocationId: LOC_ID,
+        }),
+        expect.anything(),
+      );
+      expect(result).toBe(received);
+    });
+
+    it('attributes the movement to the caller when createdById is provided', async () => {
+      const userId = '99999999-9999-9999-9999-999999999999';
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, locationId: null });
+      stockMovementsMock.recordMovement.mockResolvedValue({
+        movement: { id: 'mv-1', kind: 'add' },
+        item: makeItemDetail(),
+      });
+
+      await service.receive(ITEM_ID, 10, userId);
+
+      expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({ createdById: userId }),
+        expect.anything(),
+      );
+    });
+
+    it('throws NotFoundException for an unknown item and never calls recordMovement', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(null);
+
+      await expect(service.receive(ITEM_ID, 10)).rejects.toThrow(NotFoundException);
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+    });
+  });
+
+  // =========================================================================
   // update — AC 1 (patch tags)
   // =========================================================================
 

@@ -293,6 +293,19 @@ export async function deleteItem(id: string): Promise<void> {
   return request<void>(`/items/${id}`, { method: 'DELETE' });
 }
 
+/**
+ * POST /api/items/:id/receive — distributor barcode receiving's "add to
+ * existing" branch (EVT-31 AC 4): re-scanning a known MPN adds `quantity`
+ * to this item's on-hand count (recorded as an `add` movement server-side)
+ * instead of creating a duplicate item.
+ */
+export async function receiveItem(id: string, quantity: number): Promise<ItemDetail> {
+  return request<ItemDetail>(`/items/${encodeURIComponent(id)}/receive`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // stock movements (EVT-25)
 // ---------------------------------------------------------------------------

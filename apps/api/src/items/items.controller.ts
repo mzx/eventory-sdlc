@@ -25,6 +25,7 @@ import { StockMovementsService } from '../stock-movements/stock-movements.servic
 import { CreateItemDto } from './create-item.dto';
 import { ItemsService } from './items.service';
 import { ListItemsQueryDto } from './list-items-query.dto';
+import { ReceiveItemDto } from './receive-item.dto';
 import { searchByPhotoMulterOptions } from './search-by-photo.helpers';
 import { UpdateItemDto } from './update-item.dto';
 
@@ -129,6 +130,24 @@ export class ItemsController {
   @HttpCode(HttpStatus.CREATED)
   create(@Body() dto: CreateItemDto, @CurrentUser() user: AuthenticatedUser) {
     return this.itemsService.create(dto, user.id);
+  }
+
+  /**
+   * POST /api/items/:id/receive
+   *
+   * Distributor barcode receiving's "add to existing" branch (EVT-31 AC 4):
+   * re-scanning a known MPN records an `add` movement for `quantity`
+   * against this item instead of creating a duplicate. Attributed to the
+   * caller. 404 when the item does not exist.
+   */
+  @Post(':id/receive')
+  @HttpCode(HttpStatus.OK)
+  receive(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReceiveItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itemsService.receive(id, dto.quantity, user.id);
   }
 
   /**

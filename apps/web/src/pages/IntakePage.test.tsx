@@ -1,10 +1,29 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
 import { IntakePage } from './IntakePage';
+
+// `BarcodeScannerDialog` owns real camera/decoder wiring, covered by its own
+// unit tests — stubbed here to a single button that fires `onDecoded` with a
+// test-controlled payload, so IntakePage's tests exercise the ECIA-parse +
+// draft-prefill + existing-item-lookup wiring in isolation.
+let onDecodedSpy: ((text: string) => void) | undefined;
+vi.mock('../components/BarcodeScannerDialog', () => ({
+  BarcodeScannerDialog: ({
+    open,
+    onDecoded,
+  }: {
+    open: boolean;
+    onClose: () => void;
+    onDecoded: (text: string) => void;
+  }) => {
+    onDecodedSpy = onDecoded;
+    return open ? <div data-testid="barcode-scanner-dialog-stub" /> : null;
+  },
+}));
 
 const STUB_ANALYSIS: api.PhotoSearchAnalysis = {
   suggested_name: 'Unknown item',
@@ -291,5 +310,202 @@ describe('IntakePage', () => {
     expect(await screen.findByText('Photo upload failed with status 413')).toBeInTheDocument();
     // Still on the photo step — not a blank state.
     expect(screen.getByRole('button', { name: /choose/i })).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // EVT-31 — distributor barcode receiving
+  // ---------------------------------------------------------------------------
+  describe('EVT-31: distributor barcode receiving', () => {
+    const RS = '\x1E';
+    const GS = '\x1D';
+    const EOT = '\x04';
+
+    /** Builds a full ISO/IEC 15434-enveloped ECIA scan from GS-delimited fields. */
+    function envelope(...fields: string[]): string {
+      return `[)>${RS}06${GS}${fields.join(GS)}${GS}${RS}${EOT}`;
+    }
+
+    function itemRow(overrides: Partial<api.ItemListRow> = {}): api.ItemListRow {
+      return {
+        id: 'existing-item-1',
+        name: 'RC0402FR-071KL',
+        description: null,
+        quantity: 100,
+        minQuantity: null,
+        unit: null,
+        properties: {},
+        qrCode: 'qr-existing',
+        locationId: null,
+        categoryId: null,
+        primaryPhotoId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        tags: [],
+        location: null,
+        primaryPhoto: null,
+        ...overrides,
+      };
+    }
+
+    async function openBarcodeScanner() {
+      await userEvent.click(screen.getByRole('button', { name: /scan supplier barcode/i }));
+      await waitFor(() => expect(onDecodedSpy).toBeDefined());
+    }
+
+    /** Fires the stubbed `onDecoded` callback, flushed like a real event. */
+    async function decode(text: string) {
+      await act(async () => {
+        onDecodedSpy?.(text);
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // AC 1 — a full DigiKey-style vector decodes and prefills MPN, quantity,
+    // and lot into the draft.
+    // -----------------------------------------------------------------------
+    it('AC1: decodes a full ECIA vector and prefills MPN, quantity, and lot', async () => {
+      mockDirectories();
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      const uploadMock = vi.spyOn(api, 'uploadPhoto');
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('P296-1234-1-ND', '1PRC0402FR-071KL', 'Q100', '1TWK2312'));
+
+      expect(await screen.findByLabelText('Name')).toHaveValue('RC0402FR-071KL');
+      expect(screen.getByLabelText('Quantity')).toHaveValue(100);
+      const keys = screen.getAllByLabelText('Key').map((el) => (el as HTMLInputElement).value);
+      const values = screen.getAllByLabelText('Value').map((el) => (el as HTMLInputElement).value);
+      expect(keys).toEqual(expect.arrayContaining(['mpn', 'supplierPn', 'lot']));
+      expect(values).toEqual(expect.arrayContaining(['RC0402FR-071KL', '296-1234-1-ND', 'WK2312']));
+      expect(screen.getByText('Barcode scan — check before saving')).toBeInTheDocument();
+      // Decoding is client-side only — no photo/image upload happens for
+      // this path (AC 5).
+      expect(uploadMock).not.toHaveBeenCalled();
+    });
+
+    // -----------------------------------------------------------------------
+    // AC 2 — a partial label leaves missing fields undefined/editable
+    // instead of erroring or dead-ending.
+    // -----------------------------------------------------------------------
+    it('AC2: a partial label prefills only what it carries and leaves the rest editable', async () => {
+      mockDirectories();
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('1PRC0402FR-071KL', 'Q25'));
+
+      expect(await screen.findByLabelText('Name')).toHaveValue('RC0402FR-071KL');
+      expect(screen.getByLabelText('Quantity')).toHaveValue(25);
+      // No lot/date/supplierPn rows were added — just the one recognized field.
+      const keys = screen.getAllByLabelText('Key').map((el) => (el as HTMLInputElement).value);
+      expect(keys).toEqual(['mpn']);
+
+      // Still fully editable — e.g. the user can add a description by hand.
+      const description = screen.getByLabelText('Description');
+      await userEvent.type(description, 'Found in the SMD bin');
+      expect(description).toHaveValue('Found in the SMD bin');
+    });
+
+    // -----------------------------------------------------------------------
+    // AC 3 — saved items carry mpn/supplierPn/lot/dateCode in properties.
+    // -----------------------------------------------------------------------
+    it('AC3: saves mpn/supplierPn/lot/dateCode into item properties', async () => {
+      mockDirectories();
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      const createMock = vi.spyOn(api, 'createItem').mockResolvedValue({
+        id: 'new-item-1',
+      } as api.ItemDetail);
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('P296-1234-1-ND', '1PRC0402FR-071KL', 'Q100', '1TWK2312', '9D231106'));
+
+      await screen.findByLabelText('Name');
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() =>
+        expect(createMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            properties: {
+              mpn: 'RC0402FR-071KL',
+              supplierPn: '296-1234-1-ND',
+              lot: 'WK2312',
+              dateCode: '231106',
+            },
+          }),
+        ),
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // AC 4 — re-scanning a known MPN offers "add to existing"; choosing it
+    // records an add movement (via receiveItem) instead of creating a
+    // duplicate item.
+    // -----------------------------------------------------------------------
+    it('AC4: offers add-to-existing for a known MPN, and adding records a movement instead of creating a duplicate', async () => {
+      mockDirectories();
+      const existing = itemRow({ properties: { mpn: 'RC0402FR-071KL' } });
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([existing]);
+      const createMock = vi.spyOn(api, 'createItem');
+      const receiveMock = vi.spyOn(api, 'receiveItem').mockResolvedValue({
+        id: existing.id,
+      } as api.ItemDetail);
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('1PRC0402FR-071KL', 'Q50'));
+
+      expect(await screen.findByText('Already in inventory')).toBeInTheDocument();
+      expect(screen.getByText(existing.name)).toBeInTheDocument();
+      expect(screen.getByLabelText('Quantity to add')).toHaveValue(50);
+
+      await userEvent.click(screen.getByRole('button', { name: 'Add to existing' }));
+
+      await waitFor(() => expect(receiveMock).toHaveBeenCalledWith(existing.id, 50));
+      expect(createMock).not.toHaveBeenCalled();
+      expect(await screen.findByText('detail page')).toBeInTheDocument();
+    });
+
+    it('AC4: "Create new item instead" on the match screen falls back to the normal prefilled draft', async () => {
+      mockDirectories();
+      const existing = itemRow({ properties: { mpn: 'RC0402FR-071KL' } });
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([existing]);
+      const receiveMock = vi.spyOn(api, 'receiveItem');
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('1PRC0402FR-071KL', 'Q50'));
+
+      await screen.findByText('Already in inventory');
+      await userEvent.click(screen.getByRole('button', { name: 'Create new item instead' }));
+
+      expect(await screen.findByLabelText('Name')).toHaveValue('RC0402FR-071KL');
+      expect(screen.getByLabelText('Quantity')).toHaveValue(50);
+      expect(receiveMock).not.toHaveBeenCalled();
+    });
+
+    it('does not offer add-to-existing when no saved item carries a matching mpn/supplierPn', async () => {
+      mockDirectories();
+      // Substring hit from fetchItems' ILIKE search, but not an exact
+      // mpn/supplierPn match — must NOT be treated as a re-scan.
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([
+        itemRow({ properties: { mpn: 'RC0402FR-071KL-BULK' } }),
+      ]);
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('1PRC0402FR-071KL', 'Q50'));
+
+      expect(await screen.findByLabelText('Name')).toHaveValue('RC0402FR-071KL');
+      expect(screen.queryByText('Already in inventory')).not.toBeInTheDocument();
+    });
   });
 });
