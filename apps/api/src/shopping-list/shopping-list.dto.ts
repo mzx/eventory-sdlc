@@ -1,4 +1,4 @@
-import { IsInt, IsUUID, Min } from 'class-validator';
+import { IsInt, IsUUID, Max, Min } from 'class-validator';
 
 /**
  * POST /api/shopping-list — the one-tap "Running low" action (EVT-26 AC 3),
@@ -17,5 +17,6 @@ export class CreateShoppingListEntryDto {
 export class RestockShoppingListEntryDto {
   @IsInt()
   @Min(0)
+  @Max(2147483647)
   quantity!: number;
 }

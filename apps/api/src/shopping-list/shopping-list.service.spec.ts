@@ -37,7 +37,7 @@ function makeUniqueViolation(): Prisma.PrismaClientKnownRequestError {
 
 function makeTxMock() {
   return {
-    shoppingListEntry: { update: jest.fn() },
+    shoppingListEntry: { updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
   };
 }
 
@@ -172,24 +172,43 @@ describe('ShoppingListService', () => {
       await expect(service.restock(ENTRY_ID, 10, USER_ID)).rejects.toThrow(NotFoundException);
     });
 
-    it('409s when the entry is already resolved', async () => {
+    it('409s when the entry is already resolved (loses the atomic close race)', async () => {
       prismaMock.shoppingListEntry.findUnique.mockResolvedValue(
         makeEntryRow({ status: 'done', item: { id: ITEM_ID, quantity: 2, locationId: null } }),
       );
+      // Round-2 review fix: "already resolved" is now detected by the
+      // conditional `updateMany` (WHERE status = 'open') inside the
+      // transaction affecting zero rows — not by the pre-transaction read's
+      // `status` field, which is TOCTOU-prone.
+      prismaMock.__tx.shoppingListEntry.updateMany.mockResolvedValue({ count: 0 });
+
       await expect(service.restock(ENTRY_ID, 10, USER_ID)).rejects.toThrow(ConflictException);
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
     });
 
     it('records an "add" movement for the delta and closes the entry, in one transaction', async () => {
       prismaMock.shoppingListEntry.findUnique.mockResolvedValue(
         makeEntryRow({ item: { id: ITEM_ID, quantity: 2, locationId: LOCATION_ID } }),
       );
+      prismaMock.__tx.shoppingListEntry.updateMany.mockResolvedValue({ count: 1 });
       stockMovementsMock.recordMovement.mockResolvedValue({});
       const closed = makeEntryRow({ status: 'done', resolvedAt: new Date() });
-      prismaMock.__tx.shoppingListEntry.update.mockResolvedValue(closed);
+      prismaMock.__tx.shoppingListEntry.findUniqueOrThrow.mockResolvedValue(closed);
 
       const result = await service.restock(ENTRY_ID, 10, USER_ID);
 
       expect(prismaMock.$transaction).toHaveBeenCalled();
+      // The entry is closed BEFORE recordMovement runs (round-2 review,
+      // MAJOR): otherwise a still-below-threshold restock's fresh low-stock
+      // insert would no-op against the entry we're about to close.
+      expect(prismaMock.__tx.shoppingListEntry.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: ENTRY_ID, status: 'open' },
+          data: expect.objectContaining({ status: 'done' }),
+        }),
+      );
+      const updateManyArg = prismaMock.__tx.shoppingListEntry.updateMany.mock.calls[0][0];
+      expect(updateManyArg.data.resolvedAt).toBeInstanceOf(Date);
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock.__tx,
         expect.objectContaining({
@@ -200,14 +219,10 @@ describe('ShoppingListService', () => {
           createdById: USER_ID,
         }),
       );
-      expect(prismaMock.__tx.shoppingListEntry.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: ENTRY_ID },
-          data: expect.objectContaining({ status: 'done' }),
-        }),
-      );
-      const updateArg = prismaMock.__tx.shoppingListEntry.update.mock.calls[0][0];
-      expect(updateArg.data.resolvedAt).toBeInstanceOf(Date);
+      const updateManyOrder =
+        prismaMock.__tx.shoppingListEntry.updateMany.mock.invocationCallOrder[0];
+      const recordMovementOrder = stockMovementsMock.recordMovement.mock.invocationCallOrder[0];
+      expect(updateManyOrder).toBeLessThan(recordMovementOrder);
       expect(result).toBe(closed);
     });
   });

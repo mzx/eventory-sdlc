@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   Min,
 } from 'class-validator';
 
@@ -26,6 +27,7 @@ export class UpdateItemDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(2147483647)
   quantity?: number;
 
   /**
@@ -36,6 +38,7 @@ export class UpdateItemDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(2147483647)
   minQuantity?: number | null;
 
   @IsOptional()

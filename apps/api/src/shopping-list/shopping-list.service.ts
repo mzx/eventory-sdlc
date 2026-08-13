@@ -116,6 +116,25 @@ export class ShoppingListService {
    * an `add` movement recorded against an entry that's still open (or vice
    * versa). 404 for an unknown entry; 409 if it's already resolved (e.g. a
    * double-tap of "Restocked", or resolving the same entry from two tabs).
+   *
+   * Ordering matters here (round-2 review, MAJOR): the entry is closed
+   * FIRST, and `recordMovement` (which re-runs the low-stock check and
+   * opens a fresh low-stock entry via
+   * `INSERT ... ON CONFLICT ("itemId") WHERE status = 'open' DO NOTHING`)
+   * runs SECOND. Closing first means that if the restocked quantity is
+   * still <= minQuantity, this entry is no longer 'open' when
+   * `recordMovement` runs, so the conflict-tolerant insert finds no
+   * existing open row for the item and opens a brand-new one — instead of
+   * silently no-op'ing against the very entry we're about to close (which
+   * would leave the item under its threshold with zero open entries).
+   *
+   * The close itself is an atomic, conditional `updateMany` — `WHERE id =
+   * entryId AND status = 'open'` — run INSIDE the transaction rather than
+   * gated by a separate pre-transaction read, so two concurrent restocks
+   * racing on the same entry can't both pass a stale check: the loser's
+   * `updateMany` affects zero rows, and it throws `ConflictException`
+   * (rolling back its `recordMovement` write) rather than both committing
+   * an `add` movement (round-2 review, minor/TOCTOU).
    */
   async restock(entryId: string, quantity: number, createdById?: string) {
     const entry = await this.prisma.shoppingListEntry.findUnique({
@@ -125,11 +144,19 @@ export class ShoppingListService {
     if (!entry) {
       throw new NotFoundException(`Shopping list entry ${entryId} not found`);
     }
-    if (entry.status !== 'open') {
-      throw new ConflictException(`Shopping list entry ${entryId} is already resolved`);
-    }
 
     return this.prisma.$transaction(async (tx) => {
+      const closed = await tx.shoppingListEntry.updateMany({
+        where: { id: entryId, status: 'open' },
+        data: { status: 'done', resolvedAt: new Date() },
+      });
+      if (closed.count === 0) {
+        // Either never existed (already excluded by the 404 check above,
+        // barring a delete-in-flight) or — the common case — lost a race
+        // with a concurrent restock/resolution: already 'done'.
+        throw new ConflictException(`Shopping list entry ${entryId} is already resolved`);
+      }
+
       await this.stockMovementsService.recordMovement(tx, {
         itemId: entry.item.id,
         kind: 'add',
@@ -139,9 +166,8 @@ export class ShoppingListService {
         note: 'Restocked from shopping list',
       });
 
-      return tx.shoppingListEntry.update({
+      return tx.shoppingListEntry.findUniqueOrThrow({
         where: { id: entryId },
-        data: { status: 'done', resolvedAt: new Date() },
         include: ENTRY_INCLUDE,
       });
     });

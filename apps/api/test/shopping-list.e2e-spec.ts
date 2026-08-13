@@ -247,5 +247,44 @@ describe('Shopping List API (e2e)', () => {
 
       await http.post(`/api/shopping-list/${entry.id}/restock`).send({ quantity: 10 }).expect(409);
     });
+
+    // Round-2 review (MAJOR): a partial restock that leaves the item still
+    // <= minQuantity must re-open a fresh low-stock entry, not silently
+    // close the shopping list down to zero open entries while the item
+    // remains below threshold (AC2's invariant on the restock path).
+    it('re-opens a fresh low-stock entry when the restocked quantity is still <= minQuantity', async () => {
+      const createRes = await http
+        .post('/api/items')
+        .send({ name: 'Cable Ties', quantity: 2 })
+        .expect(201);
+      const itemId = createRes.body.id as string;
+      await http.patch(`/api/items/${itemId}`).send({ minQuantity: 5 }).expect(200);
+
+      const entry = await prisma.shoppingListEntry.create({
+        data: { itemId, status: 'open', source: 'low_stock' },
+      });
+
+      // Restock to 3 — up from 2, but still <= minQuantity of 5.
+      const restockRes = await http
+        .post(`/api/shopping-list/${entry.id}/restock`)
+        .send({ quantity: 3 })
+        .expect(200);
+      expect(restockRes.body).toMatchObject({ id: entry.id, status: 'done' });
+
+      const itemRes = await http.get(`/api/items/${itemId}`).expect(200);
+      expect(itemRes.body.quantity).toBe(3);
+
+      // The old entry is closed, but a fresh open entry must exist because
+      // the item is still under its threshold.
+      const listRes = await http.get('/api/shopping-list').expect(200);
+      expect(listRes.body).toHaveLength(1);
+      expect(listRes.body[0]).toMatchObject({ itemId, status: 'open', source: 'low_stock' });
+      expect(listRes.body[0].id).not.toBe(entry.id);
+
+      const openRows = await prisma.shoppingListEntry.findMany({
+        where: { itemId, status: 'open' },
+      });
+      expect(openRows).toHaveLength(1);
+    });
   });
 });
