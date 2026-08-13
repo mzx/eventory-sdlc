@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { AiService, STUB_ANALYSIS, stubAnalysis } from '../ai/ai.service';
@@ -1016,6 +1016,43 @@ describe('ItemsService', () => {
     });
 
     // -------------------------------------------------------------------------
+    // EVT-27: lastVerifiedAt conversion (review round 2, test-reviewer finding)
+    // -------------------------------------------------------------------------
+
+    it('EVT-27: converts a lastVerifiedAt ISO string to a Date on the scalar update', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { lastVerifiedAt: '2026-08-01T00:00:00.000Z' });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data.lastVerifiedAt).toBeInstanceOf(Date);
+      expect((updateCall.data.lastVerifiedAt as Date).toISOString()).toBe(
+        '2026-08-01T00:00:00.000Z',
+      );
+    });
+
+    it('EVT-27: clears lastVerifiedAt with explicit null', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { lastVerifiedAt: null });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data.lastVerifiedAt).toBeNull();
+    });
+
+    it('EVT-27: leaves lastVerifiedAt unchanged when the key is omitted from the DTO', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
+      prismaMock.item.update.mockResolvedValue(makeItemDetail());
+
+      await service.update(ITEM_ID, { name: 'New Name' });
+
+      const updateCall = prismaMock.item.update.mock.calls[0][0];
+      expect(updateCall.data).not.toHaveProperty('lastVerifiedAt');
+    });
+
+    // -------------------------------------------------------------------------
     // EVT-25 — stock movement ledger
     // -------------------------------------------------------------------------
 
@@ -1391,6 +1428,40 @@ describe('ItemsService', () => {
       );
     });
 
+    // -------------------------------------------------------------------------
+    // EVT-27 review round 2, finding 1: `recordConsumption` returning `null`
+    // (nothing on hand) must not fall through to a 200 as if the consumption
+    // succeeded.
+    // -------------------------------------------------------------------------
+
+    it('throws ConflictException when recordConsumption returns null (nothing on hand)', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue(null);
+
+      await expect(service.consume(ITEM_ID, 5)).rejects.toThrow(ConflictException);
+      // No item write should be attempted once recordConsumption reports
+      // nothing was consumed.
+      expect(prismaMock.item.findUniqueOrThrow).not.toHaveBeenCalled();
+    });
+
+    it('surfaces consumedQuantity from recordConsumption on the response', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 3,
+      });
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: 7, minQuantity: null }),
+      );
+
+      // Requested 5, but on-hand only supported 3 (partial consumption) —
+      // the caller must be able to tell "consumed 3" apart from "consumed
+      // nothing" (EVT-27 review round 2, security-reviewer suggestion).
+      const result = await service.consume(ITEM_ID, 5);
+
+      expect(result.consumedQuantity).toBe(3);
+    });
+
     it('offerVerification is true when resulting on-hand is at the OPPORTUNISTIC_PROMPT_FLOOR with no minQuantity set', async () => {
       prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
@@ -1431,6 +1502,22 @@ describe('ItemsService', () => {
       );
 
       const result = await service.consume(ITEM_ID, 2);
+      expect(result.offerVerification).toBe(true);
+    });
+
+    it('uses the OPPORTUNISTIC_PROMPT_FLOOR when minQuantity is a small positive value below it', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      stockMovementsMock.recordConsumption.mockResolvedValue({
+        movement: { id: 'mv-1' },
+        consumedQuantity: 1,
+      });
+      // minQuantity=1 is below OPPORTUNISTIC_PROMPT_FLOOR (2) — the flat
+      // floor should still apply via Math.max, not the lower minQuantity.
+      prismaMock.item.findUniqueOrThrow.mockResolvedValue(
+        makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR, minQuantity: 1 }),
+      );
+
+      const result = await service.consume(ITEM_ID, 1);
       expect(result.offerVerification).toBe(true);
     });
   });

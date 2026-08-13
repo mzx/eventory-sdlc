@@ -530,6 +530,20 @@ describe('ItemsController', () => {
           ),
         ).rejects.toThrow(BadRequestException);
       });
+
+      // EVT-27 review round 2, finding 3: `@IsISO8601({ strict: true })`
+      // (not `@IsDateString()`) rejects calendar-invalid dates like
+      // 2026-02-30, which the plain `Date` constructor would otherwise
+      // silently roll over into a value that fails later as an unhandled
+      // 500 in Prisma.
+      it('throws BadRequestException when lastVerifiedAt is a calendar-invalid date', async () => {
+        await expect(
+          pipe.transform(
+            { lastVerifiedAt: '2026-02-30T00:00:00.000Z' },
+            { type: 'body', metatype: UpdateItemDto },
+          ),
+        ).rejects.toThrow(BadRequestException);
+      });
     });
 
     // -----------------------------------------------------------------------
@@ -553,6 +567,23 @@ describe('ItemsController', () => {
           BadRequestException,
         );
       });
+
+      // EVT-27 review round 2, finding 2: the Postgres INTEGER upper bound
+      // must be enforced at the DTO layer, not left to fail as an
+      // unhandled 500 in Prisma.
+      it('accepts quantity at the INTEGER upper bound (2147483647)', async () => {
+        const dto = await pipe.transform(
+          { quantity: 2147483647 },
+          { type: 'body', metatype: CountItemDto },
+        );
+        expect(dto).toEqual({ quantity: 2147483647 });
+      });
+
+      it('throws BadRequestException when quantity exceeds the INTEGER upper bound', async () => {
+        await expect(
+          pipe.transform({ quantity: 2147483648 }, { type: 'body', metatype: CountItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
     });
 
     describe('ConsumeItemDto', () => {
@@ -567,6 +598,21 @@ describe('ItemsController', () => {
       it('throws BadRequestException when quantity is 0 (nothing to consume)', async () => {
         await expect(
           pipe.transform({ quantity: 0 }, { type: 'body', metatype: ConsumeItemDto }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      // EVT-27 review round 2, finding 2 — see CountItemDto above.
+      it('accepts quantity at the INTEGER upper bound (2147483647)', async () => {
+        const dto = await pipe.transform(
+          { quantity: 2147483647 },
+          { type: 'body', metatype: ConsumeItemDto },
+        );
+        expect(dto).toEqual({ quantity: 2147483647 });
+      });
+
+      it('throws BadRequestException when quantity exceeds the INTEGER upper bound', async () => {
+        await expect(
+          pipe.transform({ quantity: 2147483648 }, { type: 'body', metatype: ConsumeItemDto }),
         ).rejects.toThrow(BadRequestException);
       });
     });

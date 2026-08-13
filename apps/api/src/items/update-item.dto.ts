@@ -1,7 +1,7 @@
 import {
   IsArray,
-  IsDateString,
   IsInt,
+  IsISO8601,
   IsNotEmpty,
   IsObject,
   IsOptional,
@@ -61,9 +61,15 @@ export class UpdateItemDto {
    * `.consume`; this lets the item form correct a mistaken date. ISO date
    * string; `undefined` leaves it unchanged, explicit `null` clears it back
    * to "never verified".
+   *
+   * `@IsISO8601({ strict: true })` rather than `@IsDateString()` — the
+   * latter accepts calendar-invalid dates like `2026-02-30` (JS's `Date`
+   * constructor silently rolls them over to March), which would otherwise
+   * reach Prisma as an `Invalid Date` and fail as an unhandled 500 instead
+   * of a 400 (EVT-27 review round 2, finding 3).
    */
   @IsOptional()
-  @IsDateString()
+  @IsISO8601({ strict: true })
   lastVerifiedAt?: string | null;
 
   @IsOptional()

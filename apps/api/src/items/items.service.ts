@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AiAnalysisResult, AiService, STUB_ANALYSIS } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -515,6 +515,19 @@ export class ItemsService {
    * changed). `lastVerifiedAt` is ALWAYS stamped to now, regardless of
    * whether the count matched — the verification itself happened either way,
    * which is what keeps the item off the overdue queue.
+   *
+   * Known race (EVT-27 review round 2, security-reviewer, optional): the
+   * read-then-write here (read `current.quantity`, compute `delta`, apply
+   * via `recordMovement`'s blind `{ increment: delta }`) is not race-safe
+   * against a concurrent count/consume of the same item — two overlapping
+   * blind counts can each compute their delta from the same stale
+   * `current.quantity` and, once both apply, drive `Item.quantity` negative
+   * or otherwise off either counter's intended value. Unlike `consume`,
+   * this can't be fixed by routing through `recordConsumption`'s
+   * conditional-decrement retry (that helper only clamps a one-directional
+   * decrement; a count's delta can be positive or negative). A full fix
+   * (conditional update keyed on the pre-read quantity, with retry) is out
+   * of scope for this round.
    */
   async count(id: string, countedQuantity: number, createdById?: string) {
     return this.prisma.$transaction(async (tx) => {
@@ -560,6 +573,18 @@ export class ItemsService {
    * its doc comment; this is the first endpoint to actually write the
    * `consume` StockMovementKind, previously reserved-but-unwritten).
    *
+   * `recordConsumption` returns `null` when there is nothing on hand to
+   * consume (on-hand was already 0, or hit 0 mid-retry-loop — see its doc
+   * comment). Unlike `ProjectsService.backflush()` — which loops over
+   * multiple BOM lines and can legitimately skip a single line with a
+   * shortage — this is the item's ONLY requested consumption, so a `null`
+   * result means the whole request failed and must not be swallowed: it is
+   * surfaced as a 409 `ConflictException` rather than falling through to a
+   * 200 that implies a movement was written (EVT-27 review round 2, finding
+   * 1). `consumedQuantity` is echoed back on success so the caller can tell
+   * "consumed 3 of the 5 requested" apart from "consumed nothing" without
+   * a second read.
+   *
    * `offerVerification` on the response is `true` when the resulting
    * on-hand is at or below `max(minQuantity ?? 0, 2)` — the "how many are
    * actually left?" opportunistic-counting moment (EVT-27 AC 4, Mechanics
@@ -575,13 +600,16 @@ export class ItemsService {
         throw new NotFoundException(`Item ${id} not found`);
       }
 
-      await this.stockMovementsService.recordConsumption(tx, {
+      const result = await this.stockMovementsService.recordConsumption(tx, {
         itemId: id,
         kind: 'consume',
         requestedQuantity,
         createdById,
         note: 'Consumed',
       });
+      if (!result) {
+        throw new ConflictException(`Item ${id} has nothing on hand to consume`);
+      }
 
       const item = await tx.item.findUniqueOrThrow({
         where: { id },
@@ -591,7 +619,7 @@ export class ItemsService {
       const threshold = Math.max(item.minQuantity ?? 0, OPPORTUNISTIC_PROMPT_FLOOR);
       const offerVerification = item.quantity <= threshold;
 
-      return { item, offerVerification };
+      return { item, offerVerification, consumedQuantity: result.consumedQuantity };
     });
   }
 
