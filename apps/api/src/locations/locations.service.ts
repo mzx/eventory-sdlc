@@ -58,6 +58,15 @@ export interface LocationDetail {
   breadcrumb: Array<{ segment: string; path: string }>;
 }
 
+/**
+ * Bounds `moveContainer`'s P2034 (serialization failure / deadlock) retry
+ * loop — see that method's doc comment for why the retry exists. Matches
+ * the retry bound `recordConsumption` uses in stock-movements.service.ts
+ * (EVT-28), the established precedent in this codebase for a bounded
+ * retry-on-transient-conflict loop.
+ */
+const MAX_MOVE_RETRIES = 5;
+
 @Injectable()
 export class LocationsService {
   constructor(
@@ -285,6 +294,39 @@ export class LocationsService {
    * transaction for requests that can never succeed; it is never trusted for
    * the actual cycle decision.
    *
+   * Single-statement subtree lock (EVT-30 round 4 — code + security
+   * reviewers independently converged on the same MAJOR): round 3 acquired
+   * the id-based container+destination lock and the whole-subtree lock as
+   * TWO separate `SELECT ... FOR UPDATE` statements. `ORDER BY id` only
+   * guarantees a deterministic acquisition order WITHIN a single statement
+   * — across that two-statement pair, the *combined* acquisition order was
+   * no longer globally consistent, because a concurrent mover could
+   * interleave its own lock acquisition between them. Concretely: container
+   * C has nested child container D; `A.move(C → X)` locks {C, X} in
+   * statement 1, then goes to lock C's subtree (including D) in statement
+   * 2; concurrently `B.move(D → X)` locks {D} first, then blocks on X (held
+   * by A); A now blocks on D (held by B) — circular wait, and Postgres's
+   * deadlock detector kills one side with error code P2034. Fixed by
+   * folding BOTH lock targets into ONE `SELECT ... FOR UPDATE` statement —
+   * `id = ANY(...) OR path = <old> OR path LIKE <old> || '.%'` — so the
+   * whole union set (container + destination + entire subtree) is locked
+   * in a single ascending-id sweep, restoring the deterministic global lock
+   * order two concurrent movers rely on to avoid deadlocking. `<old>` here
+   * is the container's path as read by the pre-transaction fast-fail lookup
+   * above — it only seeds which rows this one statement locks; every
+   * decision this method makes afterwards (the cycle check, the new path,
+   * the descendant rewrite) always uses the FRESH, post-lock
+   * `freshContainer.path` instead, never this pre-lock hint.
+   *
+   * P2034 resilience (EVT-30 round 4): even with correct lock ordering,
+   * transient serialization conflicts between overlapping subtree locks
+   * remain possible under concurrent load. Rather than let Prisma's P2034
+   * surface as an unhandled 500, the whole transaction is retried up to
+   * `MAX_MOVE_RETRIES` times (same bound `recordConsumption` uses in
+   * stock-movements.service.ts, the established retry-on-transient-conflict
+   * precedent in this codebase); a persistent failure after the retry
+   * budget is exhausted maps to 409 Conflict.
+   *
    * Records exactly ONE itemless `move` `StockMovement` for the container
    * itself (EVT-30 AC 3) — never one row per contained item.
    */
@@ -326,156 +368,153 @@ export class LocationsService {
       return this.findOne(id);
     }
 
-    try {
-      await this.prisma.$transaction(async (tx) => {
-        // Row-lock BOTH the container and the destination parent (when one
-        // is given) with `SELECT ... FOR UPDATE`, in ascending-id order.
-        // Locking in a deterministic order — regardless of which row is the
-        // "container" and which is the "destination" from this call's point
-        // of view — means two concurrent moveContainer calls that touch the
-        // same two rows (e.g. A→B and, concurrently, B→A) always request
-        // their locks in the same order, so the second call blocks until
-        // the first commits/rolls back instead of deadlocking. Once
-        // unblocked, the second call re-reads the POST-first-move state and
-        // re-runs the cycle check against it — this is what closes the
-        // TOCTOU window.
-        //
-        // `= ANY(ARRAY[...]::uuid[])`, not a bare `IN (...)` (EVT-30 round 3
-        // regression, caught by the new locations.e2e-spec.ts DB-level test
-        // against real Postgres — every unit test mocks `$queryRaw`, so this
-        // was invisible there): an un-cast `IN (${Prisma.join(lockIds)})`
-        // binds each id as `text`, and Postgres has no `uuid = text`
-        // operator, so this raw query 500'd on every real "Move to…" request.
-        // The explicit `::uuid[]` cast (same pattern as
-        // `ItemsService.matchingItemHitsForTerms`'s `::text[]` cast) fixes it.
-        const lockIds = Array.from(new Set(toParentId ? [id, toParentId] : [id])).sort();
-        const lockedRows = await tx.$queryRaw<
-          Array<{
-            id: string;
-            path: string;
-            parentId: string | null;
-            kind: LocationKind;
-            name: string;
-          }>
-        >(Prisma.sql`
-          SELECT id, path, "parentId", kind, name
-          FROM "Location"
-          WHERE id = ANY(ARRAY[${Prisma.join(lockIds)}]::uuid[])
-          ORDER BY id
-          FOR UPDATE
-        `);
-        const lockedById = new Map(lockedRows.map((row) => [row.id, row]));
+    // Bounded retry: a transaction that aborts with Prisma P2034 (Postgres
+    // serialization failure / deadlock victim) is safe to retry outright —
+    // it made no committed writes — see the doc comment above for why this
+    // remains possible even with the single-statement lock below.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          // Single-statement lock over the UNION of (a) the container and
+          // destination rows, by id, and (b) the container's entire
+          // subtree, by path prefix — see the doc comment above for why
+          // this MUST be one statement rather than two. `ORDER BY id`
+          // makes the whole union set's acquisition order deterministic,
+          // so two concurrent movers that touch overlapping rows always
+          // request their locks in the same relative order and block
+          // instead of deadlocking.
+          //
+          // `= ANY(ARRAY[...]::uuid[])`, not a bare `IN (...)` (EVT-30
+          // round 3 regression, caught by the new locations.e2e-spec.ts
+          // DB-level test against real Postgres — every unit test mocks
+          // `$queryRaw`, so this was invisible there): an un-cast
+          // `IN (${Prisma.join(lockIds)})` binds each id as `text`, and
+          // Postgres has no `uuid = text` operator, so this raw query
+          // 500'd on every real "Move to…" request. The explicit
+          // `::uuid[]` cast (same pattern as
+          // `ItemsService.matchingItemHitsForTerms`'s `::text[]` cast)
+          // fixes it.
+          const lockIds = Array.from(new Set(toParentId ? [id, toParentId] : [id])).sort();
+          const lockedRows = await tx.$queryRaw<
+            Array<{
+              id: string;
+              path: string;
+              parentId: string | null;
+              kind: LocationKind;
+              name: string;
+            }>
+          >(Prisma.sql`
+            SELECT id, path, "parentId", kind, name
+            FROM "Location"
+            WHERE id = ANY(ARRAY[${Prisma.join(lockIds)}]::uuid[])
+               OR path = ${location.path}
+               OR path LIKE ${location.path} || '.%'
+            ORDER BY id
+            FOR UPDATE
+          `);
+          const lockedById = new Map(lockedRows.map((row) => [row.id, row]));
 
-        const freshContainer = lockedById.get(id);
-        if (!freshContainer) {
-          throw new NotFoundException(`Location ${id} not found`);
-        }
-        if (freshContainer.kind !== 'container') {
-          throw new BadRequestException(
-            `Only container locations can be moved; "${freshContainer.name}" is an area. Area locations keep the existing add/rename/delete flows.`,
-          );
-        }
-
-        // Lock the ENTIRE subtree rooted at the container BEFORE running the
-        // ancestry (cycle) check below (EVT-30 round 3, security-reviewer
-        // minor finding) — the id-based lock above only pins the
-        // container's own row and the destination row; the raw path-rewrite
-        // `UPDATE` further down touches every row currently inside the
-        // subtree, none of which is otherwise locked. Without this, a row
-        // moved INTO the subtree by a concurrent request, in the window
-        // between the ancestry check and that `UPDATE`, could keep a stale
-        // path. Closing the gap: a concurrent mover locks its OWN
-        // destination row via this same `SELECT ... FOR UPDATE` idiom, so
-        // if that destination is one of the rows locked here, it now blocks
-        // until THIS transaction commits/rolls back. `ORDER BY id`, same
-        // lock-order discipline as the lock above, so two overlapping
-        // subtree locks block deterministically instead of deadlocking.
-        const oldPath = freshContainer.path;
-        await tx.$queryRaw`
-          SELECT id
-          FROM "Location"
-          WHERE path = ${oldPath} OR path LIKE ${oldPath} || '.%'
-          ORDER BY id
-          FOR UPDATE
-        `;
-
-        let freshParent: { id: string; path: string } | null = null;
-        if (toParentId) {
-          const candidate = lockedById.get(toParentId);
-          if (!candidate) {
-            throw new NotFoundException(`Location ${toParentId} not found`);
+          const freshContainer = lockedById.get(id);
+          if (!freshContainer) {
+            throw new NotFoundException(`Location ${id} not found`);
           }
-          if (candidate.path === freshContainer.path || candidate.path.startsWith(`${oldPath}.`)) {
-            throw new UnprocessableEntityException(
-              `Cannot move "${freshContainer.name}" into itself or one of its own descendants`,
+          if (freshContainer.kind !== 'container') {
+            throw new BadRequestException(
+              `Only container locations can be moved; "${freshContainer.name}" is an area. Area locations keep the existing add/rename/delete flows.`,
             );
           }
-          freshParent = { id: candidate.id, path: candidate.path };
-        }
 
-        // Re-check the no-op condition against the LOCKED read — a
-        // concurrent move could have already landed the container at this
-        // exact destination between the outer fast-path check and
-        // acquiring the lock here.
-        if ((toParentId ?? null) === freshContainer.parentId) {
-          return;
-        }
+          const oldPath = freshContainer.path;
 
-        const leafSlug = oldPath.split('.').pop() as string;
-        const newPath = freshParent ? `${freshParent.path}.${leafSlug}` : leafSlug;
-
-        if (newPath !== oldPath) {
-          const conflict = await tx.location.findFirst({
-            where: { path: newPath, id: { not: id } },
-          });
-          if (conflict) {
-            throw new ConflictException(`A location with path "${newPath}" already exists`);
+          let freshParent: { id: string; path: string } | null = null;
+          if (toParentId) {
+            const candidate = lockedById.get(toParentId);
+            if (!candidate) {
+              throw new NotFoundException(`Location ${toParentId} not found`);
+            }
+            if (
+              candidate.path === freshContainer.path ||
+              candidate.path.startsWith(`${oldPath}.`)
+            ) {
+              throw new UnprocessableEntityException(
+                `Cannot move "${freshContainer.name}" into itself or one of its own descendants`,
+              );
+            }
+            freshParent = { id: candidate.id, path: candidate.path };
           }
-        }
 
-        const fromLocationId = freshContainer.parentId;
+          // Re-check the no-op condition against the LOCKED read — a
+          // concurrent move could have already landed the container at this
+          // exact destination between the outer fast-path check and
+          // acquiring the lock here.
+          if ((toParentId ?? null) === freshContainer.parentId) {
+            return;
+          }
 
-        await tx.location.update({
-          where: { id },
-          data: { parentId: toParentId, path: newPath },
+          const leafSlug = oldPath.split('.').pop() as string;
+          const newPath = freshParent ? `${freshParent.path}.${leafSlug}` : leafSlug;
+
+          if (newPath !== oldPath) {
+            const conflict = await tx.location.findFirst({
+              where: { path: newPath, id: { not: id } },
+            });
+            if (conflict) {
+              throw new ConflictException(`A location with path "${newPath}" already exists`);
+            }
+          }
+
+          const fromLocationId = freshContainer.parentId;
+
+          await tx.location.update({
+            where: { id },
+            data: { parentId: toParentId, path: newPath },
+          });
+
+          // Same SUBSTRING-based prefix rewrite as `rename` — see that
+          // method's doc comment for why REPLACE() would corrupt paths where
+          // the same slug repeats at multiple depths.
+          if (newPath !== oldPath) {
+            const oldPrefix = `${oldPath}.`;
+            const newPrefix = `${newPath}.`;
+            await tx.$executeRaw`
+              UPDATE "Location"
+              SET    path = ${newPrefix} || SUBSTRING(path FROM LENGTH(${oldPrefix}) + 1)
+              WHERE  path LIKE ${oldPrefix + '%'}
+            `;
+          }
+
+          const input: RecordContainerMoveInput = {
+            containerId: id,
+            fromLocationId,
+            toLocationId: toParentId,
+            createdById,
+            // Denormalize the container's name into `note` (EVT-30 review
+            // round 2, finding 4) — `StockMovement.container` now uses
+            // `onDelete: SetNull` rather than `Cascade` (the audit trail must
+            // survive the container being deleted later), so once
+            // `containerId` is nulled out this is the only remaining
+            // human-readable trace of which container this row was about.
+            note: `Container "${freshContainer.name}" moved`,
+          };
+          await this.stockMovementsService.recordContainerMove(tx, input);
         });
 
-        // Same SUBSTRING-based prefix rewrite as `rename` — see that
-        // method's doc comment for why REPLACE() would corrupt paths where
-        // the same slug repeats at multiple depths.
-        if (newPath !== oldPath) {
-          const oldPrefix = `${oldPath}.`;
-          const newPrefix = `${newPath}.`;
-          await tx.$executeRaw`
-            UPDATE "Location"
-            SET    path = ${newPrefix} || SUBSTRING(path FROM LENGTH(${oldPrefix}) + 1)
-            WHERE  path LIKE ${oldPrefix + '%'}
-          `;
+        return this.findOne(id);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          throw new ConflictException(`A location with the target path already exists`);
         }
-
-        const input: RecordContainerMoveInput = {
-          containerId: id,
-          fromLocationId,
-          toLocationId: toParentId,
-          createdById,
-          // Denormalize the container's name into `note` (EVT-30 review
-          // round 2, finding 4) — `StockMovement.container` now uses
-          // `onDelete: SetNull` rather than `Cascade` (the audit trail must
-          // survive the container being deleted later), so once
-          // `containerId` is nulled out this is the only remaining
-          // human-readable trace of which container this row was about.
-          note: `Container "${freshContainer.name}" moved`,
-        };
-        await this.stockMovementsService.recordContainerMove(tx, input);
-      });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        throw new ConflictException(`A location with the target path already exists`);
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2034') {
+          if (attempt < MAX_MOVE_RETRIES - 1) {
+            continue;
+          }
+          throw new ConflictException(
+            `Could not move "${location.name}" right now — it conflicted with another move in progress. Please try again.`,
+          );
+        }
+        throw err;
       }
-      throw err;
     }
-
-    return this.findOne(id);
   }
 
   /**

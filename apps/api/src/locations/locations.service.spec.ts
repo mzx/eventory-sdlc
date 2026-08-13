@@ -544,11 +544,12 @@ describe('LocationsService', () => {
       const result = await service.moveContainer('box-1', 'shelf-2', 'user-1');
 
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      // Two lock queries now (EVT-30 round 3 hardening): the id-based
-      // container+destination lock, THEN the whole-subtree path-prefix lock
-      // — see the "locks the whole moved subtree" spec below for the shape
-      // assertion on the second call.
-      expect(txClient.$queryRaw).toHaveBeenCalledTimes(2);
+      // ONE merged lock query now (EVT-30 round 4 — code + security
+      // reviewers, converging on the same MAJOR): the id-based
+      // container+destination lock and the whole-subtree path-prefix lock
+      // are folded into a single `SELECT ... FOR UPDATE` statement — see
+      // the "single-statement lock" spec below for the shape assertion.
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
       expect(txClient.location.update).toHaveBeenCalledWith({
         where: { id: 'box-1' },
         data: { parentId: 'shelf-2', path: 'garage.shelf-2.box-1' },
@@ -563,16 +564,17 @@ describe('LocationsService', () => {
       expect(result).toMatchObject({ id: 'box-1', path: 'garage.shelf-2.box-1' });
     });
 
-    // EVT-30 round 3, security-reviewer minor finding: the id-based lock at
-    // the top of moveContainer only pins the container's own row and the
-    // destination row — the raw SUBSTRING path-rewrite further down touches
-    // every row currently inside the subtree, none of which were otherwise
-    // locked, leaving a window where a row concurrently moved INTO the
-    // subtree could keep a stale path. This asserts the SECOND `$queryRaw`
-    // call — issued BEFORE the ancestry check — locks the entire subtree by
-    // path prefix, ascending by id, matching the fix's lock-order
-    // discipline.
-    it('locks the whole moved subtree (path prefix, FOR UPDATE, ORDER BY id) before the ancestry check', async () => {
+    // EVT-30 round 4 — code + security reviewers independently converged on
+    // the same MAJOR: acquiring the id-based container+destination lock and
+    // the whole-subtree path-prefix lock as TWO separate
+    // `SELECT ... FOR UPDATE` statements only guarantees ascending-id order
+    // WITHIN each statement — the combined two-statement acquisition order
+    // was not globally deterministic, which could deadlock two concurrent
+    // movers (see moveContainer's doc comment for the concrete scenario).
+    // This asserts the fix: ONE `$queryRaw` call whose SQL text contains
+    // BOTH the id-array condition AND the path-prefix condition, still
+    // FOR UPDATE / ORDER BY id.
+    it('acquires the container+destination+subtree lock in ONE statement (id-array OR path-prefix, FOR UPDATE, ORDER BY id)', async () => {
       const box = makeLocation({
         id: 'box-1',
         name: 'Tote Box',
@@ -600,20 +602,58 @@ describe('LocationsService', () => {
 
       await service.moveContainer('box-1', 'shelf-2', 'user-1');
 
-      expect(txClient.$queryRaw).toHaveBeenCalledTimes(2);
-      const [subtreeLockStrings, ...subtreeLockValues] = txClient.$queryRaw.mock.calls[1] as [
-        readonly string[],
-        ...unknown[],
-      ];
-      const subtreeLockSql = subtreeLockStrings.join('?');
-      expect(subtreeLockSql).toContain('FOR UPDATE');
-      expect(subtreeLockSql).toContain('ORDER BY id');
-      expect(subtreeLockSql).toContain('path =');
-      expect(subtreeLockSql).toContain('path LIKE');
-      // Both interpolated params are the container's own (locked) path —
-      // `path = <old>` (the container's own row) OR `path LIKE <old> || '.%'`
-      // (every descendant).
-      expect(subtreeLockValues).toEqual(['garage.box-1', 'garage.box-1']);
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
+      const [lockQuery] = txClient.$queryRaw.mock.calls[0] as [Prisma.Sql];
+      expect(lockQuery.sql).toContain('FOR UPDATE');
+      expect(lockQuery.sql).toContain('ORDER BY id');
+      expect(lockQuery.sql).toContain('id = ANY(ARRAY[');
+      expect(lockQuery.sql).toContain('::uuid[]');
+      expect(lockQuery.sql).toContain('path =');
+      expect(lockQuery.sql).toContain('path LIKE');
+      // Interpolated params: the sorted, deduped lock ids first, then the
+      // container's own (pre-transaction-read) path twice — `path = <old>`
+      // (the container's own row) OR `path LIKE <old> || '.%'` (every
+      // descendant).
+      expect(lockQuery.values).toEqual(['box-1', 'shelf-2', 'garage.box-1', 'garage.box-1']);
+    });
+
+    // Test-reviewer cheap win: prove the lock ids are actually sorted
+    // ascending (not just passed through in call-argument order) by using
+    // ids that sort in the OPPOSITE order from how they're passed in.
+    it('sorts the interpolated lock ids ascending regardless of call-argument order', async () => {
+      const box = makeLocation({
+        id: 'zzz-box',
+        name: 'Zeta Box',
+        path: 'garage.zzz-box',
+        parentId: 'garage',
+        kind: 'container',
+      });
+      const finalDetail = { ...box, path: 'aaa-shelf.zzz-box', children: [], items: [] };
+
+      locationMock.findUnique
+        .mockResolvedValueOnce(box)
+        .mockResolvedValueOnce({ id: 'aaa-shelf' })
+        .mockResolvedValueOnce(finalDetail);
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'zzz-box', path: 'garage.zzz-box', parentId: 'garage', name: 'Zeta Box' }),
+        lockedRow({ id: 'aaa-shelf', path: 'aaa-shelf', parentId: null, kind: 'area' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue(null);
+      txClient.location.update.mockResolvedValue({
+        ...box,
+        parentId: 'aaa-shelf',
+        path: 'aaa-shelf.zzz-box',
+      });
+      txClient.$executeRaw.mockResolvedValue(0);
+
+      await service.moveContainer('zzz-box', 'aaa-shelf', 'user-1');
+
+      const [lockQuery] = txClient.$queryRaw.mock.calls[0] as [Prisma.Sql];
+      // Called as moveContainer('zzz-box', 'aaa-shelf') — argument order is
+      // [zzz-box, aaa-shelf], but the ascending-id lock discipline the fix
+      // relies on requires the interpolated array to be sorted, so the
+      // FIRST two values must come back alphabetically ascending.
+      expect(lockQuery.values.slice(0, 2)).toEqual(['aaa-shelf', 'zzz-box']);
     });
 
     it('rewrites descendant paths via the same SUBSTRING-based $executeRaw as rename', async () => {
@@ -699,11 +739,11 @@ describe('LocationsService', () => {
       // read inside it, not the pre-transaction snapshot (EVT-30 review
       // round 2, finding 1).
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      // Both lock queries run BEFORE the ancestry check throws (EVT-30
-      // round 3 hardening) — the whole-subtree lock is acquired
-      // unconditionally ahead of the cycle guard, not skipped on the
-      // eventual-rejection path.
-      expect(txClient.$queryRaw).toHaveBeenCalledTimes(2);
+      // The single merged lock (container + destination + whole subtree,
+      // EVT-30 round 4) runs BEFORE the ancestry check throws — it's
+      // acquired unconditionally ahead of the cycle guard, not skipped on
+      // the eventual-rejection path.
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
       expect(txClient.location.update).not.toHaveBeenCalled();
     });
 
@@ -827,6 +867,85 @@ describe('LocationsService', () => {
       await expect(service.moveContainer('box-1', 'shelf-2')).rejects.toBeInstanceOf(
         ConflictException,
       );
+    });
+
+    // EVT-30 round 4: even with the single-statement, ascending-id lock
+    // order restored above, transient Postgres serialization
+    // failures/deadlocks (Prisma error code P2034) between overlapping
+    // subtree locks remain possible under concurrent load. These two specs
+    // cover the retry-then-succeed and retry-budget-exhausted paths — see
+    // `recordConsumption` in stock-movements.service.ts for the retry-loop
+    // precedent this follows.
+    function p2034Error() {
+      return new Prisma.PrismaClientKnownRequestError(
+        'could not serialize access due to concurrent update',
+        { code: 'P2034', clientVersion: '5.0.0', meta: {} },
+      );
+    }
+
+    it('retries the transaction on P2034 and succeeds once the conflict clears', async () => {
+      const box = makeLocation({
+        id: 'box-1',
+        name: 'Tote Box',
+        path: 'garage.box-1',
+        parentId: 'garage',
+        kind: 'container',
+      });
+      const finalDetail = { ...box, path: 'garage.shelf-2.box-1', children: [], items: [] };
+
+      locationMock.findUnique
+        .mockResolvedValueOnce(box)
+        .mockResolvedValueOnce({ id: 'shelf-2' })
+        .mockResolvedValueOnce(finalDetail);
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage', name: 'Tote Box' }),
+        lockedRow({ id: 'shelf-2', path: 'garage.shelf-2', parentId: 'garage', kind: 'area' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue(null);
+      txClient.location.update.mockResolvedValue({
+        ...box,
+        parentId: 'shelf-2',
+        path: 'garage.shelf-2.box-1',
+      });
+      txClient.$executeRaw.mockResolvedValue(0);
+
+      let calls = 0;
+      prismaMock.$transaction.mockImplementation(
+        async (fn: (tx: typeof txClient) => Promise<unknown>) => {
+          calls++;
+          if (calls < 3) {
+            throw p2034Error();
+          }
+          return fn(txClient);
+        },
+      );
+
+      const result = await service.moveContainer('box-1', 'shelf-2', 'user-1');
+
+      // Two failed attempts, then a third that succeeds — the transaction
+      // itself was retried, not just re-thrown.
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(3);
+      expect(result).toMatchObject({ id: 'box-1', path: 'garage.shelf-2.box-1' });
+    });
+
+    it('gives up after the retry budget and maps a persistent P2034 to 409 Conflict, never an unhandled 500', async () => {
+      const box = makeLocation({
+        id: 'box-1',
+        name: 'Tote Box',
+        path: 'garage.box-1',
+        parentId: 'garage',
+        kind: 'container',
+      });
+
+      locationMock.findUnique.mockResolvedValueOnce(box).mockResolvedValueOnce({ id: 'shelf-2' });
+      prismaMock.$transaction.mockRejectedValue(p2034Error());
+
+      await expect(service.moveContainer('box-1', 'shelf-2')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      // Bounded — matches `recordConsumption`'s retry bound (5) in
+      // stock-movements.service.ts, not an unbounded/single-shot retry.
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(5);
     });
   });
 
