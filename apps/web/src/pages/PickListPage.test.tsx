@@ -165,6 +165,70 @@ describe('PickListPage (EVT-29 AC 3, 5)', () => {
     await waitFor(() => expect(fetchAvailabilityMock).toHaveBeenCalledTimes(2));
   });
 
+  it('unchecking a picked line persists picked: false via updateBomLine', async () => {
+    vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+      availability({ lines: [availabilityLine({ picked: true })] }),
+    );
+    const updateBomLineMock = vi.spyOn(api, 'updateBomLine').mockResolvedValue({
+      id: 'line-1',
+      projectId: 'project-1',
+      itemId: 'item-1',
+      name: 'Cordless drill',
+      quantity: 2,
+      unit: null,
+      notes: null,
+      picked: false,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      item: { id: 'item-1', name: 'Cordless drill', qrCode: 'qr-1' },
+    });
+
+    const user = userEvent.setup();
+    renderPage();
+
+    const checkbox = await screen.findByLabelText('Picked Cordless drill');
+    expect(checkbox).toBeChecked();
+
+    await user.click(checkbox);
+
+    await waitFor(() =>
+      expect(updateBomLineMock).toHaveBeenCalledWith('project-1', 'line-1', { picked: false }),
+    );
+  });
+
+  it('shows an error alert when a pick toggle fails, without silently reverting', async () => {
+    vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+      availability({ lines: [availabilityLine({ picked: false })] }),
+    );
+    vi.spyOn(api, 'updateBomLine').mockRejectedValue(new Error('pick update boom'));
+
+    const user = userEvent.setup();
+    renderPage();
+
+    const checkbox = await screen.findByLabelText('Picked Cordless drill');
+    await user.click(checkbox);
+
+    expect(await screen.findByText('pick update boom')).toBeInTheDocument();
+  });
+
+  it('orders multiple lines within the same location group (AC 3)', async () => {
+    vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+      availability({
+        lines: [
+          availabilityLine({ lineId: 'line-1', name: 'Cordless drill' }),
+          availabilityLine({ lineId: 'line-2', name: 'M3 screws' }),
+        ],
+      }),
+    );
+
+    renderPage();
+
+    await screen.findByText('Cabinet 3 (garage.cabinet-3)');
+    const rowNames = screen.getAllByText(/Cordless drill|M3 screws/);
+    expect(rowNames[0]).toHaveTextContent('Cordless drill');
+    expect(rowNames[1]).toHaveTextContent('M3 screws');
+  });
+
   it('has a Back to project link and a Print trigger (AC 5)', async () => {
     vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(availability());
     const printSpy = vi.spyOn(window, 'print').mockImplementation(() => {});

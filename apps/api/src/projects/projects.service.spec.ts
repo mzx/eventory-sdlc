@@ -533,6 +533,63 @@ describe('ProjectsService', () => {
       ]);
     });
 
+    it('aggregates demand across multiple BOM lines that share the same item and flags the shortfall (AC 1)', async () => {
+      // Two BOM lines both link "M3 screw" (item-1): line A needs 2, line B
+      // needs 3. On-hand is 3. Evaluated in isolation both lines would read
+      // "ok" against the same raw onHand=3 (bug); aggregated demand is
+      // 2 + 3 = 5 > 3, so the later line (createdAt-asc order) must be
+      // marked short and clearToBuild must flip to false.
+      projectMock.findUnique.mockResolvedValue({
+        ...makeProject(),
+        bomLines: [
+          {
+            ...makeBomLine({ id: 'line-a', itemId: 'item-1', name: 'M3 screw', quantity: 2 }),
+            item: { id: 'item-1', quantity: 3, location: null },
+          },
+          {
+            ...makeBomLine({ id: 'line-b', itemId: 'item-1', name: 'M3 screw', quantity: 3 }),
+            item: { id: 'item-1', quantity: 3, location: null },
+          },
+        ],
+      });
+
+      const result = await service.availability('project-1');
+
+      expect(result.counts).toEqual({ ok: 1, short: 1, untracked: 0 });
+      expect(result.clearToBuild).toBe(false);
+      expect(result.lines).toEqual([
+        expect.objectContaining({ lineId: 'line-a', onHand: 3, status: 'ok' }),
+        expect.objectContaining({ lineId: 'line-b', onHand: 3, status: 'short' }),
+      ]);
+    });
+
+    it('marks both same-item lines ok when their combined demand fits on-hand (AC 1)', async () => {
+      // Same shared item across two lines, but combined demand (2 + 3 = 5)
+      // fits within on-hand (5): both lines should read ok.
+      projectMock.findUnique.mockResolvedValue({
+        ...makeProject(),
+        bomLines: [
+          {
+            ...makeBomLine({ id: 'line-a', itemId: 'item-1', name: 'M3 screw', quantity: 2 }),
+            item: { id: 'item-1', quantity: 5, location: null },
+          },
+          {
+            ...makeBomLine({ id: 'line-b', itemId: 'item-1', name: 'M3 screw', quantity: 3 }),
+            item: { id: 'item-1', quantity: 5, location: null },
+          },
+        ],
+      });
+
+      const result = await service.availability('project-1');
+
+      expect(result.counts).toEqual({ ok: 2, short: 0, untracked: 0 });
+      expect(result.clearToBuild).toBe(true);
+      expect(result.lines).toEqual([
+        expect.objectContaining({ lineId: 'line-a', onHand: 5, status: 'ok' }),
+        expect.objectContaining({ lineId: 'line-b', onHand: 5, status: 'ok' }),
+      ]);
+    });
+
     it('is clear to build when every tracked line is ok, regardless of untracked lines (AC 1/2)', async () => {
       projectMock.findUnique.mockResolvedValue({
         ...makeProject(),

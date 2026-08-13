@@ -102,7 +102,12 @@ export interface AvailabilityLine {
   onHand: number | null;
   /** Where the linked item is stored; `null` for untracked lines or an unlocated item. */
   location: AvailabilityLocationRef | null;
-  /** `ok` (on-hand >= plan), `short` (on-hand < plan), or `untracked` (free-text, no itemId). */
+  /**
+   * `ok` (on-hand >= plan, after aggregating demand from earlier BOM lines
+   * that reference the same item), `short` (insufficient after aggregation),
+   * or `untracked` (free-text, no itemId). See `availability()`'s doc
+   * comment for the multi-line-same-item allocation order.
+   */
   status: AvailabilityStatus;
   /** Kitting pick-list check-off state (AC 3). Always `false` for untracked lines. */
   picked: boolean;
@@ -340,13 +345,32 @@ export class ProjectsService {
    * Clear-to-build check (AC 1, AC 2): every BOM line annotated with its
    * current on-hand, storage location, and a status —
    *
-   * - `ok`        — item-linked, on-hand >= plan quantity.
-   * - `short`     — item-linked, on-hand < plan quantity.
+   * - `ok`        — item-linked, and the item's on-hand can cover this
+   *                 line's plan quantity ONCE demand from any earlier BOM
+   *                 lines that reference the same item has already been
+   *                 deducted (see allocation order below).
+   * - `short`     — item-linked, but the item's on-hand — after that same
+   *                 deduction — is insufficient for this line.
    * - `untracked` — free-text (no `itemId`); not verifiable against
    *                 inventory at all, so it's counted SEPARATELY from a
    *                 shortage rather than folded into it (AC 1) and never
    *                 blocks `clearToBuild` (AC 1/2 — "green all-clear when
    *                 every TRACKED line is ok").
+   *
+   * Multi-line-same-item aggregation: two or more BOM lines may link the
+   * SAME item (e.g. a shared fastener used in two sub-assemblies). Each
+   * line's on-hand cannot be evaluated in isolation against the item's raw
+   * `quantity` — that double-counts stock. Instead we walk the lines in
+   * their query order (`createdAt asc`, i.e. the order they were added to
+   * the BOM) and greedily allocate the item's on-hand: the first line to
+   * need it gets first claim, decrementing a running "remaining" balance
+   * for that item; a later line for the same item is evaluated against
+   * whatever balance is left. This gives a deterministic, explainable
+   * answer ("earlier lines are cleared first") rather than splitting stock
+   * proportionally. `onHand` on each line still reports the item's actual
+   * total on-hand (not the post-allocation remainder) so the number shown
+   * to the user always matches inventory; `status` is what reflects the
+   * allocation outcome.
    *
    * Read-only, point-in-time — see `ProjectAvailability.asOf`'s doc comment
    * for the staleness contract (EVT-29 risk).
@@ -375,6 +399,10 @@ export class ProjectsService {
 
     const counts: AvailabilityCounts = { ok: 0, short: 0, untracked: 0 };
 
+    // Running on-hand balance per itemId, allocated greedily across BOM
+    // lines in createdAt-asc order (see doc comment above).
+    const remainingByItemId = new Map<string, number>();
+
     const lines: AvailabilityLine[] = project.bomLines.map((line) => {
       if (!line.item) {
         counts.untracked += 1;
@@ -392,7 +420,9 @@ export class ProjectsService {
       }
 
       const onHand = line.item.quantity;
-      const status: AvailabilityStatus = onHand >= line.quantity ? 'ok' : 'short';
+      const remaining = remainingByItemId.get(line.item.id) ?? onHand;
+      const status: AvailabilityStatus = remaining >= line.quantity ? 'ok' : 'short';
+      remainingByItemId.set(line.item.id, remaining - line.quantity);
       counts[status] += 1;
 
       return {

@@ -123,6 +123,14 @@ export function PickListPage() {
         </Alert>
       )}
 
+      {pickMutation.isError && (
+        <Alert severity="error" className="no-print" sx={{ mb: 2 }}>
+          {pickMutation.error instanceof Error
+            ? pickMutation.error.message
+            : 'Failed to update the pick state — please try again.'}
+        </Alert>
+      )}
+
       {availabilityQuery.data && (
         <PickListBody availability={availabilityQuery.data} onPick={pickMutation.mutate} />
       )}

@@ -765,6 +765,30 @@ describe('ProjectDetailPage', () => {
       await waitFor(() => expect(markRunningLowMock).toHaveBeenCalledWith('item-1'));
     });
 
+    it('shows an error alert when "Add to shopping list" fails (AC 4)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 5 })] }),
+      );
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({
+          clearToBuild: false,
+          counts: { ok: 0, short: 1, untracked: 0 },
+          lines: [
+            availabilityLine({ lineId: 'line-1', itemId: 'item-1', onHand: 2, status: 'short' }),
+          ],
+        }),
+      );
+      vi.spyOn(api, 'markRunningLow').mockRejectedValue(new Error('shopping list boom'));
+
+      const user = userEvent.setup();
+      renderPage();
+
+      const button = await screen.findByRole('button', { name: 'Add to shopping list' });
+      await user.click(button);
+
+      expect(await screen.findByText('shopping list boom')).toBeInTheDocument();
+    });
+
     it('an ok line does not offer "Add to shopping list"', async () => {
       vi.spyOn(api, 'fetchProject').mockResolvedValue(
         project({ bomLines: [bomLine({ id: 'line-1', itemId: 'item-1', quantity: 2 })] }),
