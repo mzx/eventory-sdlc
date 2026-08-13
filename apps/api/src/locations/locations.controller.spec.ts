@@ -1,7 +1,8 @@
-import { HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpStatus, ParseUUIDPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { LocationsController } from './locations.controller';
 import { LocationsService } from './locations.service';
+import { StockMovementsService } from '../stock-movements/stock-movements.service';
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -12,6 +13,7 @@ function makeLocation(overrides: Partial<Record<string, unknown>> = {}) {
     path: 'garage',
     parentId: null,
     qrCode: 'qr-garage',
+    kind: 'area',
     itemCount: 0,
     ...overrides,
   };
@@ -29,6 +31,11 @@ describe('LocationsController', () => {
     create: jest.fn(),
     rename: jest.fn(),
     remove: jest.fn(),
+    moveContainer: jest.fn(),
+  };
+
+  const stockMovementsServiceMock = {
+    listForContainer: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -36,7 +43,10 @@ describe('LocationsController', () => {
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [LocationsController],
-      providers: [{ provide: LocationsService, useValue: serviceMock }],
+      providers: [
+        { provide: LocationsService, useValue: serviceMock },
+        { provide: StockMovementsService, useValue: stockMovementsServiceMock },
+      ],
     }).compile();
 
     controller = module.get<LocationsController>(LocationsController);
@@ -148,6 +158,79 @@ describe('LocationsController', () => {
         LocationsController.prototype.remove,
       );
       expect(metadata).toBe(HttpStatus.NO_CONTENT);
+    });
+  });
+
+  // ── move (EVT-30) ────────────────────────────────────────────────────────
+
+  describe('POST /locations/:id/move (move)', () => {
+    it('delegates to LocationsService.moveContainer with id, toParentId, and the caller id', async () => {
+      const moved = makeLocation({ id: 'box-1', kind: 'container', parentId: 'shelf-2' });
+      serviceMock.moveContainer.mockResolvedValue(moved);
+
+      const result = await controller.move('box-1', { toParentId: 'shelf-2' }, {
+        id: 'user-1',
+      } as never);
+
+      expect(serviceMock.moveContainer).toHaveBeenCalledWith('box-1', 'shelf-2', 'user-1');
+      expect(result).toBe(moved);
+    });
+
+    it('defaults toParentId to null when omitted (move to root)', async () => {
+      const moved = makeLocation({ id: 'box-1', kind: 'container', parentId: null });
+      serviceMock.moveContainer.mockResolvedValue(moved);
+
+      await controller.move('box-1', {}, { id: 'user-1' } as never);
+
+      expect(serviceMock.moveContainer).toHaveBeenCalledWith('box-1', null, 'user-1');
+    });
+
+    it('passes undefined createdById when there is no authenticated user', async () => {
+      serviceMock.moveContainer.mockResolvedValue(makeLocation());
+
+      await controller.move('box-1', { toParentId: 'shelf-2' }, null);
+
+      expect(serviceMock.moveContainer).toHaveBeenCalledWith('box-1', 'shelf-2', undefined);
+    });
+  });
+
+  // ── listMovements (EVT-30) ───────────────────────────────────────────────
+
+  describe('GET /locations/:id/movements (listMovements)', () => {
+    it('delegates to StockMovementsService.listForContainer with id and query', async () => {
+      const page = { data: [], page: 1, pageSize: 20, total: 0, totalPages: 1 };
+      stockMovementsServiceMock.listForContainer.mockResolvedValue(page);
+
+      const result = await controller.listMovements('box-1', { page: 2 });
+
+      expect(stockMovementsServiceMock.listForContainer).toHaveBeenCalledWith('box-1', {
+        page: 2,
+      });
+      expect(result).toBe(page);
+    });
+  });
+
+  // ── ParseUUIDPipe (EVT-30 review round 2, finding 2) ────────────────────
+  //
+  // `:id/movements` and `:id/move` previously lacked `ParseUUIDPipe`, so a
+  // non-UUID id reached Prisma's `@db.Uuid` column and raised P2023 → 500
+  // instead of a 400. Verified here at the pipe level (unit tests call
+  // controller methods directly, bypassing Nest's request pipeline, so this
+  // is the same style of regression test as items.controller.spec.ts).
+
+  describe('ParseUUIDPipe', () => {
+    const uuidPipe = new ParseUUIDPipe();
+    const VALID_UUID = '11111111-1111-4111-8111-111111111111';
+
+    it('throws BadRequestException for a non-UUID id param', async () => {
+      await expect(uuidPipe.transform('not-a-uuid', { type: 'param', data: 'id' })).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('accepts a valid UUID', async () => {
+      const result = await uuidPipe.transform(VALID_UUID, { type: 'param', data: 'id' });
+      expect(result).toBe(VALID_UUID);
     });
   });
 });

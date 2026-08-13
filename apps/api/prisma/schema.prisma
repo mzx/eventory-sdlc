@@ -13,6 +13,11 @@
 // one. At most one OPEN entry per item is enforced by a partial unique index added
 // by raw SQL in the migration (Prisma's schema DSL has no `@@unique(..., where:)`),
 // so `@@unique` is intentionally NOT declared on `ShoppingListEntry` below.
+// Containers + license-plate moves (EVT-30): `Location.kind` distinguishes a
+// fixed `area` from a movable `container`; a container re-parent is recorded
+// as a single itemless `StockMovement` (nullable `itemId`, new `containerId`)
+// via `StockMovementsService.recordContainerMove` rather than one row per
+// contained item — see `LocationsService.moveContainer`.
 
 generator client {
   provider = "prisma-client-js"
@@ -73,16 +78,30 @@ model User {
   @@index([status])
 }
 
+/// `area` — a fixed room/shelf/cabinet node (the default; every location
+/// predating EVT-30 migrates to this). `container` — a movable box/case:
+/// items placed "inside" it just carry it as their `locationId` (contents
+/// lookup is already path-based, so this needs no new query shape), and
+/// child containers are allowed (a box inside a box). Only `container` nodes
+/// support the "Move to…" re-parent flow (`LocationsService.moveContainer`);
+/// `area` nodes keep the existing add/rename/delete management flows
+/// (EVT-30 non-goal: no re-parenting UI for areas).
+enum LocationKind {
+  area
+  container
+}
+
 /// Physical storage location. Self-referencing tree, addressable both by
 /// parent/child relation and by a materialized `path` (e.g.
 /// "garage.west-wall.cabinet-3") for fast prefix lookups.
 model Location {
-  id       String  @id @default(uuid()) @db.Uuid
+  id       String       @id @default(uuid()) @db.Uuid
   name     String
-  path     String  @unique
-  parentId String? @db.Uuid
+  path     String       @unique
+  parentId String?      @db.Uuid
   notes    String?
-  qrCode   String  @unique @default(uuid())
+  qrCode   String       @unique @default(uuid())
+  kind     LocationKind @default(area)
 
   parent   Location?  @relation("LocationHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children Location[] @relation("LocationHierarchy")
@@ -92,9 +111,14 @@ model Location {
   // Two named relations since a single move row references both sides.
   movementsFrom StockMovement[] @relation("StockMovementFromLocation")
   movementsTo   StockMovement[] @relation("StockMovementToLocation")
+  // Itemless "container moved" ledger entries where this location IS the
+  // container that moved (EVT-30) — distinct from movementsFrom/movementsTo
+  // above, which record locations an ITEM moved between.
+  containerMovements StockMovement[] @relation("StockMovementContainer")
 
   @@index([parentId])
   @@index([path])
+  @@index([kind])
 }
 
 /// Classification tree, same shape as Location minus the QR code (categories
@@ -295,17 +319,30 @@ enum StockMovementKind {
 }
 
 model StockMovement {
-  id             String            @id @default(uuid()) @db.Uuid
-  itemId         String            @db.Uuid
+  id     String            @id @default(uuid()) @db.Uuid
+  /// Nullable (EVT-30) — set for every item-quantity/location movement
+  /// (`add`/`consume`/`adjust`, and an item-level `move`); null for a
+  /// container re-parent movement, which sets `containerId` instead. Exactly
+  /// one of `itemId`/`containerId` is populated per row — enforced in
+  /// `StockMovementsService`, not by a DB constraint (Prisma has no
+  /// cross-column CHECK support here).
+  itemId String? @db.Uuid
+  /// Set only for a container re-parent movement (EVT-30,
+  /// `LocationsService.moveContainer`) — the container `Location` that moved.
+  /// Null for every item-level movement.
+  containerId    String?           @db.Uuid
   kind           StockMovementKind
   /// Signed change applied to `Item.quantity` (positive for `add`; negative
   /// for `consume` and `build` — see the `StockMovementKind` doc comment
   /// above for why `build`'s delta is negative; either sign for `adjust`;
-  /// typically 0 for a pure `move`).
+  /// typically 0 for a pure `move` — always 0 for a container move, which
+  /// never touches an Item row).
   delta          Int
-  /// Set only on `move` — the location the item left. Null for every other kind.
+  /// Set only on `move` — the location the item/container left. Null for
+  /// every other kind.
   fromLocationId String?           @db.Uuid
-  /// Set only on `move` — the location the item arrived at. Null for every other kind.
+  /// Set only on `move` — the location the item/container arrived at. Null
+  /// for every other kind.
   toLocationId   String?           @db.Uuid
   /// Link to the project this movement is associated with. Set on every
   /// `build` movement written by a backflush confirm (EVT-28); null
@@ -318,14 +355,24 @@ model StockMovement {
   createdById    String?           @db.Uuid
   createdAt      DateTime          @default(now())
 
-  item         Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item         Item?     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  /// `SetNull`, not `Cascade` (EVT-30 review round 2, finding 4) — deleting a
+  /// container must NOT erase its own move-history ledger rows, matching the
+  /// "immutable audit trail" contract (EVT-25) and the `SetNull` already
+  /// used on `fromLocationId`/`toLocationId` below. `note` is populated with
+  /// the container's name at record time (see
+  /// `LocationsService.moveContainer`) so a row remains human-readable even
+  /// after `containerId` is nulled out by a later container deletion.
+  container    Location? @relation("StockMovementContainer", fields: [containerId], references: [id], onDelete: SetNull)
   fromLocation Location? @relation("StockMovementFromLocation", fields: [fromLocationId], references: [id], onDelete: SetNull)
   toLocation   Location? @relation("StockMovementToLocation", fields: [toLocationId], references: [id], onDelete: SetNull)
   project      Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   createdBy    User?     @relation("StockMovementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
-  // Primary read pattern: GET /api/items/:id/movements, newest first.
+  // Primary read patterns: GET /api/items/:id/movements and
+  // GET /api/locations/:id/movements, both newest first.
   @@index([itemId, createdAt])
+  @@index([containerId, createdAt])
   @@index([fromLocationId])
   @@index([toLocationId])
   @@index([projectId])
