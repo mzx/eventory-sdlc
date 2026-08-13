@@ -542,6 +542,7 @@ describe('ItemDetailPage', () => {
         countedQuantity: 4,
         delta: 2,
       });
+      const invalidateSpy = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
       const user = userEvent.setup();
 
       renderDetailPage();
@@ -556,6 +557,12 @@ describe('ItemDetailPage', () => {
 
       expect(countMock).toHaveBeenCalledWith('item-1', 4);
       expect(await screen.findByText(/Book quantity was 2/)).toBeInTheDocument();
+      // A count can clear (or newly trigger) an item's overdue
+      // verification status, so VerificationPage's queue query must be
+      // invalidated too — not just 'items' (mirrors VerificationPage's own
+      // countMutation.onSuccess, which invalidates both keys).
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['items'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['verification-queue'] });
     });
   });
 

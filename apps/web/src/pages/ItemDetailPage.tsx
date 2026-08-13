@@ -233,6 +233,10 @@ export function ItemDetailPage() {
     mutationFn: (quantity: number) => countItem(id as string, quantity),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['items'] });
+      // A count can clear an item's overdue verification, so the queue
+      // VerificationPage reads must also be invalidated here (mirrors
+      // VerificationPage's own countMutation.onSuccess).
+      queryClient.invalidateQueries({ queryKey: ['verification-queue'] });
     },
   });
 
