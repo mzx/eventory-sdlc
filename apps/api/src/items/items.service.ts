@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AiAnalysisResult, AiService, STUB_ANALYSIS } from '../ai/ai.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { TagsService } from '../tags/tags.service';
 import { CreateItemDto } from './create-item.dto';
 import { ListItemsQueryDto } from './list-items-query.dto';
@@ -40,6 +41,7 @@ export class ItemsService {
     private readonly prisma: PrismaService,
     private readonly tagsService: TagsService,
     private readonly aiService: AiService,
+    private readonly stockMovementsService: StockMovementsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -259,8 +261,17 @@ export class ItemsService {
   // create — POST /api/items
   // -------------------------------------------------------------------------
 
-  /** `createdById` (EVT-14) is optional so this remains callable without a
-   * caller in scope (e.g. seed scripts, tests predating auth). */
+  /**
+   * `createdById` (EVT-14) is optional so this remains callable without a
+   * caller in scope (e.g. seed scripts, tests predating auth).
+   *
+   * EVT-25: the row is created with `quantity: 0` and immediately brought up
+   * to the requested starting quantity via `recordMovement` (kind `add`), in
+   * the same transaction — `Item.quantity` is never written directly by this
+   * method, so intake always leaves an audit trail of where the on-hand
+   * count came from. A starting quantity of `0` writes no movement (there's
+   * nothing to record).
+   */
   async create(dto: CreateItemDto, createdById?: string) {
     const { tags: tagNames, photoIds, ...itemData } = dto;
 
@@ -270,25 +281,50 @@ export class ItemsService {
     // First photoId becomes the primary photo
     const primaryPhotoId = photoIds?.[0] ?? null;
 
-    return this.prisma.item.create({
-      data: {
-        name: itemData.name,
-        description: itemData.description,
-        quantity: itemData.quantity,
-        unit: itemData.unit,
-        properties: (itemData.properties ?? {}) as Prisma.InputJsonValue,
-        locationId: itemData.locationId,
-        categoryId: itemData.categoryId,
-        primaryPhotoId,
-        ...(createdById && { createdById }),
-        ...(photoIds?.length && {
-          photos: { connect: photoIds.map((id) => ({ id })) },
-        }),
-        ...(tagIds.length && {
-          tags: { create: tagIds.map((tagId) => ({ tagId })) },
-        }),
-      },
-      include: ITEM_DETAIL_INCLUDE,
+    // Mirrors the Prisma schema's `Item.quantity @default(1)` — resolved
+    // explicitly here since the create call below always passes `0` and
+    // relies on `recordMovement` to reach this value.
+    const initialQuantity = itemData.quantity ?? 1;
+
+    return this.prisma.$transaction(async (tx) => {
+      const item = await tx.item.create({
+        data: {
+          name: itemData.name,
+          description: itemData.description,
+          quantity: 0,
+          unit: itemData.unit,
+          properties: (itemData.properties ?? {}) as Prisma.InputJsonValue,
+          locationId: itemData.locationId,
+          categoryId: itemData.categoryId,
+          primaryPhotoId,
+          ...(createdById && { createdById }),
+          ...(photoIds?.length && {
+            photos: { connect: photoIds.map((id) => ({ id })) },
+          }),
+          ...(tagIds.length && {
+            tags: { create: tagIds.map((tagId) => ({ tagId })) },
+          }),
+        },
+        include: ITEM_DETAIL_INCLUDE,
+      });
+
+      if (initialQuantity === 0) {
+        return item;
+      }
+
+      const { item: stocked } = await this.stockMovementsService.recordMovement(
+        tx,
+        {
+          itemId: item.id,
+          kind: 'add',
+          delta: initialQuantity,
+          toLocationId: item.locationId,
+          createdById,
+          note: 'Initial intake',
+        },
+        ITEM_DETAIL_INCLUDE,
+      );
+      return stocked;
     });
   }
 
@@ -296,11 +332,25 @@ export class ItemsService {
   // update — PATCH /api/items/:id
   // -------------------------------------------------------------------------
 
-  async update(id: string, dto: UpdateItemDto) {
-    // Verify the item exists before attempting the update
-    await this.findById(id);
+  /**
+   * `createdById` (EVT-25) attributes any `adjust`/`move` movement this
+   * update generates to the acting user; optional for callers without one
+   * in scope (e.g. tests, scripts).
+   *
+   * EVT-25: `quantity` and `locationId` are pulled out of the plain scalar
+   * update and routed through `recordMovement` instead — the ONLY path that
+   * writes them (AC 2) — so an edit that changes either always leaves a
+   * matching `adjust`/`move` row in the same transaction as every other
+   * field on this PATCH. A `quantity`/`locationId` key that's present in the
+   * DTO but equal to the current value writes no movement (nothing changed);
+   * an omitted key leaves the field untouched, same as before.
+   */
+  async update(id: string, dto: UpdateItemDto, createdById?: string) {
+    // Verify the item exists before attempting the update, and capture the
+    // pre-edit quantity/locationId to compute movement deltas below.
+    const current = await this.findById(id);
 
-    const { tags: tagNames, photoIds, properties, ...scalarData } = dto;
+    const { tags: tagNames, photoIds, properties, quantity, locationId, ...scalarData } = dto;
 
     // Build tag update: full replacement when `tags` is provided in the DTO
     let tagsUpdate: Prisma.ItemUpdateInput['tags'] | undefined;
@@ -315,17 +365,53 @@ export class ItemsService {
     // When photoIds provided, update primary photo to the first entry
     const primaryPhotoId = photoIds !== undefined ? (photoIds[0] ?? null) : undefined;
 
-    return this.prisma.item.update({
-      where: { id },
-      data: {
-        ...scalarData,
-        ...(properties !== undefined && {
-          properties: properties as Prisma.InputJsonValue,
-        }),
-        ...(primaryPhotoId !== undefined && { primaryPhotoId }),
-        ...(tagsUpdate && { tags: tagsUpdate }),
-      },
-      include: ITEM_DETAIL_INCLUDE,
+    const quantityChanged = quantity !== undefined && quantity !== current.quantity;
+    const locationChanged = locationId !== undefined && locationId !== current.locationId;
+
+    return this.prisma.$transaction(async (tx) => {
+      let item = await tx.item.update({
+        where: { id },
+        data: {
+          ...scalarData,
+          ...(properties !== undefined && {
+            properties: properties as Prisma.InputJsonValue,
+          }),
+          ...(primaryPhotoId !== undefined && { primaryPhotoId }),
+          ...(tagsUpdate && { tags: tagsUpdate }),
+        },
+        include: ITEM_DETAIL_INCLUDE,
+      });
+
+      if (quantityChanged) {
+        ({ item } = await this.stockMovementsService.recordMovement(
+          tx,
+          {
+            itemId: id,
+            kind: 'adjust',
+            delta: quantity! - current.quantity,
+            createdById,
+            note: 'Manual quantity edit',
+          },
+          ITEM_DETAIL_INCLUDE,
+        ));
+      }
+
+      if (locationChanged) {
+        ({ item } = await this.stockMovementsService.recordMovement(
+          tx,
+          {
+            itemId: id,
+            kind: 'move',
+            delta: 0,
+            fromLocationId: current.locationId,
+            toLocationId: locationId,
+            createdById,
+          },
+          ITEM_DETAIL_INCLUDE,
+        ));
+      }
+
+      return item;
     });
   }
 

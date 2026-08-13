@@ -276,6 +276,68 @@ export async function deleteItem(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// stock movements (EVT-25)
+// ---------------------------------------------------------------------------
+
+export type StockMovementKind = 'add' | 'consume' | 'move' | 'adjust' | 'build';
+
+/** Denormalized location summary embedded on a movement row's from/to side. */
+export interface MovementLocationRef {
+  id: string;
+  name: string;
+  path: string;
+}
+
+/** Denormalized project summary embedded on a movement row, when linked. */
+export interface MovementProjectRef {
+  id: string;
+  name: string;
+}
+
+/** Row shape returned by `GET /api/items/:id/movements` (see apps/api StockMovementsService). */
+export interface StockMovementRow {
+  id: string;
+  itemId: string;
+  kind: StockMovementKind;
+  delta: number;
+  fromLocationId: string | null;
+  toLocationId: string | null;
+  projectId: string | null;
+  note: string | null;
+  createdById: string | null;
+  createdAt: string;
+  fromLocation: MovementLocationRef | null;
+  toLocation: MovementLocationRef | null;
+  project: MovementProjectRef | null;
+}
+
+/** Paginated envelope returned by `GET /api/items/:id/movements`. */
+export interface StockMovementsPage {
+  data: StockMovementRow[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface FetchItemMovementsParams {
+  page?: number;
+  pageSize?: number;
+}
+
+/** GET /api/items/:id/movements?page=&pageSize= — newest first. 404 for an unknown item. */
+export async function fetchItemMovements(
+  id: string,
+  params: FetchItemMovementsParams = {},
+): Promise<StockMovementsPage> {
+  const qs = new URLSearchParams();
+  if (params.page) qs.set('page', String(params.page));
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<StockMovementsPage>(`/items/${encodeURIComponent(id)}/movements${suffix}`);
+}
+
+// ---------------------------------------------------------------------------
 // tags (EVT-5)
 // ---------------------------------------------------------------------------
 

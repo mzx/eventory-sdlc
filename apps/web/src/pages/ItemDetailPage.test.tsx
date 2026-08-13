@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
 import { ItemDetailPage } from './ItemDetailPage';
 
@@ -32,6 +32,35 @@ const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
   ...overrides,
 });
 
+/** Default (empty) `GET /api/items/:id/movements` page — overridable per test. */
+const movementsPage = (
+  overrides: Partial<api.StockMovementsPage> = {},
+): api.StockMovementsPage => ({
+  data: [],
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+  ...overrides,
+});
+
+const movementRow = (overrides: Partial<api.StockMovementRow> = {}): api.StockMovementRow => ({
+  id: 'mv-1',
+  itemId: 'item-1',
+  kind: 'adjust',
+  delta: 3,
+  fromLocationId: null,
+  toLocationId: null,
+  projectId: null,
+  note: null,
+  createdById: null,
+  createdAt: '2026-01-01T00:00:00.000Z',
+  fromLocation: null,
+  toLocation: null,
+  project: null,
+  ...overrides,
+});
+
 function renderDetailPage(id = 'item-1', options: { state?: { justCreated?: boolean } } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -41,6 +70,7 @@ function renderDetailPage(id = 'item-1', options: { state?: { justCreated?: bool
           <Route path="/items/:id" element={<ItemDetailPage />} />
           <Route path="/items/:id/edit" element={<div>edit page</div>} />
           <Route path="/items/:id/print" element={<div>print page</div>} />
+          <Route path="/projects/:id" element={<div>project detail page</div>} />
           <Route path="/" element={<div>items list</div>} />
         </Routes>
       </MemoryRouter>
@@ -49,6 +79,12 @@ function renderDetailPage(id = 'item-1', options: { state?: { justCreated?: bool
 }
 
 describe('ItemDetailPage', () => {
+  beforeEach(() => {
+    // Every test renders the History section — default to an empty page so
+    // tests that don't care about EVT-25 history don't need their own mock.
+    vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(movementsPage());
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -203,5 +239,145 @@ describe('ItemDetailPage', () => {
     await screen.findByText('Cordless drill');
     expect(screen.queryByText('Item saved')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Print QR' })).not.toBeInTheDocument();
+  });
+
+  // =========================================================================
+  // History section (EVT-25 AC 6)
+  // =========================================================================
+
+  describe('History (EVT-25)', () => {
+    it('renders the History section heading', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+
+      renderDetailPage();
+
+      expect(await screen.findByText('History')).toBeInTheDocument();
+    });
+
+    it('shows an empty-state message when the item has no movements yet', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+
+      renderDetailPage();
+
+      expect(await screen.findByText('No movements recorded yet.')).toBeInTheDocument();
+    });
+
+    it('renders kind, delta, and relative time for an "adjust" movement', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({
+          data: [movementRow({ kind: 'adjust', delta: 4, createdAt: new Date().toISOString() })],
+          total: 1,
+        }),
+      );
+
+      renderDetailPage();
+
+      const history = await screen.findByLabelText('item movement history');
+      expect(within(history).getByText('Adjusted +4')).toBeInTheDocument();
+      expect(within(history).getByText('just now')).toBeInTheDocument();
+    });
+
+    it('renders a negative delta for a shrinking "adjust" movement', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({ data: [movementRow({ kind: 'adjust', delta: -6 })], total: 1 }),
+      );
+
+      renderDetailPage();
+
+      const history = await screen.findByLabelText('item movement history');
+      expect(within(history).getByText('Adjusted -6')).toBeInTheDocument();
+    });
+
+    it('AC 4: renders both location names for a "move" movement', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({
+          data: [
+            movementRow({
+              kind: 'move',
+              delta: 0,
+              fromLocation: { id: 'loc-1', name: 'Garage', path: 'garage' },
+              toLocation: { id: 'loc-2', name: 'Cabinet 3', path: 'garage.cabinet-3' },
+            }),
+          ],
+          total: 1,
+        }),
+      );
+
+      renderDetailPage();
+
+      const history = await screen.findByLabelText('item movement history');
+      expect(within(history).getByText('Moved — Garage → Cabinet 3')).toBeInTheDocument();
+    });
+
+    it('renders a link to the linked project when present', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({
+          data: [movementRow({ project: { id: 'proj-1', name: 'Garage Shelving' } })],
+          total: 1,
+        }),
+      );
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      const history = await screen.findByLabelText('item movement history');
+      const projectLink = within(history).getByRole('link', { name: 'Garage Shelving' });
+      await user.click(projectLink);
+      expect(await screen.findByText('project detail page')).toBeInTheDocument();
+    });
+
+    it('shows a "Load more" button when more movements exist than are shown, and it fetches a bigger page', async () => {
+      const fetchMovements = vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({
+          data: [movementRow({ id: 'mv-1' })],
+          total: 2,
+          pageSize: 20,
+        }),
+      );
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      const loadMoreButton = await screen.findByRole('button', { name: 'Load more' });
+      fetchMovements.mockResolvedValue(
+        movementsPage({
+          data: [movementRow({ id: 'mv-1' }), movementRow({ id: 'mv-2' })],
+          total: 2,
+          pageSize: 40,
+        }),
+      );
+      await user.click(loadMoreButton);
+
+      await waitFor(() =>
+        expect(fetchMovements).toHaveBeenLastCalledWith('item-1', { page: 1, pageSize: 40 }),
+      );
+      expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    });
+
+    it('does not show "Load more" once every movement is already displayed', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(
+        movementsPage({ data: [movementRow()], total: 1 }),
+      );
+
+      renderDetailPage();
+
+      await screen.findByLabelText('item movement history');
+      expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument();
+    });
+
+    it('shows an error alert when the history fails to load', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      vi.spyOn(api, 'fetchItemMovements').mockRejectedValue(new Error('boom'));
+
+      renderDetailPage();
+
+      expect(await screen.findByText('Failed to load history')).toBeInTheDocument();
+    });
   });
 });

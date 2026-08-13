@@ -1,6 +1,11 @@
+import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
+import ConstructionIcon from '@mui/icons-material/Construction';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
+import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
+import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
+import TuneIcon from '@mui/icons-material/Tune';
 import {
   Alert,
   Box,
@@ -14,6 +19,11 @@ import {
   DialogContentText,
   DialogTitle,
   Divider,
+  Link,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText,
   Snackbar,
   Stack,
   Table,
@@ -23,10 +33,90 @@ import {
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { deleteItem, fetchItem, photoUrl, type ItemDetail, type PhotoRef } from '../api';
+import { type ReactNode, useState } from 'react';
+import { Link as RouterLink, useLocation, useNavigate, useParams } from 'react-router-dom';
+import {
+  deleteItem,
+  fetchItem,
+  fetchItemMovements,
+  photoUrl,
+  type ItemDetail,
+  type PhotoRef,
+  type StockMovementKind,
+  type StockMovementRow,
+} from '../api';
+import { formatRelativeTime } from '../lib/relativeTime';
 import { QrThumb } from '../components/QrThumb';
+
+/** How many additional rows "Load more" reveals each click (EVT-25 AC 6). */
+const MOVEMENTS_PAGE_SIZE_STEP = 20;
+
+const MOVEMENT_KIND_LABEL: Record<StockMovementKind, string> = {
+  add: 'Added',
+  consume: 'Consumed',
+  move: 'Moved',
+  adjust: 'Adjusted',
+  build: 'Built',
+};
+
+const MOVEMENT_KIND_ICON: Record<StockMovementKind, ReactNode> = {
+  add: <AddCircleOutlineIcon fontSize="small" color="success" />,
+  consume: <RemoveCircleOutlineIcon fontSize="small" color="error" />,
+  move: <SwapHorizIcon fontSize="small" color="action" />,
+  adjust: <TuneIcon fontSize="small" color="action" />,
+  build: <ConstructionIcon fontSize="small" color="action" />,
+};
+
+/** Signed delta string ("+5", "-3"). `null` for `move`, whose delta is not the interesting part. */
+function formatMovementDelta(movement: StockMovementRow): string | null {
+  if (movement.kind === 'move') return null;
+  return movement.delta > 0 ? `+${movement.delta}` : `${movement.delta}`;
+}
+
+/** "Garage → Cabinet 3" for a move; the single destination name for other kinds that carry one; else `null`. */
+function formatMovementLocations(movement: StockMovementRow): string | null {
+  if (movement.kind === 'move') {
+    return `${movement.fromLocation?.name ?? '—'} → ${movement.toLocation?.name ?? '—'}`;
+  }
+  return movement.toLocation?.name ?? null;
+}
+
+/** One row of the item's movement history (EVT-25 AC 6): kind icon, delta, locations, project link, relative time. */
+function MovementListItem({ movement }: { movement: StockMovementRow }) {
+  const delta = formatMovementDelta(movement);
+  const locations = formatMovementLocations(movement);
+
+  return (
+    <ListItem disableGutters alignItems="flex-start">
+      <ListItemIcon sx={{ minWidth: 36 }}>{MOVEMENT_KIND_ICON[movement.kind]}</ListItemIcon>
+      <ListItemText
+        primary={
+          <Typography variant="body2">
+            {MOVEMENT_KIND_LABEL[movement.kind]}
+            {delta ? ` ${delta}` : ''}
+            {locations ? ` — ${locations}` : ''}
+          </Typography>
+        }
+        secondary={
+          <Stack direction="row" spacing={1} alignItems="center" component="span">
+            <Typography variant="caption" color="text.secondary" component="span">
+              {formatRelativeTime(movement.createdAt)}
+            </Typography>
+            {movement.project && (
+              <Link
+                component={RouterLink}
+                to={`/projects/${movement.project.id}`}
+                variant="caption"
+              >
+                {movement.project.name}
+              </Link>
+            )}
+          </Stack>
+        }
+      />
+    </ListItem>
+  );
+}
 
 /** Orders `photos` with the primary photo first (if set), keeping the rest
  * in their existing (createdAt asc) order. */
@@ -54,6 +144,16 @@ export function ItemDetailPage() {
   const itemQuery = useQuery({
     queryKey: ['items', id],
     queryFn: () => fetchItem(id as string),
+    enabled: Boolean(id),
+  });
+
+  // "Load more" grows pageSize on a fixed page 1 rather than tracking a page
+  // number — avoids merging pages by hand while still only re-fetching the
+  // window actually being displayed.
+  const [movementsLimit, setMovementsLimit] = useState(MOVEMENTS_PAGE_SIZE_STEP);
+  const movementsQuery = useQuery({
+    queryKey: ['items', id, 'movements', movementsLimit],
+    queryFn: () => fetchItemMovements(id as string, { page: 1, pageSize: movementsLimit }),
     enabled: Boolean(id),
   });
 
@@ -234,6 +334,40 @@ export function ItemDetailPage() {
           </Table>
         </Box>
       )}
+
+      <Divider />
+
+      <Box>
+        <Typography variant="subtitle1" gutterBottom>
+          History
+        </Typography>
+        {movementsQuery.isLoading && (
+          <Box sx={{ display: 'flex', py: 2 }}>
+            <CircularProgress size={20} />
+          </Box>
+        )}
+        {movementsQuery.isError && <Alert severity="error">Failed to load history</Alert>}
+        {movementsQuery.data && movementsQuery.data.data.length === 0 && (
+          <Typography variant="body2" color="text.secondary">
+            No movements recorded yet.
+          </Typography>
+        )}
+        {movementsQuery.data && movementsQuery.data.data.length > 0 && (
+          <List disablePadding aria-label="item movement history">
+            {movementsQuery.data.data.map((movement) => (
+              <MovementListItem key={movement.id} movement={movement} />
+            ))}
+          </List>
+        )}
+        {movementsQuery.data && movementsQuery.data.total > movementsQuery.data.data.length && (
+          <Button
+            size="small"
+            onClick={() => setMovementsLimit((n) => n + MOVEMENTS_PAGE_SIZE_STEP)}
+          >
+            Load more
+          </Button>
+        )}
+      </Box>
 
       <Divider />
 

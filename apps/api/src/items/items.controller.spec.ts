@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { uploadThrottlerConfig } from '../common/throttle.config';
+import { StockMovementsService } from '../stock-movements/stock-movements.service';
 import { CreateItemDto } from './create-item.dto';
 import { ItemsController } from './items.controller';
 import { ItemsService } from './items.service';
@@ -38,6 +39,12 @@ function makeItemServiceMock() {
   };
 }
 
+function makeStockMovementsServiceMock() {
+  return {
+    listForItem: jest.fn(),
+  };
+}
+
 function makeMulterFile(overrides: Partial<Express.Multer.File> = {}): Express.Multer.File {
   return {
     fieldname: 'file',
@@ -61,13 +68,18 @@ function makeMulterFile(overrides: Partial<Express.Multer.File> = {}): Express.M
 describe('ItemsController', () => {
   let controller: ItemsController;
   let service: ReturnType<typeof makeItemServiceMock>;
+  let stockMovementsService: ReturnType<typeof makeStockMovementsServiceMock>;
 
   beforeEach(async () => {
     service = makeItemServiceMock();
+    stockMovementsService = makeStockMovementsServiceMock();
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ItemsController],
-      providers: [{ provide: ItemsService, useValue: service }],
+      providers: [
+        { provide: ItemsService, useValue: service },
+        { provide: StockMovementsService, useValue: stockMovementsService },
+      ],
     }).compile();
 
     controller = module.get<ItemsController>(ItemsController);
@@ -215,13 +227,51 @@ describe('ItemsController', () => {
       service.update.mockResolvedValue(updated);
 
       const dto: UpdateItemDto = { name: 'Updated' };
-      expect(await controller.update(ITEM_ID, dto)).toBe(updated);
-      expect(service.update).toHaveBeenCalledWith(ITEM_ID, dto);
+      expect(await controller.update(ITEM_ID, dto, CURRENT_USER)).toBe(updated);
+      expect(service.update).toHaveBeenCalledWith(ITEM_ID, dto, USER_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.update.mockRejectedValue(new NotFoundException());
-      await expect(controller.update(ITEM_ID, {})).rejects.toThrow(NotFoundException);
+      await expect(controller.update(ITEM_ID, {}, CURRENT_USER)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // =========================================================================
+  // listMovements (EVT-25)
+  // =========================================================================
+
+  describe('listMovements', () => {
+    it('delegates to StockMovementsService.listForItem and returns the page', async () => {
+      const page = { data: [{ id: 'mv-1' }], page: 1, pageSize: 20, total: 1, totalPages: 1 };
+      stockMovementsService.listForItem.mockResolvedValue(page);
+
+      const result = await controller.listMovements(ITEM_ID, {});
+
+      expect(result).toBe(page);
+      expect(stockMovementsService.listForItem).toHaveBeenCalledWith(ITEM_ID, {});
+    });
+
+    it('forwards page/pageSize query params', async () => {
+      stockMovementsService.listForItem.mockResolvedValue({
+        data: [],
+        page: 2,
+        pageSize: 5,
+        total: 0,
+        totalPages: 1,
+      });
+
+      await controller.listMovements(ITEM_ID, { page: 2, pageSize: 5 });
+
+      expect(stockMovementsService.listForItem).toHaveBeenCalledWith(ITEM_ID, {
+        page: 2,
+        pageSize: 5,
+      });
+    });
+
+    it('propagates NotFoundException from the service (unknown item)', async () => {
+      stockMovementsService.listForItem.mockRejectedValue(new NotFoundException());
+      await expect(controller.listMovements(ITEM_ID, {})).rejects.toThrow(NotFoundException);
     });
   });
 

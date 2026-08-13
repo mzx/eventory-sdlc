@@ -320,6 +320,103 @@ describe('Items API (e2e)', () => {
   });
 
   // =========================================================================
+  // EVT-25 — stock movement ledger
+  // =========================================================================
+
+  describe('EVT-25: stock movement ledger', () => {
+    it('GET /api/items/:id/movements — 404 for an unknown item', async () => {
+      await http.get('/api/items/a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11/movements').expect(404);
+    });
+
+    it('AC 1/2: creating an item with a starting quantity writes one "add" movement', async () => {
+      const createRes = await http
+        .post('/api/items')
+        .send({ name: 'Box of Screws', quantity: 25 })
+        .expect(201);
+      expect(createRes.body.quantity).toBe(25);
+
+      const itemId = createRes.body.id as string;
+      const movementsRes = await http.get(`/api/items/${itemId}/movements`).expect(200);
+
+      expect(movementsRes.body.total).toBe(1);
+      expect(movementsRes.body.data).toHaveLength(1);
+      expect(movementsRes.body.data[0]).toMatchObject({ kind: 'add', delta: 25 });
+    });
+
+    it('a starting quantity of 0 writes no movement', async () => {
+      const createRes = await http
+        .post('/api/items')
+        .send({ name: 'Empty Bin', quantity: 0 })
+        .expect(201);
+
+      const movementsRes = await http.get(`/api/items/${createRes.body.id}/movements`).expect(200);
+      expect(movementsRes.body.total).toBe(0);
+      expect(movementsRes.body.data).toEqual([]);
+    });
+
+    it('AC 3: editing quantity from N to M records an "adjust" movement with delta M-N', async () => {
+      const createRes = await http
+        .post('/api/items')
+        .send({ name: 'Bag of Bolts', quantity: 10 })
+        .expect(201);
+      const itemId = createRes.body.id as string;
+
+      const patchRes = await http.patch(`/api/items/${itemId}`).send({ quantity: 6 }).expect(200);
+      expect(patchRes.body.quantity).toBe(6);
+
+      const movementsRes = await http.get(`/api/items/${itemId}/movements`).expect(200);
+      expect(movementsRes.body.total).toBe(2); // the initial "add" + this "adjust"
+      // Newest first — the adjust is the most recent movement.
+      expect(movementsRes.body.data[0]).toMatchObject({ kind: 'adjust', delta: -4 });
+    });
+
+    it('AC 4: moving an item to another location records a "move" movement carrying both location ids', async () => {
+      const garage = await createLocation(prisma, 'Garage', 'garage');
+      const shed = await createLocation(prisma, 'Shed', 'shed');
+
+      const createRes = await http
+        .post('/api/items')
+        .send({ name: 'Ladder', locationId: garage.id })
+        .expect(201);
+      const itemId = createRes.body.id as string;
+
+      await http.patch(`/api/items/${itemId}`).send({ locationId: shed.id }).expect(200);
+
+      const movementsRes = await http.get(`/api/items/${itemId}/movements`).expect(200);
+      const moveMovement = movementsRes.body.data.find((m: { kind: string }) => m.kind === 'move');
+      expect(moveMovement).toMatchObject({
+        kind: 'move',
+        fromLocationId: garage.id,
+        toLocationId: shed.id,
+      });
+      expect(moveMovement.fromLocation.name).toBe('Garage');
+      expect(moveMovement.toLocation.name).toBe('Shed');
+    });
+
+    it('AC 5: returns pages newest-first', async () => {
+      const createRes = await http
+        .post('/api/items')
+        .send({ name: 'Nails', quantity: 1 })
+        .expect(201);
+      const itemId = createRes.body.id as string;
+
+      await http.patch(`/api/items/${itemId}`).send({ quantity: 2 }).expect(200);
+      await http.patch(`/api/items/${itemId}`).send({ quantity: 5 }).expect(200);
+
+      const movementsRes = await http
+        .get(`/api/items/${itemId}/movements?page=1&pageSize=2`)
+        .expect(200);
+      expect(movementsRes.body.data).toHaveLength(2);
+      expect(movementsRes.body.total).toBe(3);
+      expect(movementsRes.body.totalPages).toBe(2);
+      // Newest first: the last PATCH (2 -> 5, delta +3) comes before the
+      // first PATCH (1 -> 2, delta +1).
+      expect(movementsRes.body.data[0]).toMatchObject({ kind: 'adjust', delta: 3 });
+      expect(movementsRes.body.data[1]).toMatchObject({ kind: 'adjust', delta: 1 });
+    });
+  });
+
+  // =========================================================================
   // Edge cases
   // =========================================================================
 
