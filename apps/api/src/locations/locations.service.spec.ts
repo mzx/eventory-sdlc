@@ -544,7 +544,11 @@ describe('LocationsService', () => {
       const result = await service.moveContainer('box-1', 'shelf-2', 'user-1');
 
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
+      // Two lock queries now (EVT-30 round 3 hardening): the id-based
+      // container+destination lock, THEN the whole-subtree path-prefix lock
+      // — see the "locks the whole moved subtree" spec below for the shape
+      // assertion on the second call.
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(2);
       expect(txClient.location.update).toHaveBeenCalledWith({
         where: { id: 'box-1' },
         data: { parentId: 'shelf-2', path: 'garage.shelf-2.box-1' },
@@ -557,6 +561,59 @@ describe('LocationsService', () => {
         note: 'Container "Tote Box" moved',
       });
       expect(result).toMatchObject({ id: 'box-1', path: 'garage.shelf-2.box-1' });
+    });
+
+    // EVT-30 round 3, security-reviewer minor finding: the id-based lock at
+    // the top of moveContainer only pins the container's own row and the
+    // destination row — the raw SUBSTRING path-rewrite further down touches
+    // every row currently inside the subtree, none of which were otherwise
+    // locked, leaving a window where a row concurrently moved INTO the
+    // subtree could keep a stale path. This asserts the SECOND `$queryRaw`
+    // call — issued BEFORE the ancestry check — locks the entire subtree by
+    // path prefix, ascending by id, matching the fix's lock-order
+    // discipline.
+    it('locks the whole moved subtree (path prefix, FOR UPDATE, ORDER BY id) before the ancestry check', async () => {
+      const box = makeLocation({
+        id: 'box-1',
+        name: 'Tote Box',
+        path: 'garage.box-1',
+        parentId: 'garage',
+        kind: 'container',
+      });
+      const finalDetail = { ...box, path: 'garage.shelf-2.box-1', children: [], items: [] };
+
+      locationMock.findUnique
+        .mockResolvedValueOnce(box)
+        .mockResolvedValueOnce({ id: 'shelf-2' })
+        .mockResolvedValueOnce(finalDetail);
+      txClient.$queryRaw.mockResolvedValue([
+        lockedRow({ id: 'box-1', path: 'garage.box-1', parentId: 'garage', name: 'Tote Box' }),
+        lockedRow({ id: 'shelf-2', path: 'garage.shelf-2', parentId: 'garage', kind: 'area' }),
+      ]);
+      txClient.location.findFirst.mockResolvedValue(null);
+      txClient.location.update.mockResolvedValue({
+        ...box,
+        parentId: 'shelf-2',
+        path: 'garage.shelf-2.box-1',
+      });
+      txClient.$executeRaw.mockResolvedValue(0);
+
+      await service.moveContainer('box-1', 'shelf-2', 'user-1');
+
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(2);
+      const [subtreeLockStrings, ...subtreeLockValues] = txClient.$queryRaw.mock.calls[1] as [
+        readonly string[],
+        ...unknown[],
+      ];
+      const subtreeLockSql = subtreeLockStrings.join('?');
+      expect(subtreeLockSql).toContain('FOR UPDATE');
+      expect(subtreeLockSql).toContain('ORDER BY id');
+      expect(subtreeLockSql).toContain('path =');
+      expect(subtreeLockSql).toContain('path LIKE');
+      // Both interpolated params are the container's own (locked) path —
+      // `path = <old>` (the container's own row) OR `path LIKE <old> || '.%'`
+      // (every descendant).
+      expect(subtreeLockValues).toEqual(['garage.box-1', 'garage.box-1']);
     });
 
     it('rewrites descendant paths via the same SUBSTRING-based $executeRaw as rename', async () => {
@@ -642,7 +699,11 @@ describe('LocationsService', () => {
       // read inside it, not the pre-transaction snapshot (EVT-30 review
       // round 2, finding 1).
       expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(txClient.$queryRaw).toHaveBeenCalledTimes(1);
+      // Both lock queries run BEFORE the ancestry check throws (EVT-30
+      // round 3 hardening) — the whole-subtree lock is acquired
+      // unconditionally ahead of the cycle guard, not skipped on the
+      // eventual-rejection path.
+      expect(txClient.$queryRaw).toHaveBeenCalledTimes(2);
       expect(txClient.location.update).not.toHaveBeenCalled();
     });
 

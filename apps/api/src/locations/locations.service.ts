@@ -339,6 +339,15 @@ export class LocationsService {
         // unblocked, the second call re-reads the POST-first-move state and
         // re-runs the cycle check against it — this is what closes the
         // TOCTOU window.
+        //
+        // `= ANY(ARRAY[...]::uuid[])`, not a bare `IN (...)` (EVT-30 round 3
+        // regression, caught by the new locations.e2e-spec.ts DB-level test
+        // against real Postgres — every unit test mocks `$queryRaw`, so this
+        // was invisible there): an un-cast `IN (${Prisma.join(lockIds)})`
+        // binds each id as `text`, and Postgres has no `uuid = text`
+        // operator, so this raw query 500'd on every real "Move to…" request.
+        // The explicit `::uuid[]` cast (same pattern as
+        // `ItemsService.matchingItemHitsForTerms`'s `::text[]` cast) fixes it.
         const lockIds = Array.from(new Set(toParentId ? [id, toParentId] : [id])).sort();
         const lockedRows = await tx.$queryRaw<
           Array<{
@@ -351,7 +360,7 @@ export class LocationsService {
         >(Prisma.sql`
           SELECT id, path, "parentId", kind, name
           FROM "Location"
-          WHERE id IN (${Prisma.join(lockIds)})
+          WHERE id = ANY(ARRAY[${Prisma.join(lockIds)}]::uuid[])
           ORDER BY id
           FOR UPDATE
         `);
@@ -367,16 +376,36 @@ export class LocationsService {
           );
         }
 
+        // Lock the ENTIRE subtree rooted at the container BEFORE running the
+        // ancestry (cycle) check below (EVT-30 round 3, security-reviewer
+        // minor finding) — the id-based lock above only pins the
+        // container's own row and the destination row; the raw path-rewrite
+        // `UPDATE` further down touches every row currently inside the
+        // subtree, none of which is otherwise locked. Without this, a row
+        // moved INTO the subtree by a concurrent request, in the window
+        // between the ancestry check and that `UPDATE`, could keep a stale
+        // path. Closing the gap: a concurrent mover locks its OWN
+        // destination row via this same `SELECT ... FOR UPDATE` idiom, so
+        // if that destination is one of the rows locked here, it now blocks
+        // until THIS transaction commits/rolls back. `ORDER BY id`, same
+        // lock-order discipline as the lock above, so two overlapping
+        // subtree locks block deterministically instead of deadlocking.
+        const oldPath = freshContainer.path;
+        await tx.$queryRaw`
+          SELECT id
+          FROM "Location"
+          WHERE path = ${oldPath} OR path LIKE ${oldPath} || '.%'
+          ORDER BY id
+          FOR UPDATE
+        `;
+
         let freshParent: { id: string; path: string } | null = null;
         if (toParentId) {
           const candidate = lockedById.get(toParentId);
           if (!candidate) {
             throw new NotFoundException(`Location ${toParentId} not found`);
           }
-          if (
-            candidate.path === freshContainer.path ||
-            candidate.path.startsWith(`${freshContainer.path}.`)
-          ) {
+          if (candidate.path === freshContainer.path || candidate.path.startsWith(`${oldPath}.`)) {
             throw new UnprocessableEntityException(
               `Cannot move "${freshContainer.name}" into itself or one of its own descendants`,
             );
@@ -392,7 +421,6 @@ export class LocationsService {
           return;
         }
 
-        const oldPath = freshContainer.path;
         const leafSlug = oldPath.split('.').pop() as string;
         const newPath = freshParent ? `${freshParent.path}.${leafSlug}` : leafSlug;
 
