@@ -1,10 +1,10 @@
 ---
 id: EVT-34
 title: 'feat(web): show build version in the profile menu'
-status: To Do
+status: Done
 priority: low
 created_date: '2026-08-14 10:02'
-updated_date: '2026-08-14 10:02'
+updated_date: '2026-08-14 10:18'
 assignee: []
 labels:
   - web
@@ -68,9 +68,24 @@ marker is fine).
 ## Acceptance Criteria
 
 <!-- AC:BEGIN -->
-- [ ] The profile/avatar menu shows a non-interactive version entry with short commit SHA and build date
-- [ ] The value is injected at build time (Vite define or equivalent); no runtime git or network call
-- [ ] The mechanism works in the `deploy.sh` flow (git-archive tarball, no `.git` on the VM) — verified by inspecting the built bundle or a deploy to a throwaway target, with evidence in the PR
-- [ ] Dev builds (vite dev / dev compose) show a `dev` marker instead of a missing or fabricated version
-- [ ] Web tests cover the menu entry rendering for both a real version and the dev marker; coverage meets the 80% threshold
+- [x] The profile/avatar menu shows a non-interactive version entry with short commit SHA and build date
+- [x] The value is injected at build time (Vite define or equivalent); no runtime git or network call
+- [x] The mechanism works in the `deploy.sh` flow (git-archive tarball, no `.git` on the VM) — verified by inspecting the built bundle or a deploy to a throwaway target, with evidence in the PR
+- [x] Dev builds (vite dev / dev compose) show a `dev` marker instead of a missing or fabricated version
+- [x] Web tests cover the menu entry rendering for both a real version and the dev marker; coverage meets the 80% threshold
 <!-- AC:END -->
+
+## Final Summary
+
+## Summary
+Build version (short SHA · build date) in the profile/avatar menu, injected at build time via a root `VERSION` file with `$Format:%h %cs$` substituted by `git archive` (`.gitattributes export-subst`) — exactly deploy.sh's packaging step, so prod gets the real version with no `.git` on the VM; every other build path falls back to a `dev` marker. Vite bakes it as a `__BUILD_VERSION__` define; `Dockerfile.caddy` copies VERSION into the build stage only.
+
+## Verification
+- `pnpm verify` — all four gates passed; web coverage 89.6% (parser module 100%)
+- AC-3 proven empirically: real docker build from a git-archive-extracted tree (no `.git`), bundle grep found the literal `c66db43 · 2026-08-14`; local build bakes `dev`
+- Reviews: 3/3 approved in one iteration (code ✅ 1 minor, test ✅ 1 minor + 1 suggestion, security ✅ 1 suggestion); ⚠ INDEPENDENCE NOT ENFORCED (codex unavailable, Claude-native reviewers)
+
+## Follow-up (documented, non-blocking)
+- Anchor `.gitattributes` pattern as `/VERSION export-subst` (currently matches any file named VERSION at any depth; harmless today)
+- Parser boundary tests (6-char sha, whitespace-only)
+- Accepted: SHA+date readable in the unauthenticated public bundle (inherent to build-time defines; drop the date if the fingerprint ever matters)

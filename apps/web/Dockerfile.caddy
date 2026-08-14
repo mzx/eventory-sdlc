@@ -13,6 +13,14 @@ COPY apps/web/package.json ./apps/web/package.json
 COPY apps/api/package.json ./apps/api/package.json
 RUN pnpm install --frozen-lockfile --filter=@eventory/web...
 
+# git-archive `export-subst` build-version marker (EVT-34) — deploy.sh
+# packages HEAD with `git archive`, which substitutes the `$Format:...$`
+# placeholder in this file with the real short SHA + committer date before
+# it ever reaches this Dockerfile (see .gitattributes,
+# apps/web/vite-config/build-version.ts). Must be copied explicitly: unlike
+# apps/web below, nothing else in this build sweeps in repo-root files.
+COPY VERSION ./VERSION
+
 COPY apps/web ./apps/web
 # `apps/web/src/api.ts` defaults every request to relative paths (`/api`,
 # `/storage`) precisely so the built bundle works unmodified behind a

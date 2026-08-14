@@ -3,9 +3,16 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
+import { resolveBuildVersion } from './vite-config/build-version';
 import { resolveApiProxyTarget, resolveHttpsOptions } from './vite-config/https-options';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Repo root — two levels up from apps/web. `VERSION` (see .gitattributes)
+// is a git-archive `export-subst` placeholder; see build-version.ts for why
+// this resolves to the `dev` marker for every build EXCEPT one whose
+// source tree came from deploy.sh's `git archive` (EVT-34).
+const buildVersion = resolveBuildVersion(path.join(dirname, '..', '..', 'VERSION'));
 
 // mkcert-generated dev certs (see README.md "Phone-on-LAN dev setup" and
 // apps/api/src/common/https-options.ts, which does the equivalent for the
@@ -23,6 +30,12 @@ const apiCertsDir = path.join(dirname, '..', 'api', 'certs');
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // Build-time-only global (EVT-34 AC2) — replaced textually wherever
+  // `__BUILD_VERSION__` appears in src (see vite-env.d.ts for the ambient
+  // type, UserMenu.tsx for the one call site). No runtime git/network call.
+  define: {
+    __BUILD_VERSION__: JSON.stringify(buildVersion),
+  },
   plugins: [
     react(),
     VitePWA({
