@@ -5,6 +5,7 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
 import {
   Box,
   Chip,
@@ -12,6 +13,9 @@ import {
   IconButton,
   List,
   ListItem,
+  ListItemIcon,
+  Menu,
+  MenuItem,
   Stack,
   TextField,
   ToggleButton,
@@ -19,11 +23,22 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useState } from 'react';
+import { useState, type MouseEvent } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import type { LocationKind } from '../api';
 import type { LocationNode } from '../lib/locationTree';
 import { frostedPanel } from '../theme';
+
+/**
+ * Visual indent per tree depth, capped at 3 levels — at `pl: depth * 3`
+ * (the pre-EVT-37 formula) a name at depth 2 had <100px left and depth 3+
+ * had ~nothing on a 390px screen (2026-08-14 mobile audit finding #7).
+ * Deeper nodes still render at their real depth; they just stop pushing
+ * further right once the indent itself would crush the name column.
+ */
+function indentPl(depth: number): number {
+  return Math.min(depth, 3) * 1.5;
+}
 
 /**
  * Distinct icon per `Location.kind` (EVT-30 AC 5) — a fixed `area` reads as
@@ -104,6 +119,11 @@ function LocationTreeRow({
   const [childKind, setChildKind] = useState<LocationKind>('area');
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(node.name);
+  // Overflow menu (xs only — see the `display` sx below): rename/add-child/
+  // delete move behind one `MoreVertIcon` button once there's no room for
+  // three separate icon buttons alongside the name (2026-08-14 mobile audit
+  // finding #7). Desktop keeps the inline icon-button row unchanged.
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
 
   const hasChildren = node.children.length > 0;
 
@@ -127,11 +147,22 @@ function LocationTreeRow({
     setRenaming(false);
   }
 
+  function startRename() {
+    setRenameValue(node.name);
+    setRenaming(true);
+  }
+
+  function confirmDelete() {
+    if (window.confirm(`Delete "${node.name}"? This cannot be undone.`)) {
+      onDelete(node.id);
+    }
+  }
+
   return (
     <>
       <ListItem
         disableGutters
-        sx={{ pl: depth * 3, py: 0.5 }}
+        sx={{ pl: indentPl(depth), py: 0.5 }}
         data-testid={`location-node-${node.id}`}
       >
         <Stack direction="row" alignItems="center" spacing={0.5} sx={{ width: '100%' }}>
@@ -159,13 +190,15 @@ function LocationTreeRow({
               }}
               onBlur={submitRename}
               inputProps={{ 'aria-label': `Rename ${node.name}` }}
+              sx={{ minWidth: 0, flexGrow: 1 }}
             />
           ) : (
             <Typography
               component={RouterLink}
               to={`/locations/${node.id}`}
               variant="body2"
-              sx={{ flexGrow: 1, color: 'text.primary', textDecoration: 'none' }}
+              noWrap
+              sx={{ flexGrow: 1, minWidth: 0, color: 'text.primary', textDecoration: 'none' }}
             >
               {node.name}
             </Typography>
@@ -176,51 +209,116 @@ function LocationTreeRow({
             size="small"
             variant="outlined"
             aria-label={`${node.itemCount} items`}
+            sx={{ flexShrink: 0 }}
           />
 
-          <Tooltip title="Add child location">
-            <IconButton
-              size="small"
-              aria-label={`Add child to ${node.name}`}
-              onClick={() => setAddingChild((v) => !v)}
-            >
-              <AddIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Rename">
-            <IconButton
-              size="small"
-              aria-label={`Rename ${node.name}`}
-              onClick={() => {
-                setRenameValue(node.name);
-                setRenaming(true);
-              }}
-            >
-              <EditOutlinedIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title={hasChildren ? 'Delete disabled — has child locations' : 'Delete'}>
-            <span>
+          {/* Desktop (>= sm): the three actions stay inline, unchanged. */}
+          <Stack
+            direction="row"
+            spacing={0.5}
+            sx={{ display: { xs: 'none', sm: 'flex' }, flexShrink: 0 }}
+          >
+            <Tooltip title="Add child location">
               <IconButton
                 size="small"
-                aria-label={`Delete ${node.name}`}
-                disabled={hasChildren}
-                onClick={() => {
-                  if (window.confirm(`Delete "${node.name}"? This cannot be undone.`)) {
-                    onDelete(node.id);
-                  }
-                }}
+                aria-label={`Add child to ${node.name}`}
+                onClick={() => setAddingChild((v) => !v)}
               >
-                <DeleteOutlineIcon fontSize="small" />
+                <AddIcon fontSize="small" />
               </IconButton>
-            </span>
-          </Tooltip>
+            </Tooltip>
+            <Tooltip title="Rename">
+              <IconButton size="small" aria-label={`Rename ${node.name}`} onClick={startRename}>
+                <EditOutlinedIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title={hasChildren ? 'Delete disabled — has child locations' : 'Delete'}>
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label={`Delete ${node.name}`}
+                  disabled={hasChildren}
+                  onClick={confirmDelete}
+                >
+                  <DeleteOutlineIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Stack>
+
+          {/* xs: one overflow button + menu instead of three icon buttons —
+              at depth >= 2 there isn't 190-210px to spare alongside a
+              readable name on a 390px screen. */}
+          <IconButton
+            size="small"
+            aria-label={`More actions for ${node.name}`}
+            onClick={(e: MouseEvent<HTMLElement>) => setMenuAnchor(e.currentTarget)}
+            sx={{ display: { xs: 'inline-flex', sm: 'none' }, flexShrink: 0 }}
+          >
+            <MoreVertIcon fontSize="small" />
+          </IconButton>
+          <Menu
+            anchorEl={menuAnchor}
+            open={Boolean(menuAnchor)}
+            onClose={() => setMenuAnchor(null)}
+          >
+            <MenuItem
+              onClick={() => {
+                setMenuAnchor(null);
+                setAddingChild((v) => !v);
+              }}
+            >
+              <ListItemIcon>
+                <AddIcon fontSize="small" />
+              </ListItemIcon>
+              Add child
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setMenuAnchor(null);
+                // Deferred: MUI's Menu restores focus to the anchor
+                // (`More actions`) as it closes. Calling `startRename`
+                // synchronously here races that restoration — the freshly
+                // mounted, `autoFocus`ed rename `TextField` can lose focus
+                // again immediately, firing its `onBlur` no-op-submit and
+                // snapping straight back out of rename mode. Letting the
+                // Menu's close/focus-restore finish first avoids it.
+                setTimeout(startRename, 0);
+              }}
+            >
+              <ListItemIcon>
+                <EditOutlinedIcon fontSize="small" />
+              </ListItemIcon>
+              Rename
+            </MenuItem>
+            <MenuItem
+              disabled={hasChildren}
+              onClick={() => {
+                setMenuAnchor(null);
+                confirmDelete();
+              }}
+            >
+              <ListItemIcon>
+                <DeleteOutlineIcon fontSize="small" />
+              </ListItemIcon>
+              {hasChildren ? 'Delete (has child locations)' : 'Delete'}
+            </MenuItem>
+          </Menu>
         </Stack>
       </ListItem>
 
       {addingChild && (
-        <ListItem disableGutters sx={{ pl: (depth + 1) * 3 + 4, py: 0.5 }}>
-          <Stack direction="row" spacing={1} sx={{ width: '100%' }} alignItems="center">
+        <ListItem disableGutters sx={{ pl: indentPl(depth + 1) + 4, py: 0.5 }}>
+          {/* Wraps below `sm` — the name field plus the two-option toggle
+              group plus the confirm button are similarly over-wide at 390px
+              (2026-08-14 mobile audit finding #7); the name field takes its
+              own row first, toggle + confirm share the next. */}
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ width: '100%', flexWrap: 'wrap' }}
+            alignItems="center"
+          >
             <TextField
               size="small"
               autoFocus
@@ -232,7 +330,7 @@ function LocationTreeRow({
                 if (e.key === 'Escape') setAddingChild(false);
               }}
               inputProps={{ 'aria-label': `New child location name for ${node.name}` }}
-              fullWidth
+              sx={{ flexGrow: 1, minWidth: { xs: '100%', sm: 0 } }}
             />
             <ToggleButtonGroup
               size="small"

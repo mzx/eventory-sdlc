@@ -127,15 +127,13 @@ export function ShoppingListPage() {
       {entries.length > 0 && (
         <List disablePadding aria-label="shopping list">
           {entries.map((entry) => (
-            <ListItem
-              key={entry.id}
-              divider
-              secondaryAction={
-                <Button variant="outlined" size="small" onClick={() => openRestockDialog(entry)}>
-                  Restocked
-                </Button>
-              }
-            >
+            // A flex row rather than `secondaryAction` (which only reserves
+            // 48px) — the "Restocked" button is ~110px+ and would otherwise
+            // overlap the item name at 390px (2026-08-14 mobile audit
+            // finding #6). `minWidth: 0` on ListItemText plus `noWrap` on
+            // both lines lets long names/summaries truncate with an
+            // ellipsis instead of pushing the button off-row.
+            <ListItem key={entry.id} divider sx={{ gap: 1.5, alignItems: 'center' }}>
               <ListItemAvatar>
                 {entry.item.primaryPhoto ? (
                   <Avatar
@@ -150,13 +148,29 @@ export function ShoppingListPage() {
                 )}
               </ListItemAvatar>
               <ListItemText
+                sx={{ minWidth: 0 }}
                 primary={
-                  <Link component={RouterLink} to={`/items/${entry.item.id}`} underline="hover">
+                  <Link
+                    component={RouterLink}
+                    to={`/items/${entry.item.id}`}
+                    underline="hover"
+                    noWrap
+                    sx={{ display: 'block' }}
+                  >
                     {entry.item.name}
                   </Link>
                 }
                 secondary={entrySummary(entry)}
+                slotProps={{ secondary: { noWrap: true } }}
               />
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => openRestockDialog(entry)}
+                sx={{ flexShrink: 0 }}
+              >
+                Restocked
+              </Button>
             </ListItem>
           ))}
         </List>

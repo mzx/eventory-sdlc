@@ -86,6 +86,31 @@ describe('ShoppingListPage', () => {
   });
 
   // =========================================================================
+  // EVT-37 finding #6 — the "Restocked" button sits in a normal flex row
+  // (not `secondaryAction`, which only reserves 48px) so it never overlaps
+  // the item name/summary, and a long name truncates with an ellipsis
+  // instead of pushing the button off-row at ~390px.
+  // =========================================================================
+
+  it('EVT-37 AC2: a long item name truncates (noWrap) instead of wrapping onto the Restocked button', async () => {
+    const longName = 'B'.repeat(120);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([
+      entry({ item: { ...entry().item, name: longName } }),
+    ]);
+
+    renderPage();
+
+    const nameLink = await screen.findByText(longName);
+    expect(nameLink).toHaveClass('MuiTypography-noWrap');
+    expect(screen.getByText('2 / min 5 — Garage')).toHaveClass('MuiTypography-noWrap');
+    // A normal flex row (not `secondaryAction`, which absolutely positions
+    // and only reserves 48px) — the button never overlaps the text column.
+    const rowEl = nameLink.closest('li');
+    expect(rowEl?.querySelector('.MuiListItemSecondaryAction-root')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restocked' })).toBeInTheDocument();
+  });
+
+  // =========================================================================
   // AC 5 — restock
   // =========================================================================
 

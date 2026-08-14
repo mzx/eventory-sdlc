@@ -100,15 +100,13 @@ export function VerificationPage() {
       {rows.length > 0 && (
         <List disablePadding aria-label="verification queue">
           {rows.map((row) => (
-            <ListItem
-              key={row.id}
-              divider
-              secondaryAction={
-                <Button variant="outlined" size="small" onClick={() => setCountTarget(row)}>
-                  Count
-                </Button>
-              }
-            >
+            // A flex row rather than `secondaryAction` (which only reserves
+            // 48px) — the "Count" button is ~90px+ and would otherwise
+            // overlap the item name at 390px (2026-08-14 mobile audit
+            // finding #6). `minWidth: 0` on ListItemText plus `noWrap` on
+            // both lines lets long names/summaries truncate with an
+            // ellipsis instead of pushing the button off-row.
+            <ListItem key={row.id} divider sx={{ gap: 1.5, alignItems: 'center' }}>
               <ListItemAvatar>
                 {row.primaryPhoto ? (
                   <Avatar
@@ -123,13 +121,29 @@ export function VerificationPage() {
                 )}
               </ListItemAvatar>
               <ListItemText
+                sx={{ minWidth: 0 }}
                 primary={
-                  <Link component={RouterLink} to={`/items/${row.id}`} underline="hover">
+                  <Link
+                    component={RouterLink}
+                    to={`/items/${row.id}`}
+                    underline="hover"
+                    noWrap
+                    sx={{ display: 'block' }}
+                  >
                     {row.name}
                   </Link>
                 }
                 secondary={rowSummary(row)}
+                slotProps={{ secondary: { noWrap: true } }}
               />
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => setCountTarget(row)}
+                sx={{ flexShrink: 0 }}
+              >
+                Count
+              </Button>
             </ListItem>
           ))}
         </List>

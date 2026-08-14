@@ -81,6 +81,91 @@ describe('LocationTree kind icon', () => {
   });
 });
 
+// EVT-37 finding #7: rows at depth >= 2 (5 fixed-width controls + unbounded
+// `pl: depth * 3` indentation) left <100px for the name at 390px. The cap
+// stops the indent growing past depth 3 so the name column stays usable.
+describe('LocationTree indent cap (EVT-37 AC 3)', () => {
+  it('caps left padding at depth 3 instead of growing indent unbounded per depth', () => {
+    const deepChain: LocationNode = node('d0', 'D0', 1, [
+      node('d1', 'D1', 1, [
+        node('d2', 'D2', 1, [node('d3', 'D3', 1, [node('d4', 'D4', 1)], 'd2')], 'd1'),
+      ]),
+    ]);
+    renderTree({ nodes: [deepChain], defaultExpanded: true });
+
+    expect(screen.getByTestId('location-node-d0')).toHaveStyle({ paddingLeft: '0px' });
+    expect(screen.getByTestId('location-node-d1')).toHaveStyle({ paddingLeft: '12px' });
+    expect(screen.getByTestId('location-node-d2')).toHaveStyle({ paddingLeft: '24px' });
+    // Depth 3 and depth 4 both cap at the same indent (Math.min(depth, 3)).
+    expect(screen.getByTestId('location-node-d3')).toHaveStyle({ paddingLeft: '36px' });
+    expect(screen.getByTestId('location-node-d4')).toHaveStyle({ paddingLeft: '36px' });
+  });
+
+  it('truncates a long name with an ellipsis instead of wrapping/pushing controls off-row', () => {
+    const longName = 'A'.repeat(80);
+    renderTree({ nodes: [node('long', longName, 3)] });
+
+    expect(screen.getByText(longName)).toHaveClass('MuiTypography-noWrap');
+  });
+});
+
+// EVT-37 finding #7: at xs, rename/add-child/delete move behind one overflow
+// `MoreVertIcon` button + menu instead of three separate icon buttons, so
+// there's room for a readable name at depth >= 2 on a 390px screen. The
+// menu items must fire the identical callbacks as the desktop inline icons.
+describe('LocationTree overflow menu (EVT-37 AC 3)', () => {
+  it('renames a node via the overflow menu', async () => {
+    const onRename = vi.fn();
+    renderTree({ onRename });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'More actions for Garage' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    const input = await screen.findByRole('textbox', { name: 'Rename Garage' });
+    await user.clear(input);
+    await user.type(input, 'Workshop{Enter}');
+
+    expect(onRename).toHaveBeenCalledWith('garage', 'Workshop');
+  });
+
+  it('adds a child via the overflow menu', async () => {
+    const onAddChild = vi.fn();
+    renderTree({ onAddChild });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'More actions for Garage' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add child' }));
+    await user.type(screen.getByLabelText('New child location name for Garage'), 'Shelf C{Enter}');
+
+    expect(onAddChild).toHaveBeenCalledWith('garage', 'Shelf C', 'area');
+  });
+
+  it('deletes a leaf node via the overflow menu after confirming', async () => {
+    const onDelete = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderTree({ onDelete, nodes: [node('attic', 'Attic', 7)] });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'More actions for Attic' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    expect(window.confirm).toHaveBeenCalledWith('Delete "Attic"? This cannot be undone.');
+    expect(onDelete).toHaveBeenCalledWith('attic');
+  });
+
+  it('disables the overflow menu Delete item for a node with children', async () => {
+    renderTree();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'More actions for Garage' }));
+
+    expect(screen.getByRole('menuitem', { name: /Delete/ })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+  });
+});
+
 // EVT-30 AC 1: containers creatable inline from the tree.
 describe('LocationTree add-child kind toggle', () => {
   it('defaults to "area" and creates an area when the toggle is left untouched', async () => {

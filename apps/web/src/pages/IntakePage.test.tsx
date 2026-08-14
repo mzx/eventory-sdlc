@@ -313,6 +313,69 @@ describe('IntakePage', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // EVT-37 finding #5 — photo-step and barcode-match action rows stack
+  // (rather than crush into multi-line fragments) below the `sm` breakpoint.
+  // `Stack`'s responsive `direction` prop renders the smallest ("xs") value
+  // as the unconditional base CSS rule and the `sm` value behind a
+  // `min-width` media query — asserting `flexDirection: column` here
+  // confirms the base (narrow-viewport) rule really is "stacked", the exact
+  // CSS jsdom resolves for an un-media-gated computed style.
+  // ---------------------------------------------------------------------------
+  describe('EVT-37: mobile action-row stacking', () => {
+    it('AC1: the photo-step action row stacks (column) rather than a single non-wrapping row', async () => {
+      mockDirectories();
+      renderIntakePage();
+
+      const takePhotoButton = await screen.findByRole('button', { name: /take photo/i });
+      const row = takePhotoButton.parentElement;
+      expect(row).toHaveStyle({ flexDirection: 'column' });
+      // Every button in the row is still present and reachable.
+      expect(screen.getByRole('button', { name: /take photo/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /choose image/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Skip photo' })).toBeInTheDocument();
+    });
+
+    it('AC1: the barcode-match action row stacks (column) rather than a single non-wrapping row', async () => {
+      mockDirectories();
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([
+        {
+          id: 'existing-item-1',
+          name: 'RC0402FR-071KL',
+          description: null,
+          quantity: 100,
+          minQuantity: null,
+          unit: null,
+          properties: { mpn: 'RC0402FR-071KL' },
+          qrCode: 'qr-existing',
+          locationId: null,
+          categoryId: null,
+          primaryPhotoId: null,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          tags: [],
+          location: null,
+          primaryPhoto: null,
+        },
+      ]);
+
+      renderIntakePage();
+      await userEvent.click(screen.getByRole('button', { name: /scan supplier barcode/i }));
+      await waitFor(() => expect(onDecodedSpy).toBeDefined());
+      const RS = '\x1E';
+      const GS = '\x1D';
+      const EOT = '\x04';
+      await act(async () => {
+        onDecodedSpy?.(`[)>${RS}06${GS}1PRC0402FR-071KL${GS}Q50${GS}${RS}${EOT}`);
+      });
+
+      const addToExisting = await screen.findByRole('button', { name: 'Add to existing' });
+      const row = addToExisting.parentElement;
+      expect(row).toHaveStyle({ flexDirection: 'column' });
+      expect(screen.getByRole('button', { name: 'Create new item instead' })).toBeInTheDocument();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // EVT-31 — distributor barcode receiving
   // ---------------------------------------------------------------------------
   describe('EVT-31: distributor barcode receiving', () => {
