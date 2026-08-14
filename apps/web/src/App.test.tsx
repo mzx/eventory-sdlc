@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import type { AuthUser } from './api';
 import { App } from './App';
 import { AuthProvider } from './auth/AuthContext';
+import { mockPhoneViewport } from './test/mockMatchMedia';
 
 function authUser(overrides: Partial<AuthUser> = {}): AuthUser {
   return {
@@ -29,6 +30,33 @@ function renderApp(initialEntry = '/') {
         <AuthProvider>
           <App />
         </AuthProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+/** Test-only helper (round-2 double-nav regression guard, see below): a
+ * single `navigate(-1)` trigger rendered alongside `<App />` inside the same
+ * `MemoryRouter`, so a test can assert exactly how many history entries a
+ * bottom-nav tap pushed by checking what a single "back" lands on. */
+function BackButtonProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      go-back-test-probe
+    </button>
+  );
+}
+
+function renderAppWithBackProbe(initialEntry: string) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+        <BackButtonProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -173,5 +201,198 @@ describe('App / auth-aware shell', () => {
 
     const navLink = await screen.findByRole('link', { name: /verification/i });
     expect(within(navLink).getByText('1')).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Phone-width bottom navigation (EVT-35)
+// ===========================================================================
+
+describe('App / phone-width bottom navigation (EVT-35)', () => {
+  const shoppingListEntry = {
+    id: 'entry-1',
+    itemId: 'item-1',
+    status: 'open' as const,
+    source: 'manual' as const,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    resolvedAt: null,
+    item: {
+      id: 'item-1',
+      name: 'Screws',
+      quantity: 1,
+      minQuantity: 5,
+      qrCode: 'qr-1',
+      primaryPhoto: null,
+      location: null,
+    },
+  };
+  const verificationEntry = {
+    id: 'item-1',
+    name: 'Box of Screws',
+    quantity: 10,
+    qrCode: 'qr-1',
+    lastVerifiedAt: null,
+    countIntervalDays: 30,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    primaryPhoto: null,
+    location: null,
+    daysOverdue: 5,
+  };
+
+  beforeEach(() => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([shoppingListEntry]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([verificationEntry]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('AC1/AC2: at xs/sm the AppBar drops the text-button row and a bottom nav with all destinations (badged) renders', async () => {
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    // AppBar keeps only title + avatar — the desktop-only text buttons are
+    // gone. Scoped to the `banner` landmark since ItemsPage's own empty-state
+    // also renders an unrelated "Add item" link (ItemsPage.tsx) regardless
+    // of viewport.
+    const banner = screen.getByRole('banner');
+    expect(within(banner).queryByRole('link', { name: /^projects$/i })).not.toBeInTheDocument();
+    expect(within(banner).queryByRole('link', { name: /^locations$/i })).not.toBeInTheDocument();
+    expect(within(banner).queryByRole('link', { name: /add item/i })).not.toBeInTheDocument();
+    expect(within(banner).getByLabelText('account menu')).toBeInTheDocument();
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+
+    // Directly reachable: Items, Scan, Add, Shopping (AC1/2).
+    expect(within(bottomNav).getByRole('link', { name: /items/i })).toHaveAttribute('href', '/');
+    expect(within(bottomNav).getByRole('button', { name: /scan/i })).toBeInTheDocument();
+    expect(within(bottomNav).getByRole('link', { name: /add/i })).toHaveAttribute(
+      'href',
+      '/intake',
+    );
+    const shoppingAction = within(bottomNav).getByRole('link', { name: /shopping/i });
+    expect(shoppingAction).toHaveAttribute('href', '/shopping-list');
+    expect(within(shoppingAction).getByText('1')).toBeInTheDocument(); // shopping-list badge
+
+    // Verification count badges the "More" action instead (it's demoted
+    // into the overflow menu at phone width) — AC1's "badge counts for
+    // shopping list + verification" still holds even though Verification
+    // itself isn't a top-level slot.
+    const moreAction = within(bottomNav).getByRole('button', { name: /more/i });
+    expect(within(moreAction).getByText('1')).toBeInTheDocument();
+
+    // Reachable via More: Projects, Locations, Verification (AC2).
+    const user = userEvent.setup();
+    await user.click(moreAction);
+    expect(await screen.findByRole('menuitem', { name: /projects/i })).toHaveAttribute(
+      'href',
+      '/projects',
+    );
+    expect(screen.getByRole('menuitem', { name: /locations/i })).toHaveAttribute(
+      'href',
+      '/locations',
+    );
+    expect(screen.getByRole('menuitem', { name: /verification/i })).toHaveAttribute(
+      'href',
+      '/verification',
+    );
+  });
+
+  it('AC4: page content reserves bottom space so it is never obscured by the fixed bottom nav', async () => {
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    // Fixed to the viewport bottom and respects the iOS PWA safe-area inset.
+    expect(bottomNav).toHaveStyle({
+      position: 'fixed',
+      bottom: '0px',
+      paddingBottom: 'env(safe-area-inset-bottom)',
+    });
+
+    // The routed page content itself reserves room below its last row so
+    // the fixed bottom nav never overlaps it (the Container's `pb`, App.tsx).
+    const main = screen.getByText('No items yet').closest('.MuiContainer-root');
+    expect(main).toHaveStyle({ paddingBottom: 'calc(64px + env(safe-area-inset-bottom))' });
+  });
+
+  it('tapping a RouterLink-backed action pushes exactly one history entry (round-2 double-nav regression)', async () => {
+    // Regression guard (code-reviewer, round 2): BottomNavigationAction items
+    // are `component={RouterLink}` AND previously *also* drove `navigate()`
+    // from `BottomNavigation`'s `onChange`, pushing two history entries per
+    // tap. Concretely: from `/shopping-list`, tap `Items`, press back once —
+    // with the bug you land on `/` again (two `/` entries stacked), not back
+    // on `/shopping-list`. `BackButtonProbe` renders a single `navigate(-1)`
+    // trigger alongside `App` in the same router so this is a true black-box
+    // check of the history stack, not an inspection of internal state.
+    mockPhoneViewport();
+    renderAppWithBackProbe('/shopping-list');
+    await screen.findByText(/shopping list/i);
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    const user = userEvent.setup();
+    await user.click(within(bottomNav).getByRole('link', { name: /^items$/i }));
+    await screen.findByText('No items yet');
+
+    await user.click(screen.getByRole('button', { name: 'go-back-test-probe' }));
+
+    // One tap forward, one "back" — must land exactly back on Shopping List,
+    // not still on Items (which a double-push would produce).
+    await screen.findByText(/shopping list/i);
+  });
+
+  it('tapping Scan at phone width opens the ScannerDialog', async () => {
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    const user = userEvent.setup();
+    await user.click(within(bottomNav).getByRole('button', { name: /scan/i }));
+
+    expect(await screen.findByRole('dialog', { name: /scan a qr code/i })).toBeInTheDocument();
+  });
+
+  it('shows no badge counts on Shopping/More when both queues are empty', async () => {
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    const shoppingAction = within(bottomNav).getByRole('link', { name: /shopping/i });
+    const moreAction = within(bottomNav).getByRole('button', { name: /more/i });
+
+    // Same MUI Badge invisible-class convention as the desktop nav badge
+    // tests above — a `0` count renders but is hidden via CSS, not absent.
+    expect(within(shoppingAction).getByText('0')).toHaveClass('MuiBadge-invisible');
+    expect(within(moreAction).getByText('0')).toHaveClass('MuiBadge-invisible');
+  });
+
+  it('AC3: desktop (md+) keeps the full toolbar and never renders the bottom nav', async () => {
+    // No mockPhoneViewport() call — the default stub (setup.ts) matches
+    // every query, i.e. `up('md')` resolves true (desktop).
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const banner = screen.getByRole('banner');
+    expect(within(banner).getByRole('link', { name: /^projects$/i })).toHaveAttribute(
+      'href',
+      '/projects',
+    );
+    expect(within(banner).getByRole('link', { name: /add item/i })).toHaveAttribute(
+      'href',
+      '/intake',
+    );
+    expect(
+      screen.queryByRole('navigation', { name: /primary mobile navigation/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -3,7 +3,16 @@ import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import QrCodeScannerOutlinedIcon from '@mui/icons-material/QrCodeScannerOutlined';
 import ShoppingCartOutlinedIcon from '@mui/icons-material/ShoppingCartOutlined';
-import { AppBar, Badge, Button, Container, Toolbar, Typography } from '@mui/material';
+import {
+  AppBar,
+  Badge,
+  Button,
+  Container,
+  Toolbar,
+  Typography,
+  useMediaQuery,
+} from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useCallback, useState } from 'react';
@@ -11,6 +20,7 @@ import { Link as RouterLink, Navigate, Route, Routes } from 'react-router-dom';
 import { fetchShoppingList, fetchVerificationQueue } from './api';
 import { AuthGate } from './auth/AuthGate';
 import { useAuth } from './auth/AuthContext';
+import { BOTTOM_NAV_HEIGHT, BottomNav } from './components/BottomNav';
 import { ScannerDialog } from './components/ScannerDialog';
 import { UserMenu } from './components/UserMenu';
 import { AdminUsersPage } from './pages/AdminUsersPage';
@@ -66,6 +76,14 @@ function AppShell() {
   const { user } = useAuth();
   const [scannerOpen, setScannerOpen] = useState(false);
   const closeScanner = useCallback(() => setScannerOpen(false), []);
+  const openScanner = useCallback(() => setScannerOpen(true), []);
+
+  // Phone nav breakpoint (EVT-35 AC1/3) — below `md` the AppBar toolbar's
+  // five text buttons crush/overflow (see task description for the
+  // measured ~750-850px minimum); collapse to a bottom nav instead. `md`
+  // itself keeps the desktop toolbar unchanged (AC3).
+  const theme = useTheme();
+  const isDesktopNav = useMediaQuery(theme.breakpoints.up('md'));
 
   // Nav badge (EVT-26 AC 6) — same ['shopping-list'] query key the
   // Shopping List page and both "Running low"/"Restocked" mutations
@@ -93,70 +111,92 @@ function AppShell() {
           >
             Eventory
           </Typography>
-          <Button
-            color="inherit"
-            variant="text"
-            startIcon={<QrCodeScannerOutlinedIcon />}
-            onClick={() => setScannerOpen(true)}
-          >
-            Scan
-          </Button>
-          <Button component={RouterLink} to="/projects" color="inherit">
-            Projects
-          </Button>
-          <Button
-            component={RouterLink}
-            to="/shopping-list"
-            color="inherit"
-            variant="text"
-            startIcon={
-              <Badge badgeContent={openShoppingListCount} color="error">
-                <ShoppingCartOutlinedIcon />
-              </Badge>
-            }
-            sx={{ mr: 1 }}
-          >
-            Shopping List
-          </Button>
-          <Button
-            component={RouterLink}
-            to="/verification"
-            color="inherit"
-            variant="text"
-            startIcon={
-              <Badge badgeContent={overdueVerificationCount} color="error">
-                <FactCheckOutlinedIcon />
-              </Badge>
-            }
-            sx={{ mr: 1 }}
-          >
-            Verification
-          </Button>
-          <Button
-            component={RouterLink}
-            to="/locations"
-            color="inherit"
-            variant="text"
-            startIcon={<PlaceOutlinedIcon />}
-            sx={{ mr: 1 }}
-          >
-            Locations
-          </Button>
-          <Button
-            component={RouterLink}
-            to="/intake"
-            color="primary"
-            variant="contained"
-            startIcon={<AddIcon />}
-            sx={{ ml: 1 }}
-          >
-            Add item
-          </Button>
+          {isDesktopNav && (
+            <>
+              <Button
+                color="inherit"
+                variant="text"
+                startIcon={<QrCodeScannerOutlinedIcon />}
+                onClick={openScanner}
+              >
+                Scan
+              </Button>
+              <Button component={RouterLink} to="/projects" color="inherit">
+                Projects
+              </Button>
+              <Button
+                component={RouterLink}
+                to="/shopping-list"
+                color="inherit"
+                variant="text"
+                startIcon={
+                  <Badge badgeContent={openShoppingListCount} color="error">
+                    <ShoppingCartOutlinedIcon />
+                  </Badge>
+                }
+                sx={{ mr: 1 }}
+              >
+                Shopping List
+              </Button>
+              <Button
+                component={RouterLink}
+                to="/verification"
+                color="inherit"
+                variant="text"
+                startIcon={
+                  <Badge badgeContent={overdueVerificationCount} color="error">
+                    <FactCheckOutlinedIcon />
+                  </Badge>
+                }
+                sx={{ mr: 1 }}
+              >
+                Verification
+              </Button>
+              <Button
+                component={RouterLink}
+                to="/locations"
+                color="inherit"
+                variant="text"
+                startIcon={<PlaceOutlinedIcon />}
+                sx={{ mr: 1 }}
+              >
+                Locations
+              </Button>
+              <Button
+                component={RouterLink}
+                to="/intake"
+                color="primary"
+                variant="contained"
+                startIcon={<AddIcon />}
+                sx={{ ml: 1 }}
+              >
+                Add item
+              </Button>
+            </>
+          )}
           {user && <UserMenu user={user} />}
         </Toolbar>
       </AppBar>
       <ScannerDialog open={scannerOpen} onClose={closeScanner} />
-      <Container maxWidth="lg" sx={{ py: 2, px: { xs: 1, sm: 2 } }}>
+      {!isDesktopNav && (
+        <BottomNav
+          openShoppingListCount={openShoppingListCount}
+          overdueVerificationCount={overdueVerificationCount}
+          onScanClick={openScanner}
+        />
+      )}
+      <Container
+        maxWidth="lg"
+        sx={{
+          py: 2,
+          px: { xs: 1, sm: 2 },
+          // Bottom nav is fixed/overlaid at xs/sm (EVT-35 AC4) — reserve
+          // room below the last row of content, plus the iOS standalone
+          // PWA safe-area inset so the home-indicator gesture bar never
+          // sits on top of an unpadded bottom nav either.
+          pb: isDesktopNav ? 2 : `calc(${BOTTOM_NAV_HEIGHT}px + env(safe-area-inset-bottom))`,
+        }}
+      >
         <Routes>
           <Route path="/" element={<ItemsPage />} />
           <Route path="/items/:id" element={<ItemDetailPage />} />

@@ -1,18 +1,26 @@
+import { afterEach, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 
-// jsdom does not implement `window.matchMedia` — MUI's `useMediaQuery`
-// (used for responsive breakpoints, e.g. ProjectDetailPage's
-// fullScreen-on-mobile BackflushDialog, EVT-36) calls it unconditionally,
-// so any component that uses it throws "not implemented" under jsdom
-// without *some* stub. Default to "no viewport media features match"
-// (desktop behavior) so tests that don't care about viewport size are
-// unaffected; tests exercising a specific breakpoint override this locally
-// with `vi.spyOn(window, 'matchMedia').mockImplementation(...)`, which
-// `vi.restoreAllMocks()` (see per-suite `afterEach`) restores back to this
-// default afterwards.
+// jsdom does not implement `window.matchMedia` (a known gap — see
+// https://github.com/jsdom/jsdom/issues/3522). MUI's `useMediaQuery` calls
+// it on every render — both `theme.breakpoints.up(...)` (App.tsx's xs/sm
+// bottom-nav vs. md+ toolbar split, EVT-35) and `theme.breakpoints.down(...)`
+// (e.g. ProjectDetailPage's fullScreen-on-mobile BackflushDialog, EVT-36) —
+// so every test needs SOME implementation or it throws.
+//
+// The default stub below is query-aware and answers "desktop" for every
+// breakpoint query shape MUI emits:
+//   - `up(...)`   → `(min-width: ...)` → matches TRUE  (viewport is wide)
+//   - `down(...)` → `(max-width: ...)` → matches FALSE (viewport not narrow)
+// so tests that don't care about viewport size see desktop behavior either
+// way. Tests exercising a specific breakpoint override this locally — via
+// `mockPhoneViewport` (`src/test/mockMatchMedia.ts`, `vi.stubGlobal`) or
+// `vi.spyOn(window, 'matchMedia').mockImplementation(...)` — and the
+// corresponding `afterEach` restore (global `vi.unstubAllGlobals()` below,
+// or per-suite `vi.restoreAllMocks()`) brings this default back afterwards.
 if (typeof window !== 'undefined' && !window.matchMedia) {
   window.matchMedia = (query: string): MediaQueryList => ({
-    matches: false,
+    matches: /min-width/.test(query),
     media: query,
     onchange: null,
     addListener: () => {},
@@ -22,3 +30,10 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
     dispatchEvent: () => false,
   });
 }
+
+// Undoes any `vi.stubGlobal('matchMedia', ...)` a test made (see
+// `mockPhoneViewport` in `src/test/mockMatchMedia.ts`) so the phone-width
+// override never leaks into a later test in the same file.
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
