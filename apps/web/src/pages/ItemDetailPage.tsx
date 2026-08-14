@@ -615,7 +615,7 @@ export function ItemDetailPage() {
             fullWidth
             value={useQuantity}
             onChange={(e) => setUseQuantity(e.target.value)}
-            inputProps={{ min: 1, max: item.quantity }}
+            inputProps={{ min: 1, max: item.quantity, inputMode: 'numeric', pattern: '[0-9]*' }}
           />
           {useError && (
             <Alert severity="error" sx={{ mt: 2 }}>

@@ -484,7 +484,7 @@ export function IntakePage() {
           type="number"
           value={barcodeAddQuantity}
           onChange={(e) => setBarcodeAddQuantity(Math.max(1, Number(e.target.value)))}
-          inputProps={{ min: 1 }}
+          inputProps={{ min: 1, inputMode: 'numeric', pattern: '[0-9]*' }}
         />
 
         {receiveMutation.isError && (
@@ -560,7 +560,7 @@ export function IntakePage() {
           value={quantity}
           onChange={(e) => setQuantity(Math.max(0, Number(e.target.value)))}
           fullWidth
-          inputProps={{ min: 0 }}
+          inputProps={{ min: 0, inputMode: 'numeric', pattern: '[0-9]*' }}
         />
         <TextField label="Unit" value={unit} onChange={(e) => setUnit(e.target.value)} fullWidth />
       </Stack>

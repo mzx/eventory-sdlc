@@ -45,8 +45,12 @@ export default defineConfig({
         name: 'Eventory',
         short_name: 'Eventory',
         description: 'Workshop home inventory — photograph, tag, and find anything in the shop.',
-        theme_color: '#1a237e',
-        background_color: '#1a237e',
+        // Blueprint palette (theme.ts APPBAR / CANVAS) — was the pre-blueprint
+        // indigo, which clashed with the Android status bar/splash once the
+        // theme moved to the drawn-blueprint look (mobile audit 2026-08-14,
+        // finding #10).
+        theme_color: '#081b30',
+        background_color: '#0b2138',
         display: 'standalone',
         start_url: '/',
         scope: '/',

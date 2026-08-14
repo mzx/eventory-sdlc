@@ -173,5 +173,19 @@ describe('ShoppingListPage', () => {
       const quantityInput = await screen.findByLabelText('New quantity');
       expect(quantityInput).toHaveValue(3);
     });
+
+    // EVT-38 finding #8 — the restock quantity field must show a numeric
+    // keypad, not the full iOS keyboard.
+    it('shows the numeric keypad on the restock quantity field (EVT-38 AC1)', async () => {
+      vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([entry()]);
+      const user = userEvent.setup();
+
+      renderPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Restocked' }));
+      const quantityInput = await screen.findByLabelText('New quantity');
+      expect(quantityInput).toHaveAttribute('inputmode', 'numeric');
+      expect(quantityInput).toHaveAttribute('pattern', '[0-9]*');
+    });
   });
 });

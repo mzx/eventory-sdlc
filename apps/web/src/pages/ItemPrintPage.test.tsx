@@ -57,6 +57,17 @@ describe('ItemPrintPage', () => {
     const qr = await screen.findByAltText('QR sticker');
     expect(qr).toHaveAttribute('src', expect.stringContaining('qr-token-1'));
 
+    // EVT-38 finding #9 — the sticker must be allowed to shrink to fit a
+    // narrow (~390px) phone viewport instead of forcing horizontal scroll.
+    // MUI's `Box` treats numeric `width`/`height` props as CSS sizing (not
+    // DOM attributes), so the print output stays 384x384 wherever there's
+    // room; `maxWidth: 100%` / `height: auto` is what lets it shrink to fit
+    // a viewport narrower than 384px (+ padding) instead of overflowing.
+    const style = getComputedStyle(qr);
+    expect(style.width).toBe('384px');
+    expect(style.maxWidth).toBe('100%');
+    expect(style.height).toBe('auto');
+
     // None of the rest of the item-detail chrome should be present: no
     // description, no tags, no location/category, no properties table, and
     // no Edit/Delete actions.

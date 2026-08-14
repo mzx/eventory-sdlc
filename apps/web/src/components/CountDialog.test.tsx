@@ -89,4 +89,13 @@ describe('CountDialog', () => {
     render(<CountDialog open itemName="Box of Screws" onCount={vi.fn()} onClose={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'Submit count' })).toBeDisabled();
   });
+
+  // EVT-38 finding #8 — iOS shows the full keyboard instead of the digit pad
+  // without inputMode=numeric on integer quantity fields.
+  it('shows the numeric keypad on the counted-quantity field (EVT-38 AC1)', () => {
+    render(<CountDialog open itemName="Box of Screws" onCount={vi.fn()} onClose={vi.fn()} />);
+    const input = screen.getByLabelText('Counted quantity');
+    expect(input).toHaveAttribute('inputmode', 'numeric');
+    expect(input).toHaveAttribute('pattern', '[0-9]*');
+  });
 });

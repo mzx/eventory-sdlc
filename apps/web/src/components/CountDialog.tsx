@@ -82,7 +82,7 @@ export function CountDialog({ open, itemName, onCount, onClose }: CountDialogPro
               fullWidth
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              inputProps={{ min: 0 }}
+              inputProps={{ min: 0, inputMode: 'numeric', pattern: '[0-9]*' }}
             />
           </>
         )}

@@ -571,6 +571,21 @@ describe('ItemDetailPage', () => {
   // =========================================================================
 
   describe('"Use" + opportunistic prompt (EVT-27)', () => {
+    // EVT-38 finding #8 — the "Use" quantity field must show a numeric
+    // keypad, not the full iOS keyboard.
+    it('shows the numeric keypad on the "Use" dialog quantity field (EVT-38 AC1)', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 10, minQuantity: null }));
+      const user = userEvent.setup();
+
+      renderDetailPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Use' }));
+      const dialog = await screen.findByRole('dialog');
+      const input = within(dialog).getByLabelText('Quantity');
+      expect(input).toHaveAttribute('inputmode', 'numeric');
+      expect(input).toHaveAttribute('pattern', '[0-9]*');
+    });
+
     it('tapping "Use" records a consume movement for the entered quantity', async () => {
       vi.spyOn(api, 'fetchItem').mockResolvedValue(detail({ quantity: 10, minQuantity: null }));
       const consumeMock = vi.spyOn(api, 'consumeItem').mockResolvedValue({
