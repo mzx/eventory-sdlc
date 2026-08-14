@@ -11,6 +11,7 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
+  DialogContentText,
   DialogTitle,
   FormControlLabel,
   IconButton,
@@ -24,6 +25,8 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
@@ -40,6 +43,7 @@ import {
   markRunningLow,
   updateBomLine,
   updateProject,
+  type AvailabilityLine,
   type AvailabilityStatus,
   type BackflushPreview,
   type BackflushPreviewLine,
@@ -134,8 +138,15 @@ function BomLineRow({ projectId, line }: { projectId: string; line: BomLine }) {
   );
 }
 
-/** Add-line row: item autocomplete (against GET /api/items?search=) or free text. */
-function AddBomLineRow({ projectId }: { projectId: string }) {
+/**
+ * Add-line form (EVT-36 AC 2): item autocomplete (against GET
+ * /api/items?search=) or free text. Previously an in-table row — an
+ * Autocomplete + two fixed-90px TextFields packed into one TableRow broke
+ * down at ~390px (2026-08-14 mobile audit finding #2). Rendered as a
+ * stacked form below the BOM table instead so it stays usable at phone
+ * widths regardless of breakpoint.
+ */
+function AddBomLineForm({ projectId }: { projectId: string }) {
   const [inputValue, setInputValue] = useState('');
   const [selectedItem, setSelectedItem] = useState<ItemListRow | null>(null);
   const [quantity, setQuantity] = useState('1');
@@ -169,86 +180,122 @@ function AddBomLineRow({ projectId }: { projectId: string }) {
   const canAdd = (selectedItem !== null || inputValue.trim().length > 0) && !addMutation.isPending;
 
   return (
-    <>
-      <TableRow>
-        <TableCell colSpan={2}>
-          <Autocomplete<ItemListRow, false, false, true>
-            freeSolo
-            options={itemsQuery.data ?? []}
-            loading={itemsQuery.isFetching}
-            getOptionLabel={(option) => (typeof option === 'string' ? option : option.name)}
-            isOptionEqualToValue={(option, value) =>
-              typeof option !== 'string' && typeof value !== 'string' && option.id === value.id
-            }
-            inputValue={inputValue}
-            onInputChange={(_event, value) => {
-              setInputValue(value);
-              setSelectedItem(null);
-            }}
-            onChange={(_event, value) => {
-              if (value && typeof value !== 'string') {
-                setSelectedItem(value);
-                setInputValue(value.name);
-              } else {
-                setSelectedItem(null);
-              }
-            }}
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                size="small"
-                label="Item or free text"
-                placeholder="Search inventory or type a new line…"
-              />
-            )}
-          />
-        </TableCell>
-        <TableCell>
+    <Stack spacing={1.5} sx={{ mt: 2 }}>
+      <Autocomplete<ItemListRow, false, false, true>
+        freeSolo
+        options={itemsQuery.data ?? []}
+        loading={itemsQuery.isFetching}
+        getOptionLabel={(option) => (typeof option === 'string' ? option : option.name)}
+        isOptionEqualToValue={(option, value) =>
+          typeof option !== 'string' && typeof value !== 'string' && option.id === value.id
+        }
+        inputValue={inputValue}
+        onInputChange={(_event, value) => {
+          setInputValue(value);
+          setSelectedItem(null);
+        }}
+        onChange={(_event, value) => {
+          if (value && typeof value !== 'string') {
+            setSelectedItem(value);
+            setInputValue(value.name);
+          } else {
+            setSelectedItem(null);
+          }
+        }}
+        renderInput={(params) => (
           <TextField
+            {...params}
             size="small"
-            type="number"
-            label="Qty"
-            value={quantity}
-            // Only clamp the actual quantity sent to the API (see
-            // clampQuantity in mutationFn) — the raw string is kept here so
-            // the field remains freely editable (e.g. clearing to retype).
-            onChange={(e) => setQuantity(e.target.value)}
-            sx={{ width: 90 }}
-            inputProps={{ min: 1, 'aria-label': 'Quantity' }}
+            label="Item or free text"
+            placeholder="Search inventory or type a new line…"
           />
-        </TableCell>
-        <TableCell>
-          <TextField
-            size="small"
-            label="Unit"
-            value={unit}
-            onChange={(e) => setUnit(e.target.value)}
-            sx={{ width: 90 }}
-          />
-        </TableCell>
-        <TableCell align="right">
-          <Button
-            size="small"
-            variant="contained"
-            onClick={() => addMutation.mutate()}
-            disabled={!canAdd}
-          >
-            Add
-          </Button>
-        </TableCell>
-      </TableRow>
+        )}
+      />
+      <Stack direction="row" spacing={1.5} flexWrap="wrap" alignItems="flex-start" gap={1.5}>
+        <TextField
+          size="small"
+          type="number"
+          label="Qty"
+          value={quantity}
+          // Only clamp the actual quantity sent to the API (see
+          // clampQuantity in mutationFn) — the raw string is kept here so
+          // the field remains freely editable (e.g. clearing to retype).
+          onChange={(e) => setQuantity(e.target.value)}
+          sx={{ width: 90 }}
+          inputProps={{ min: 1, 'aria-label': 'Quantity' }}
+        />
+        <TextField
+          size="small"
+          label="Unit"
+          value={unit}
+          onChange={(e) => setUnit(e.target.value)}
+          sx={{ width: 90 }}
+        />
+        <Button
+          size="small"
+          variant="contained"
+          onClick={() => addMutation.mutate()}
+          disabled={!canAdd}
+        >
+          Add
+        </Button>
+      </Stack>
       {addMutation.isError && (
-        <TableRow>
-          <TableCell colSpan={5} sx={{ border: 0, pt: 0 }}>
-            <Alert severity="error" sx={{ mt: 1 }}>
-              {addMutation.error instanceof Error
-                ? addMutation.error.message
-                : 'Failed to add BOM line'}
-            </Alert>
-          </TableCell>
-        </TableRow>
+        <Alert severity="error">
+          {addMutation.error instanceof Error
+            ? addMutation.error.message
+            : 'Failed to add BOM line'}
+        </Alert>
       )}
-    </>
+    </Stack>
+  );
+}
+
+/**
+ * One availability line as a stacked card (EVT-36 AC 1) — used below the
+ * `sm` breakpoint instead of the table, where a 6-column row (name,
+ * required, on-hand, location, status, action) compressed to unreadable
+ * slivers at ~390px (2026-08-14 mobile audit finding #2).
+ */
+function AvailabilityLineCard({
+  line,
+  onAddToShoppingList,
+  isAdding,
+}: {
+  line: AvailabilityLine;
+  onAddToShoppingList: (itemId: string) => void;
+  isAdding: boolean;
+}) {
+  return (
+    <Box
+      data-testid="availability-line-card"
+      sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5 }}
+    >
+      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+        <Typography variant="body2" sx={{ fontWeight: 500 }}>
+          {line.name}
+        </Typography>
+        <Chip
+          size="small"
+          label={AVAILABILITY_CHIP[line.status].label}
+          color={AVAILABILITY_CHIP[line.status].color}
+        />
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+        {line.quantity} {line.unit ?? ''} required · {line.onHand ?? '—'} on hand
+        {line.location?.path ? ` · ${line.location.path}` : ''}
+      </Typography>
+      {line.status === 'short' && line.itemId && (
+        <Button
+          size="small"
+          sx={{ mt: 1 }}
+          onClick={() => onAddToShoppingList(line.itemId as string)}
+          disabled={isAdding}
+        >
+          Add to shopping list
+        </Button>
+      )}
+    </Box>
   );
 }
 
@@ -259,8 +306,18 @@ function AddBomLineRow({ projectId }: { projectId: string }) {
  * to shopping list" action on shortage lines (AC 4, reuses EVT-26's
  * idempotent `POST /api/shopping-list`). Links to the kitting pick list (AC
  * 3). Read-only, point-in-time — see `availability.asOf` (EVT-29 risk).
+ *
+ * Below the `sm` breakpoint the per-line breakdown renders as stacked cards
+ * instead of the 6-column table, which compressed to unreadable slivers at
+ * ~390px and forced page-level horizontal scroll (EVT-36, 2026-08-14 mobile
+ * audit finding #2). At `sm` and up the table is kept but wrapped in a
+ * horizontally-scrollable container (matches AdminUsersPage's `overflowX:
+ * 'auto'` pattern) as a fallback for any content still wider than the
+ * viewport.
  */
 function AvailabilityPanel({ projectId }: { projectId: string }) {
+  const theme = useTheme();
+  const isXs = useMediaQuery(theme.breakpoints.down('sm'));
   const queryClient = useQueryClient();
   const availabilityQuery = useQuery({
     queryKey: ['projects', projectId, 'availability'],
@@ -322,48 +379,63 @@ function AvailabilityPanel({ projectId }: { projectId: string }) {
           : summaryParts.join(', ')}
       </Alert>
 
-      <Table size="small" sx={{ mt: 2 }}>
-        <TableHead>
-          <TableRow>
-            <TableCell>Line</TableCell>
-            <TableCell align="right">Required</TableCell>
-            <TableCell align="right">On hand</TableCell>
-            <TableCell>Location</TableCell>
-            <TableCell>Status</TableCell>
-            <TableCell align="right" />
-          </TableRow>
-        </TableHead>
-        <TableBody>
+      {isXs ? (
+        <Stack spacing={1.5} sx={{ mt: 2 }}>
           {lines.map((line) => (
-            <TableRow key={line.lineId}>
-              <TableCell>{line.name}</TableCell>
-              <TableCell align="right">
-                {line.quantity} {line.unit ?? ''}
-              </TableCell>
-              <TableCell align="right">{line.onHand ?? '—'}</TableCell>
-              <TableCell>{line.location?.path ?? '—'}</TableCell>
-              <TableCell>
-                <Chip
-                  size="small"
-                  label={AVAILABILITY_CHIP[line.status].label}
-                  color={AVAILABILITY_CHIP[line.status].color}
-                />
-              </TableCell>
-              <TableCell align="right">
-                {line.status === 'short' && line.itemId && (
-                  <Button
-                    size="small"
-                    onClick={() => addToShoppingListMutation.mutate(line.itemId as string)}
-                    disabled={addToShoppingListMutation.isPending}
-                  >
-                    Add to shopping list
-                  </Button>
-                )}
-              </TableCell>
-            </TableRow>
+            <AvailabilityLineCard
+              key={line.lineId}
+              line={line}
+              onAddToShoppingList={(itemId) => addToShoppingListMutation.mutate(itemId)}
+              isAdding={addToShoppingListMutation.isPending}
+            />
           ))}
-        </TableBody>
-      </Table>
+        </Stack>
+      ) : (
+        <Box sx={{ overflowX: 'auto', mt: 2 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Line</TableCell>
+                <TableCell align="right">Required</TableCell>
+                <TableCell align="right">On hand</TableCell>
+                <TableCell>Location</TableCell>
+                <TableCell>Status</TableCell>
+                <TableCell align="right" />
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {lines.map((line) => (
+                <TableRow key={line.lineId}>
+                  <TableCell>{line.name}</TableCell>
+                  <TableCell align="right">
+                    {line.quantity} {line.unit ?? ''}
+                  </TableCell>
+                  <TableCell align="right">{line.onHand ?? '—'}</TableCell>
+                  <TableCell>{line.location?.path ?? '—'}</TableCell>
+                  <TableCell>
+                    <Chip
+                      size="small"
+                      label={AVAILABILITY_CHIP[line.status].label}
+                      color={AVAILABILITY_CHIP[line.status].color}
+                    />
+                  </TableCell>
+                  <TableCell align="right">
+                    {line.status === 'short' && line.itemId && (
+                      <Button
+                        size="small"
+                        onClick={() => addToShoppingListMutation.mutate(line.itemId as string)}
+                        disabled={addToShoppingListMutation.isPending}
+                      >
+                        Add to shopping list
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Box>
+      )}
 
       {addToShoppingListMutation.isError && (
         <Alert severity="error" sx={{ mt: 1 }}>
@@ -392,6 +464,54 @@ function clampConsumeQuantity(raw: string, max: number): number {
 }
 
 /**
+ * One backflush line as a stacked, tappable card (EVT-36 AC 3) — used below
+ * the `sm` breakpoint instead of the 4-column table, where the 90px consume
+ * input packed alongside plan/on-hand columns invited mis-taps at ~390px on
+ * the exact screen that writes inventory (2026-08-14 mobile audit finding
+ * #3).
+ */
+function BackflushLineCard({
+  line,
+  quantity,
+  onChange,
+}: {
+  line: BackflushPreviewLine;
+  quantity: number;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Box sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5 }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
+        <Typography variant="body2" sx={{ fontWeight: 500 }}>
+          {line.name}
+        </Typography>
+        {line.shortage && <Chip label="Shortage" color="warning" size="small" />}
+      </Stack>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: 'block', mt: 0.5, mb: 1 }}
+      >
+        Plan {line.quantity} {line.unit ?? ''} · On hand {line.onHand}
+      </Typography>
+      <TextField
+        fullWidth
+        size="small"
+        type="number"
+        label="Consume"
+        value={quantity}
+        onChange={(e) => onChange(e.target.value)}
+        inputProps={{
+          min: 0,
+          max: line.quantity,
+          'aria-label': `Consume quantity for ${line.name}`,
+        }}
+      />
+    </Box>
+  );
+}
+
+/**
  * Backflush confirmation screen (EVT-28 AC 1) — shown when marking a
  * project `completed` and it has at least one item-linked BOM line.
  * Per-line consume quantity is editable (0..line quantity, AC 2), shortages
@@ -399,6 +519,13 @@ function clampConsumeQuantity(raw: string, max: number): number {
  * separately as "not tracked — skipped" (AC 3). Confirming writes one
  * `build` movement per consumed line and marks the project completed,
  * atomically; closing the dialog (Cancel / backdrop) writes nothing.
+ *
+ * Renders `fullScreen` below the `sm` breakpoint (EVT-36 AC 3) — this is the
+ * screen where inventory is actually written, so mis-taps in a cramped
+ * maxWidth='sm' dialog were a real hazard at phone widths (2026-08-14
+ * mobile audit finding #3). Below `sm` each line renders as a stacked
+ * `BackflushLineCard` instead of a table row; clamping, skip, and confirm
+ * behavior are unchanged.
  */
 function BackflushDialog({
   projectId,
@@ -409,6 +536,8 @@ function BackflushDialog({
   preview: BackflushPreview;
   onClose: () => void;
 }) {
+  const theme = useTheme();
+  const fullScreen = useMediaQuery(theme.breakpoints.down('sm'));
   const queryClient = useQueryClient();
   const linkedLines = preview.lines.filter((line) => !line.skipped);
   const skippedLines = preview.lines.filter((line) => line.skipped);
@@ -437,8 +566,12 @@ function BackflushDialog({
 
   const canConfirm = !confirmMutation.isPending && (!preview.alreadyBackflushed || confirmAgain);
 
+  function handleQuantityChange(lineId: string, max: number, raw: string) {
+    setQuantities((prev) => ({ ...prev, [lineId]: clampConsumeQuantity(raw, max) }));
+  }
+
   return (
-    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth fullScreen={fullScreen}>
       <DialogTitle>Complete project — confirm stock consumption</DialogTitle>
       <DialogContent>
         {preview.alreadyBackflushed && (
@@ -447,51 +580,61 @@ function BackflushDialog({
             records additional consumption (EVT-28 idempotency guard).
           </Alert>
         )}
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Line</TableCell>
-              <TableCell align="right">Plan</TableCell>
-              <TableCell align="right">On hand</TableCell>
-              <TableCell align="right">Consume</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
+        {fullScreen ? (
+          <Stack spacing={1.5}>
             {linkedLines.map((line) => (
-              <TableRow key={line.lineId}>
-                <TableCell>
-                  {line.name}
-                  {line.shortage && (
-                    <Chip label="Shortage" color="warning" size="small" sx={{ ml: 1 }} />
-                  )}
-                </TableCell>
-                <TableCell align="right">
-                  {line.quantity} {line.unit ?? ''}
-                </TableCell>
-                <TableCell align="right">{line.onHand}</TableCell>
-                <TableCell align="right">
-                  <TextField
-                    size="small"
-                    type="number"
-                    value={quantities[line.lineId] ?? 0}
-                    onChange={(e) =>
-                      setQuantities((prev) => ({
-                        ...prev,
-                        [line.lineId]: clampConsumeQuantity(e.target.value, line.quantity),
-                      }))
-                    }
-                    inputProps={{
-                      min: 0,
-                      max: line.quantity,
-                      'aria-label': `Consume quantity for ${line.name}`,
-                    }}
-                    sx={{ width: 90 }}
-                  />
-                </TableCell>
-              </TableRow>
+              <BackflushLineCard
+                key={line.lineId}
+                line={line}
+                quantity={quantities[line.lineId] ?? 0}
+                onChange={(raw) => handleQuantityChange(line.lineId, line.quantity, raw)}
+              />
             ))}
-          </TableBody>
-        </Table>
+          </Stack>
+        ) : (
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Line</TableCell>
+                <TableCell align="right">Plan</TableCell>
+                <TableCell align="right">On hand</TableCell>
+                <TableCell align="right">Consume</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {linkedLines.map((line) => (
+                <TableRow key={line.lineId}>
+                  <TableCell>
+                    {line.name}
+                    {line.shortage && (
+                      <Chip label="Shortage" color="warning" size="small" sx={{ ml: 1 }} />
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {line.quantity} {line.unit ?? ''}
+                  </TableCell>
+                  <TableCell align="right">{line.onHand}</TableCell>
+                  <TableCell align="right">
+                    <TextField
+                      size="small"
+                      type="number"
+                      value={quantities[line.lineId] ?? 0}
+                      onChange={(e) =>
+                        handleQuantityChange(line.lineId, line.quantity, e.target.value)
+                      }
+                      inputProps={{
+                        min: 0,
+                        max: line.quantity,
+                        'aria-label': `Consume quantity for ${line.name}`,
+                      }}
+                      sx={{ width: 90 }}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
         {skippedLines.length > 0 && (
           <Box sx={{ mt: 2 }}>
             <Typography variant="body2" color="text.secondary" gutterBottom>
@@ -624,6 +767,12 @@ export function ProjectDetailPage() {
     }
   }
 
+  // Delete requires an explicit confirmation dialog (EVT-36 AC 4) — unlike
+  // item deletion (confirm Dialog, see ItemDetailPage) and location deletion
+  // (window.confirm), "Delete project" previously mutated on a single tap
+  // right next to the Status select, a fat-finger hazard (2026-08-14 mobile
+  // audit finding #4). Mirrors ItemDetailPage's confirm-Dialog pattern.
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const deleteProjectMutation = useMutation({
     mutationFn: () => deleteProject(id as string),
     onSuccess: () => {
@@ -692,21 +841,13 @@ export function ProjectDetailPage() {
             color="error"
             variant="outlined"
             startIcon={<DeleteOutlineIcon fontSize="small" />}
-            onClick={() => deleteProjectMutation.mutate()}
+            onClick={() => setDeleteConfirmOpen(true)}
             disabled={deleteProjectMutation.isPending}
           >
             Delete project
           </Button>
         </Stack>
       </Stack>
-
-      {deleteProjectMutation.isError && (
-        <Alert severity="error">
-          {deleteProjectMutation.error instanceof Error
-            ? deleteProjectMutation.error.message
-            : 'Failed to delete project'}
-        </Alert>
-      )}
 
       {previewMutation.isError && (
         <Alert severity="error">
@@ -733,28 +874,36 @@ export function ProjectDetailPage() {
         <Typography variant="h6" gutterBottom>
           Bill of materials
         </Typography>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Name</TableCell>
-              <TableCell align="right">Qty</TableCell>
-              <TableCell>Unit</TableCell>
-              <TableCell>Notes</TableCell>
-              <TableCell align="right" />
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {project.bomLines.map((line) => (
-              <BomLineRow key={line.id} projectId={project.id} line={line} />
-            ))}
-            <AddBomLineRow projectId={project.id} />
-          </TableBody>
-        </Table>
+        {project.bomLines.length > 0 && (
+          // Scroll containment (EVT-36 AC 1) — matches AdminUsersPage's
+          // `overflowX: 'auto'` pattern so a long name/notes column scrolls
+          // within the table instead of forcing page-level horizontal
+          // scroll at ~390px (2026-08-14 mobile audit finding #2).
+          <Box sx={{ overflowX: 'auto' }}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Name</TableCell>
+                  <TableCell align="right">Qty</TableCell>
+                  <TableCell>Unit</TableCell>
+                  <TableCell>Notes</TableCell>
+                  <TableCell align="right" />
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {project.bomLines.map((line) => (
+                  <BomLineRow key={line.id} projectId={project.id} line={line} />
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        )}
         {project.bomLines.length === 0 && (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            No BOM lines yet — add one above.
+            No BOM lines yet — add one below.
           </Typography>
         )}
+        <AddBomLineForm projectId={project.id} />
       </Box>
 
       <ConsumedSection consumed={project.consumed} />
@@ -766,6 +915,32 @@ export function ProjectDetailPage() {
           onClose={() => setBackflushPreview(null)}
         />
       )}
+
+      <Dialog open={deleteConfirmOpen} onClose={() => setDeleteConfirmOpen(false)}>
+        <DialogTitle>Delete {project.name}?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This permanently removes the project and its BOM lines. This cannot be undone.
+          </DialogContentText>
+          {deleteProjectMutation.isError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {deleteProjectMutation.error instanceof Error
+                ? deleteProjectMutation.error.message
+                : 'Failed to delete project'}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConfirmOpen(false)}>Cancel</Button>
+          <Button
+            color="error"
+            onClick={() => deleteProjectMutation.mutate()}
+            disabled={deleteProjectMutation.isPending}
+          >
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }
