@@ -1,0 +1,9 @@
+# `VERSION` (repo root) — build-version marker for the web app's profile
+# menu (EVT-34). `export-subst` makes `git archive` (deploy.sh's packaging
+# step) substitute the `$Format:...$` placeholder below with the archived
+# commit's short SHA + committer date. A plain `git checkout`/clone (local
+# dev, `vite dev`, dev-compose bind mount) NEVER substitutes it — the file
+# keeps the literal placeholder text — which is exactly how
+# apps/web/vite-config/build-version.ts tells a real deploy build apart
+# from a dev build and falls back to the `dev` marker.
+VERSION export-subst

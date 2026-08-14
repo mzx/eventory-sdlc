@@ -19,11 +19,25 @@ function initial(user: AuthUser): string {
 }
 
 /**
- * AppBar avatar menu: name/email header, "Admin → Users" (admins only), and
- * logout. `user` is always approved here — `AuthGate` never renders the app
- * shell (and therefore this menu) for a pending/rejected/signed-out user.
+ * AppBar avatar menu: name/email header, "Admin → Users" (admins only),
+ * logout, and a non-interactive build-version footer (EVT-34). `user` is
+ * always approved here — `AuthGate` never renders the app shell (and
+ * therefore this menu) for a pending/rejected/signed-out user.
+ *
+ * `version` defaults to the build-time `__BUILD_VERSION__` global (see
+ * vite.config.ts / vite-config/build-version.ts) — `994831b · 2026-08-14`
+ * for a deploy.sh build, `dev` for `vite dev` / dev compose. It's an
+ * explicit prop (rather than reading the global directly in the JSX below)
+ * purely so tests can exercise both the real-version and `dev`-marker
+ * render paths without needing to fake the Vite `define` substitution.
  */
-export function UserMenu({ user }: { user: AuthUser }) {
+export function UserMenu({
+  user,
+  version = __BUILD_VERSION__,
+}: {
+  user: AuthUser;
+  version?: string;
+}) {
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const open = Boolean(anchorEl);
 
@@ -59,6 +73,12 @@ export function UserMenu({ user }: { user: AuthUser }) {
             <LogoutIcon fontSize="small" />
           </ListItemIcon>
           Log out
+        </MenuItem>
+        <Divider />
+        <MenuItem disabled aria-label="build version" sx={{ opacity: '1 !important' }}>
+          <Typography variant="caption" color="text.secondary" noWrap>
+            {version}
+          </Typography>
         </MenuItem>
       </Menu>
     </>
