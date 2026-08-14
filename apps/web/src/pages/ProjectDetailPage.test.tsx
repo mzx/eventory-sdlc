@@ -110,6 +110,31 @@ async function selectStatus(user: ReturnType<typeof userEvent.setup>, label: str
   await user.click(await screen.findByRole('option', { name: label }));
 }
 
+/**
+ * Makes every `useMediaQuery` call in the tree resolve as if the viewport
+ * were below the `sm` breakpoint (~390px, EVT-36 AC 1/3) — MUI's
+ * breakpoints.down('sm') query is the only one this page uses, so a
+ * blanket `matches: true` is sufficient without inspecting the query
+ * string. `apps/web/src/test/setup.ts` provides the `matches: false`
+ * (desktop) default; `vi.restoreAllMocks()` in this suite's `afterEach`
+ * restores it after each test.
+ */
+function mockNarrowViewport() {
+  vi.spyOn(window, 'matchMedia').mockImplementation(
+    (query: string) =>
+      ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList,
+  );
+}
+
 function item(overrides: Partial<api.ItemListRow> = {}): api.ItemListRow {
   return {
     id: 'item-1',
@@ -376,17 +401,75 @@ describe('ProjectDetailPage', () => {
     expect(await screen.findByText('Request to /projects failed')).toBeInTheDocument();
   });
 
-  it('clicking "Delete project" calls deleteProject with the project id', async () => {
-    vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
-    const deleteProjectMock = vi.spyOn(api, 'deleteProject').mockResolvedValue(undefined);
+  // ── Delete project confirmation (EVT-36 AC 4) ────────────────────────────
 
-    const user = userEvent.setup();
-    renderPage();
+  describe('Delete project confirmation (EVT-36 AC 4)', () => {
+    it('clicking "Delete project" opens a confirmation dialog without deleting', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+      const deleteProjectMock = vi.spyOn(api, 'deleteProject');
 
-    await screen.findByText('Garage workbench');
-    await user.click(screen.getByRole('button', { name: 'Delete project' }));
+      const user = userEvent.setup();
+      renderPage();
 
-    await waitFor(() => expect(deleteProjectMock).toHaveBeenCalledWith('project-1'));
+      await screen.findByText('Garage workbench');
+      await user.click(screen.getByRole('button', { name: 'Delete project' }));
+
+      expect(await screen.findByText('Delete Garage workbench?')).toBeInTheDocument();
+      expect(deleteProjectMock).not.toHaveBeenCalled();
+    });
+
+    it('cancelling the confirmation dialog deletes nothing', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+      const deleteProjectMock = vi.spyOn(api, 'deleteProject');
+
+      const user = userEvent.setup();
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      await user.click(screen.getByRole('button', { name: 'Delete project' }));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() =>
+        expect(screen.queryByText('Delete Garage workbench?')).not.toBeInTheDocument(),
+      );
+      expect(deleteProjectMock).not.toHaveBeenCalled();
+    });
+
+    it('confirming in the dialog calls deleteProject with the project id', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+      const deleteProjectMock = vi.spyOn(api, 'deleteProject').mockResolvedValue(undefined);
+
+      const user = userEvent.setup();
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      await user.click(screen.getByRole('button', { name: 'Delete project' }));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      await user.click(dialog.getByRole('button', { name: 'Delete' }));
+
+      await waitFor(() => expect(deleteProjectMock).toHaveBeenCalledWith('project-1'));
+    });
+
+    it('shows an error alert inside the dialog when the delete mutation fails', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+      vi.spyOn(api, 'deleteProject').mockRejectedValue(new Error('delete project boom'));
+
+      const user = userEvent.setup();
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      await user.click(screen.getByRole('button', { name: 'Delete project' }));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      await user.click(dialog.getByRole('button', { name: 'Delete' }));
+
+      expect(await dialog.findByText('delete project boom')).toBeInTheDocument();
+      // The dialog stays open on failure — nothing was navigated away from.
+      expect(screen.getByText('Delete Garage workbench?')).toBeInTheDocument();
+    });
   });
 
   // ── backflush — build completion consumes BOM stock (EVT-28) ────────────
@@ -836,6 +919,131 @@ describe('ProjectDetailPage', () => {
       renderPage();
 
       expect(await screen.findByText('availability boom')).toBeInTheDocument();
+    });
+  });
+
+  // ── Mobile layout (EVT-36, 2026-08-14 mobile audit) ──────────────────────
+
+  describe('Mobile layout (EVT-36)', () => {
+    it('renders the availability panel as stacked cards, not a table, on narrow viewports (AC 1)', async () => {
+      mockNarrowViewport();
+      // No BOM lines here — the BOM table is a separate `<table>` and is
+      // out of scope for this assertion (see the dedicated BOM/add-line
+      // test below); an empty `bomLines` keeps `screen.getByRole('table')`
+      // unambiguous.
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project({ bomLines: [] }));
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({
+          clearToBuild: false,
+          counts: { ok: 0, short: 1, untracked: 0 },
+          lines: [
+            availabilityLine({
+              lineId: 'line-1',
+              name: 'Cordless drill',
+              quantity: 5,
+              onHand: 2,
+              status: 'short',
+            }),
+          ],
+        }),
+      );
+
+      renderPage();
+
+      expect(await screen.findByText('Cordless drill')).toBeInTheDocument();
+      expect(screen.getByTestId('availability-line-card')).toBeInTheDocument();
+      expect(screen.queryByRole('table')).not.toBeInTheDocument();
+      // The per-line breakdown is still readable and the shopping-list
+      // action still works from the card.
+      expect(screen.getByRole('button', { name: 'Add to shopping list' })).toBeInTheDocument();
+    });
+
+    it('renders the availability panel as a contained-scroll table on wider viewports', async () => {
+      // No BOM lines — see the note in the narrow-viewport card test above.
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project({ bomLines: [] }));
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(availability());
+
+      renderPage();
+
+      expect(await screen.findByText('Can I build this?')).toBeInTheDocument();
+      expect(screen.getByRole('table')).toBeInTheDocument();
+      expect(screen.queryByTestId('availability-line-card')).not.toBeInTheDocument();
+    });
+
+    it('the BOM add-line form renders outside the table, usable at any width (AC 2)', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ id: 'line-1', name: '2x4 lumber' })] }),
+      );
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+
+      renderPage();
+
+      await screen.findByText('2x4 lumber');
+      // The add-line controls (autocomplete, qty, unit, add button) are not
+      // inside any <table> row — they render as a standalone stacked form.
+      const table = screen.getByRole('table');
+      expect(within(table).queryByLabelText('Item or free text')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Item or free text')).toBeInTheDocument();
+      expect(screen.getByLabelText('Quantity')).toBeInTheDocument();
+    });
+
+    it('BackflushDialog is fullScreen with stacked, tappable consume inputs on narrow viewports (AC 3)', async () => {
+      mockNarrowViewport();
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ lines: [previewLine({ lineId: 'line-1', quantity: 3, onHand: 5 })] }),
+      );
+      const confirmBackflushMock = vi.spyOn(api, 'confirmBackflush').mockResolvedValue({
+        project: project({ status: 'completed' }),
+        consumed: [],
+      });
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      const dialog = await screen.findByRole('dialog');
+      expect(
+        await screen.findByText('Complete project — confirm stock consumption'),
+      ).toBeInTheDocument();
+      expect(dialog).toHaveClass('MuiDialog-paperFullScreen');
+      expect(within(dialog).queryByRole('table')).not.toBeInTheDocument();
+
+      // Clamping/confirm behavior is unchanged despite the layout swap.
+      const qtyInput = within(dialog).getByLabelText('Consume quantity for Cordless drill');
+      expect(qtyInput).toHaveValue(3);
+      await user.clear(qtyInput);
+      await user.type(qtyInput, '2');
+
+      await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+
+      await waitFor(() =>
+        expect(confirmBackflushMock).toHaveBeenCalledWith('project-1', {
+          lines: [{ lineId: 'line-1', consumeQuantity: 2 }],
+        }),
+      );
+    });
+
+    it('BackflushDialog is not fullScreen and keeps the table layout on wider viewports', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(
+        project({ bomLines: [bomLine({ itemId: 'item-1', quantity: 3 })] }),
+      );
+      vi.spyOn(api, 'fetchBackflushPreview').mockResolvedValue(
+        preview({ lines: [previewLine({ quantity: 3, onHand: 5 })] }),
+      );
+
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Garage workbench');
+      await selectStatus(user, 'Completed');
+
+      const dialog = await screen.findByRole('dialog');
+      await screen.findByText('Complete project — confirm stock consumption');
+      expect(dialog).not.toHaveClass('MuiDialog-paperFullScreen');
+      expect(within(dialog).getByRole('table')).toBeInTheDocument();
     });
   });
 });
