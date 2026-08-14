@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import type { AuthUser } from './api';
@@ -30,6 +30,33 @@ function renderApp(initialEntry = '/') {
         <AuthProvider>
           <App />
         </AuthProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+/** Test-only helper (round-2 double-nav regression guard, see below): a
+ * single `navigate(-1)` trigger rendered alongside `<App />` inside the same
+ * `MemoryRouter`, so a test can assert exactly how many history entries a
+ * bottom-nav tap pushed by checking what a single "back" lands on. */
+function BackButtonProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      go-back-test-probe
+    </button>
+  );
+}
+
+function renderAppWithBackProbe(initialEntry: string) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+        <BackButtonProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -293,6 +320,60 @@ describe('App / phone-width bottom navigation (EVT-35)', () => {
     // the fixed bottom nav never overlaps it (the Container's `pb`, App.tsx).
     const main = screen.getByText('No items yet').closest('.MuiContainer-root');
     expect(main).toHaveStyle({ paddingBottom: 'calc(64px + env(safe-area-inset-bottom))' });
+  });
+
+  it('tapping a RouterLink-backed action pushes exactly one history entry (round-2 double-nav regression)', async () => {
+    // Regression guard (code-reviewer, round 2): BottomNavigationAction items
+    // are `component={RouterLink}` AND previously *also* drove `navigate()`
+    // from `BottomNavigation`'s `onChange`, pushing two history entries per
+    // tap. Concretely: from `/shopping-list`, tap `Items`, press back once —
+    // with the bug you land on `/` again (two `/` entries stacked), not back
+    // on `/shopping-list`. `BackButtonProbe` renders a single `navigate(-1)`
+    // trigger alongside `App` in the same router so this is a true black-box
+    // check of the history stack, not an inspection of internal state.
+    mockPhoneViewport();
+    renderAppWithBackProbe('/shopping-list');
+    await screen.findByText(/shopping list/i);
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    const user = userEvent.setup();
+    await user.click(within(bottomNav).getByRole('link', { name: /^items$/i }));
+    await screen.findByText('No items yet');
+
+    await user.click(screen.getByRole('button', { name: 'go-back-test-probe' }));
+
+    // One tap forward, one "back" — must land exactly back on Shopping List,
+    // not still on Items (which a double-push would produce).
+    await screen.findByText(/shopping list/i);
+  });
+
+  it('tapping Scan at phone width opens the ScannerDialog', async () => {
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    const user = userEvent.setup();
+    await user.click(within(bottomNav).getByRole('button', { name: /scan/i }));
+
+    expect(await screen.findByRole('dialog', { name: /scan a qr code/i })).toBeInTheDocument();
+  });
+
+  it('shows no badge counts on Shopping/More when both queues are empty', async () => {
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    const shoppingAction = within(bottomNav).getByRole('link', { name: /shopping/i });
+    const moreAction = within(bottomNav).getByRole('button', { name: /more/i });
+
+    // Same MUI Badge invisible-class convention as the desktop nav badge
+    // tests above — a `0` count renders but is hidden via CSS, not absent.
+    expect(within(shoppingAction).getByText('0')).toHaveClass('MuiBadge-invisible');
+    expect(within(moreAction).getByText('0')).toHaveClass('MuiBadge-invisible');
   });
 
   it('AC3: desktop (md+) keeps the full toolbar and never renders the bottom nav', async () => {

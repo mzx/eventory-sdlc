@@ -16,7 +16,15 @@ import {
   Paper,
 } from '@mui/material';
 import { useState, type MouseEvent } from 'react';
-import { Link as RouterLink, useLocation, useNavigate } from 'react-router-dom';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
+
+/**
+ * The `BottomNavigation`'s rendered height in px (MUI's default), exported
+ * so `App.tsx` can size the routed content's reserved bottom padding off
+ * the same number instead of a decoupled hard-coded `64px` (round-2 review
+ * suggestion, code-reviewer).
+ */
+export const BOTTOM_NAV_HEIGHT = 64;
 
 /**
  * Phone-width primary nav (EVT-35 AC1/2/4) — a fixed bottom bar replacing
@@ -41,7 +49,6 @@ export function BottomNav({
   onScanClick: () => void;
 }) {
   const location = useLocation();
-  const navigate = useNavigate();
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
   const moreOpen = Boolean(moreAnchor);
 
@@ -57,7 +64,10 @@ export function BottomNav({
       ? 'add'
       : location.pathname.startsWith('/shopping-list')
         ? 'shopping'
-        : location.pathname === '/'
+        : // startsWith (not ===) so nested item routes (`/items/:id`,
+          // `/items/:id/edit`) keep Items highlighted too — round-2 review
+          // finding.
+          location.pathname === '/' || location.pathname.startsWith('/items')
           ? 'items'
           : false;
 
@@ -80,15 +90,20 @@ export function BottomNav({
         pb: 'env(safe-area-inset-bottom)',
       }}
     >
-      <BottomNavigation
-        value={value}
-        showLabels
-        onChange={(_event, newValue) => {
-          if (newValue === 'items') navigate('/');
-          if (newValue === 'add') navigate('/intake');
-          if (newValue === 'shopping') navigate('/shopping-list');
-        }}
-      >
+      {/*
+        No `onChange` here (round-2 review finding, code-reviewer): the
+        Items/Add/Shopping actions below are `component={RouterLink}`, which
+        already navigates on click. MUI fires the clicked action's `onClick`
+        *then* `BottomNavigation`'s `onChange` regardless of
+        `event.defaultPrevented`, so wiring both `RouterLink` navigation and
+        an `onChange`-driven `navigate()` call double-navigates — two
+        history entries per tap (concretely: from `/shopping-list`, tap
+        `Items`, press back once, and you land on `/` instead of
+        `/shopping-list`). `value` above is derived purely from
+        `useLocation()`, so the selected tab still tracks the URL correctly
+        without any `onChange` handler at all.
+      */}
+      <BottomNavigation value={value} showLabels>
         <BottomNavigationAction
           label="Items"
           value="items"

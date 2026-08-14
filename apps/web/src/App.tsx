@@ -20,7 +20,7 @@ import { Link as RouterLink, Navigate, Route, Routes } from 'react-router-dom';
 import { fetchShoppingList, fetchVerificationQueue } from './api';
 import { AuthGate } from './auth/AuthGate';
 import { useAuth } from './auth/AuthContext';
-import { BottomNav } from './components/BottomNav';
+import { BOTTOM_NAV_HEIGHT, BottomNav } from './components/BottomNav';
 import { ScannerDialog } from './components/ScannerDialog';
 import { UserMenu } from './components/UserMenu';
 import { AdminUsersPage } from './pages/AdminUsersPage';
@@ -194,7 +194,7 @@ function AppShell() {
           // room below the last row of content, plus the iOS standalone
           // PWA safe-area inset so the home-indicator gesture bar never
           // sits on top of an unpadded bottom nav either.
-          pb: isDesktopNav ? 2 : 'calc(64px + env(safe-area-inset-bottom))',
+          pb: isDesktopNav ? 2 : `calc(${BOTTOM_NAV_HEIGHT}px + env(safe-area-inset-bottom))`,
         }}
       >
         <Routes>
