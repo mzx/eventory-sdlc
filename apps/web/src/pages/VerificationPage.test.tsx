@@ -99,6 +99,29 @@ describe('VerificationPage', () => {
   });
 
   // =========================================================================
+  // EVT-37 finding #6 — the "Count" button sits in a normal flex row
+  // (not `secondaryAction`, which only reserves 48px) so it never overlaps
+  // the item name/summary, and a long name truncates with an ellipsis
+  // instead of pushing the button off-row at ~390px.
+  // =========================================================================
+
+  it('EVT-37 AC2: a long item name truncates (noWrap) instead of wrapping onto the Count button', async () => {
+    const longName = 'A'.repeat(120);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([row({ name: longName })]);
+
+    renderPage();
+
+    const nameLink = await screen.findByText(longName);
+    expect(nameLink).toHaveClass('MuiTypography-noWrap');
+    expect(screen.getByText('5 days overdue — Garage')).toHaveClass('MuiTypography-noWrap');
+    // A normal flex row (not `secondaryAction`, which absolutely positions
+    // and only reserves 48px) — the button never overlaps the text column.
+    const rowEl = nameLink.closest('li');
+    expect(rowEl?.querySelector('.MuiListItemSecondaryAction-root')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Count' })).toBeInTheDocument();
+  });
+
+  // =========================================================================
   // Inline blind count (shares CountDialog with ItemDetailPage's "Verify count")
   // =========================================================================
 

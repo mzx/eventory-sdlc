@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { responsiveDeclaration } from '../test/responsiveStyle';
 import { IntakePage } from './IntakePage';
 
 // `BarcodeScannerDialog` owns real camera/decoder wiring, covered by its own
@@ -310,6 +311,125 @@ describe('IntakePage', () => {
     expect(await screen.findByText('Photo upload failed with status 413')).toBeInTheDocument();
     // Still on the photo step — not a blank state.
     expect(screen.getByRole('button', { name: /choose/i })).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // EVT-37 finding #5 — photo-step and barcode-match action rows stack
+  // (rather than crush into multi-line fragments) below the `sm` breakpoint.
+  // `Stack`'s responsive `direction` prop renders the smallest ("xs") value
+  // as the unconditional base CSS rule and the `sm` value behind a
+  // `min-width` media query — asserting `flexDirection: column` here
+  // confirms the base (narrow-viewport) rule really is "stacked", the exact
+  // CSS jsdom resolves for an un-media-gated computed style.
+  //
+  // The un-media-gated `flexDirection: column` assertion only proves the
+  // xs (narrow) rule; it can't see the `sm`-and-up rule at all (jsdom
+  // doesn't evaluate `@media` for `getComputedStyle`), so it wouldn't fail
+  // if the desktop `row` layout regressed. `responsiveDeclaration` reads
+  // the actual `sm` breakpoint's emitted CSS declaration directly, guarding
+  // the desktop layout symmetrically (review round 2, finding #4).
+  // ---------------------------------------------------------------------------
+  describe('EVT-37: mobile action-row stacking', () => {
+    it('AC1: the photo-step action row stacks (column) rather than a single non-wrapping row', async () => {
+      mockDirectories();
+      renderIntakePage();
+
+      const takePhotoButton = await screen.findByRole('button', { name: /take photo/i });
+      const row = takePhotoButton.parentElement;
+      expect(row).toHaveStyle({ flexDirection: 'column' });
+      // Every button in the row is still present and reachable.
+      expect(screen.getByRole('button', { name: /take photo/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /choose image/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Skip photo' })).toBeInTheDocument();
+    });
+
+    it('AC1: the photo-step action row stays row-direction at sm and up (desktop unchanged)', async () => {
+      mockDirectories();
+      renderIntakePage();
+
+      const takePhotoButton = await screen.findByRole('button', { name: /take photo/i });
+      const row = takePhotoButton.parentElement as Element;
+      expect(responsiveDeclaration(row, 'flex-direction', 0)).toBe('column');
+      expect(responsiveDeclaration(row, 'flex-direction', 600)).toBe('row');
+    });
+
+    it('AC1: the barcode-match action row stacks (column) rather than a single non-wrapping row', async () => {
+      mockDirectories();
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([
+        {
+          id: 'existing-item-1',
+          name: 'RC0402FR-071KL',
+          description: null,
+          quantity: 100,
+          minQuantity: null,
+          unit: null,
+          properties: { mpn: 'RC0402FR-071KL' },
+          qrCode: 'qr-existing',
+          locationId: null,
+          categoryId: null,
+          primaryPhotoId: null,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          tags: [],
+          location: null,
+          primaryPhoto: null,
+        },
+      ]);
+
+      renderIntakePage();
+      await userEvent.click(screen.getByRole('button', { name: /scan supplier barcode/i }));
+      await waitFor(() => expect(onDecodedSpy).toBeDefined());
+      const RS = '\x1E';
+      const GS = '\x1D';
+      const EOT = '\x04';
+      await act(async () => {
+        onDecodedSpy?.(`[)>${RS}06${GS}1PRC0402FR-071KL${GS}Q50${GS}${RS}${EOT}`);
+      });
+
+      const addToExisting = await screen.findByRole('button', { name: 'Add to existing' });
+      const row = addToExisting.parentElement;
+      expect(row).toHaveStyle({ flexDirection: 'column' });
+      expect(screen.getByRole('button', { name: 'Create new item instead' })).toBeInTheDocument();
+    });
+
+    it('AC1: the barcode-match action row stays row-direction at sm and up (desktop unchanged)', async () => {
+      mockDirectories();
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([
+        {
+          id: 'existing-item-1',
+          name: 'RC0402FR-071KL',
+          description: null,
+          quantity: 100,
+          minQuantity: null,
+          unit: null,
+          properties: { mpn: 'RC0402FR-071KL' },
+          qrCode: 'qr-existing',
+          locationId: null,
+          categoryId: null,
+          primaryPhotoId: null,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          tags: [],
+          location: null,
+          primaryPhoto: null,
+        },
+      ]);
+
+      renderIntakePage();
+      await userEvent.click(screen.getByRole('button', { name: /scan supplier barcode/i }));
+      await waitFor(() => expect(onDecodedSpy).toBeDefined());
+      const RS = '\x1E';
+      const GS = '\x1D';
+      const EOT = '\x04';
+      await act(async () => {
+        onDecodedSpy?.(`[)>${RS}06${GS}1PRC0402FR-071KL${GS}Q50${GS}${RS}${EOT}`);
+      });
+
+      const addToExisting = await screen.findByRole('button', { name: 'Add to existing' });
+      const row = addToExisting.parentElement as Element;
+      expect(responsiveDeclaration(row, 'flex-direction', 0)).toBe('column');
+      expect(responsiveDeclaration(row, 'flex-direction', 600)).toBe('row');
+    });
   });
 
   // ---------------------------------------------------------------------------

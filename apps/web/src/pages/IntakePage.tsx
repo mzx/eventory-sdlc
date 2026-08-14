@@ -405,12 +405,17 @@ export function IntakePage() {
           onChange={handleFileSelected}
         />
 
-        <Stack direction="row" spacing={2}>
+        {/* Column-stacked (full-width buttons) below `sm` — the uppercase
+            mono button font needs 400-500px+ for these three labels to sit
+            on one row without crushing into fragments (2026-08-14 mobile
+            audit finding #5); row layout returns once there's room. */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
           <Button
             variant="contained"
             startIcon={<PhotoCameraOutlinedIcon />}
             onClick={() => cameraInputRef.current?.click()}
             disabled={uploadMutation.isPending}
+            sx={{ width: { xs: '100%', sm: 'auto' } }}
           >
             {previewUrl ? 'Retake photo' : 'Take photo'}
           </Button>
@@ -419,10 +424,15 @@ export function IntakePage() {
             startIcon={<CollectionsOutlinedIcon />}
             onClick={() => galleryInputRef.current?.click()}
             disabled={uploadMutation.isPending}
+            sx={{ width: { xs: '100%', sm: 'auto' } }}
           >
             {previewUrl ? 'Choose different image' : 'Choose image'}
           </Button>
-          <Button onClick={skipPhoto} disabled={uploadMutation.isPending}>
+          <Button
+            onClick={skipPhoto}
+            disabled={uploadMutation.isPending}
+            sx={{ width: { xs: '100%', sm: 'auto' } }}
+          >
             Skip photo
           </Button>
         </Stack>
@@ -485,15 +495,22 @@ export function IntakePage() {
           </Alert>
         )}
 
-        <Stack direction="row" spacing={2}>
+        {/* Same column-stacking rationale as the photo-step row above
+            (finding #5) — "Create new item instead" alone needs ~230px. */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
           <Button
             variant="contained"
             onClick={() => receiveMutation.mutate()}
             disabled={receiveMutation.isPending || barcodeAddQuantity < 1}
+            sx={{ width: { xs: '100%', sm: 'auto' } }}
           >
             Add to existing
           </Button>
-          <Button onClick={createNewFromBarcodeMatch} disabled={receiveMutation.isPending}>
+          <Button
+            onClick={createNewFromBarcodeMatch}
+            disabled={receiveMutation.isPending}
+            sx={{ width: { xs: '100%', sm: 'auto' } }}
+          >
             Create new item instead
           </Button>
         </Stack>
