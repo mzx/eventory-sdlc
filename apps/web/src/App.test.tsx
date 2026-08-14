@@ -7,6 +7,7 @@ import * as api from './api';
 import type { AuthUser } from './api';
 import { App } from './App';
 import { AuthProvider } from './auth/AuthContext';
+import { mockPhoneViewport } from './test/mockMatchMedia';
 
 function authUser(overrides: Partial<AuthUser> = {}): AuthUser {
   return {
@@ -173,5 +174,144 @@ describe('App / auth-aware shell', () => {
 
     const navLink = await screen.findByRole('link', { name: /verification/i });
     expect(within(navLink).getByText('1')).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Phone-width bottom navigation (EVT-35)
+// ===========================================================================
+
+describe('App / phone-width bottom navigation (EVT-35)', () => {
+  const shoppingListEntry = {
+    id: 'entry-1',
+    itemId: 'item-1',
+    status: 'open' as const,
+    source: 'manual' as const,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    resolvedAt: null,
+    item: {
+      id: 'item-1',
+      name: 'Screws',
+      quantity: 1,
+      minQuantity: 5,
+      qrCode: 'qr-1',
+      primaryPhoto: null,
+      location: null,
+    },
+  };
+  const verificationEntry = {
+    id: 'item-1',
+    name: 'Box of Screws',
+    quantity: 10,
+    qrCode: 'qr-1',
+    lastVerifiedAt: null,
+    countIntervalDays: 30,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    primaryPhoto: null,
+    location: null,
+    daysOverdue: 5,
+  };
+
+  beforeEach(() => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([shoppingListEntry]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([verificationEntry]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('AC1/AC2: at xs/sm the AppBar drops the text-button row and a bottom nav with all destinations (badged) renders', async () => {
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    // AppBar keeps only title + avatar — the desktop-only text buttons are
+    // gone. Scoped to the `banner` landmark since ItemsPage's own empty-state
+    // also renders an unrelated "Add item" link (ItemsPage.tsx) regardless
+    // of viewport.
+    const banner = screen.getByRole('banner');
+    expect(within(banner).queryByRole('link', { name: /^projects$/i })).not.toBeInTheDocument();
+    expect(within(banner).queryByRole('link', { name: /^locations$/i })).not.toBeInTheDocument();
+    expect(within(banner).queryByRole('link', { name: /add item/i })).not.toBeInTheDocument();
+    expect(within(banner).getByLabelText('account menu')).toBeInTheDocument();
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+
+    // Directly reachable: Items, Scan, Add, Shopping (AC1/2).
+    expect(within(bottomNav).getByRole('link', { name: /items/i })).toHaveAttribute('href', '/');
+    expect(within(bottomNav).getByRole('button', { name: /scan/i })).toBeInTheDocument();
+    expect(within(bottomNav).getByRole('link', { name: /add/i })).toHaveAttribute(
+      'href',
+      '/intake',
+    );
+    const shoppingAction = within(bottomNav).getByRole('link', { name: /shopping/i });
+    expect(shoppingAction).toHaveAttribute('href', '/shopping-list');
+    expect(within(shoppingAction).getByText('1')).toBeInTheDocument(); // shopping-list badge
+
+    // Verification count badges the "More" action instead (it's demoted
+    // into the overflow menu at phone width) — AC1's "badge counts for
+    // shopping list + verification" still holds even though Verification
+    // itself isn't a top-level slot.
+    const moreAction = within(bottomNav).getByRole('button', { name: /more/i });
+    expect(within(moreAction).getByText('1')).toBeInTheDocument();
+
+    // Reachable via More: Projects, Locations, Verification (AC2).
+    const user = userEvent.setup();
+    await user.click(moreAction);
+    expect(await screen.findByRole('menuitem', { name: /projects/i })).toHaveAttribute(
+      'href',
+      '/projects',
+    );
+    expect(screen.getByRole('menuitem', { name: /locations/i })).toHaveAttribute(
+      'href',
+      '/locations',
+    );
+    expect(screen.getByRole('menuitem', { name: /verification/i })).toHaveAttribute(
+      'href',
+      '/verification',
+    );
+  });
+
+  it('AC4: page content reserves bottom space so it is never obscured by the fixed bottom nav', async () => {
+    mockPhoneViewport();
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const bottomNav = screen.getByRole('navigation', { name: /primary mobile navigation/i });
+    // Fixed to the viewport bottom and respects the iOS PWA safe-area inset.
+    expect(bottomNav).toHaveStyle({
+      position: 'fixed',
+      bottom: '0px',
+      paddingBottom: 'env(safe-area-inset-bottom)',
+    });
+
+    // The routed page content itself reserves room below its last row so
+    // the fixed bottom nav never overlaps it (the Container's `pb`, App.tsx).
+    const main = screen.getByText('No items yet').closest('.MuiContainer-root');
+    expect(main).toHaveStyle({ paddingBottom: 'calc(64px + env(safe-area-inset-bottom))' });
+  });
+
+  it('AC3: desktop (md+) keeps the full toolbar and never renders the bottom nav', async () => {
+    // No mockPhoneViewport() call — the default stub (setup.ts) matches
+    // every query, i.e. `up('md')` resolves true (desktop).
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    const banner = screen.getByRole('banner');
+    expect(within(banner).getByRole('link', { name: /^projects$/i })).toHaveAttribute(
+      'href',
+      '/projects',
+    );
+    expect(within(banner).getByRole('link', { name: /add item/i })).toHaveAttribute(
+      'href',
+      '/intake',
+    );
+    expect(
+      screen.queryByRole('navigation', { name: /primary mobile navigation/i }),
+    ).not.toBeInTheDocument();
   });
 });

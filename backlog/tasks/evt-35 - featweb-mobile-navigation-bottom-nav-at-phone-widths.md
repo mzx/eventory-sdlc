@@ -1,10 +1,10 @@
 ---
 id: EVT-35
 title: 'feat(web): mobile navigation — bottom nav at phone widths'
-status: To Do
+status: In Progress
 priority: high
 created_date: '2026-08-14 14:39'
-updated_date: '2026-08-14 14:39'
+updated_date: '2026-08-14 18:58'
 assignee: []
 labels:
   - web
