@@ -23,21 +23,25 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useState, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import type { LocationKind } from '../api';
 import type { LocationNode } from '../lib/locationTree';
 import { frostedPanel } from '../theme';
 
 /**
- * Visual indent per tree depth, capped at 3 levels — at `pl: depth * 3`
- * (the pre-EVT-37 formula) a name at depth 2 had <100px left and depth 3+
- * had ~nothing on a 390px screen (2026-08-14 mobile audit finding #7).
- * Deeper nodes still render at their real depth; they just stop pushing
- * further right once the indent itself would crush the name column.
+ * Visual indent per tree depth. Below `sm`, capped at 3 levels — at the
+ * original unbounded `depth * 3` a name at depth 2 had <100px left and
+ * depth 3+ had ~nothing on a 390px screen (2026-08-14 mobile audit finding
+ * #7). Deeper nodes still render at their real depth; they just stop
+ * pushing further right once the indent itself would crush the name
+ * column. AC-3 requires desktop unchanged, so `sm` and up keep the
+ * original unbounded `depth * 3` formula — only `xs` gets the cap.
+ * `extra` is an optional flat offset (in the same `spacing` units) applied
+ * at both breakpoints, e.g. for the inline add-child row's indent.
  */
-function indentPl(depth: number): number {
-  return Math.min(depth, 3) * 1.5;
+function indentPl(depth: number, extra = 0): { xs: number; sm: number } {
+  return { xs: Math.min(depth, 3) * 1.5 + extra, sm: depth * 3 + extra };
 }
 
 /**
@@ -124,6 +128,16 @@ function LocationTreeRow({
   // three separate icon buttons alongside the name (2026-08-14 mobile audit
   // finding #7). Desktop keeps the inline icon-button row unchanged.
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  // Deferred-rename timer (see the overflow menu's "Rename" onClick below) —
+  // cleared on unmount so a row removed (e.g. via delete elsewhere in the
+  // tree causing a re-render) between the menu closing and the timeout
+  // firing can't re-enter rename mode on a component that's gone.
+  const renameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (renameTimerRef.current !== null) clearTimeout(renameTimerRef.current);
+    };
+  }, []);
 
   const hasChildren = node.children.length > 0;
 
@@ -249,14 +263,16 @@ function LocationTreeRow({
           {/* xs: one overflow button + menu instead of three icon buttons —
               at depth >= 2 there isn't 190-210px to spare alongside a
               readable name on a 390px screen. */}
-          <IconButton
-            size="small"
-            aria-label={`More actions for ${node.name}`}
-            onClick={(e: MouseEvent<HTMLElement>) => setMenuAnchor(e.currentTarget)}
-            sx={{ display: { xs: 'inline-flex', sm: 'none' }, flexShrink: 0 }}
-          >
-            <MoreVertIcon fontSize="small" />
-          </IconButton>
+          <Tooltip title="More actions">
+            <IconButton
+              size="small"
+              aria-label={`More actions for ${node.name}`}
+              onClick={(e: MouseEvent<HTMLElement>) => setMenuAnchor(e.currentTarget)}
+              sx={{ display: { xs: 'inline-flex', sm: 'none' }, flexShrink: 0 }}
+            >
+              <MoreVertIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
           <Menu
             anchorEl={menuAnchor}
             open={Boolean(menuAnchor)}
@@ -283,7 +299,7 @@ function LocationTreeRow({
                 // again immediately, firing its `onBlur` no-op-submit and
                 // snapping straight back out of rename mode. Letting the
                 // Menu's close/focus-restore finish first avoids it.
-                setTimeout(startRename, 0);
+                renameTimerRef.current = setTimeout(startRename, 0);
               }}
             >
               <ListItemIcon>
@@ -308,7 +324,7 @@ function LocationTreeRow({
       </ListItem>
 
       {addingChild && (
-        <ListItem disableGutters sx={{ pl: indentPl(depth + 1) + 4, py: 0.5 }}>
+        <ListItem disableGutters sx={{ pl: indentPl(depth + 1, 4), py: 0.5 }}>
           {/* Wraps below `sm` — the name field plus the two-option toggle
               group plus the confirm button are similarly over-wide at 390px
               (2026-08-14 mobile audit finding #7); the name field takes its
