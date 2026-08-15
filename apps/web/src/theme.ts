@@ -269,6 +269,14 @@ export const theme = createTheme({
           color: 'rgba(232, 242, 251, 0.4)',
           '&:hover': { color: 'rgba(232, 242, 251, 0.75)' },
         },
+        // Filter chips are 32px tall by default — below the 44px gloved-thumb
+        // commitment MuiButton/MuiIconButton enforce elsewhere. Same
+        // invisible-hit-area trick as MuiIconButton's sizeSmall (above):
+        // extend the actual hit target without changing the drawn chip.
+        clickable: {
+          position: 'relative',
+          '&::after': { content: '""', position: 'absolute', inset: -6 },
+        },
       },
     },
     MuiOutlinedInput: {

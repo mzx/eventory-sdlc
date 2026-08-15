@@ -250,6 +250,18 @@ describe('IntakePage', () => {
     );
   });
 
+  // EVT-38 finding #8 — the manual-entry quantity field must show a numeric
+  // keypad, not the full iOS keyboard.
+  it('shows the numeric keypad on the quantity field (EVT-38 AC1)', async () => {
+    mockDirectories();
+    renderIntakePage();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Skip photo' }));
+    const quantityInput = await screen.findByLabelText('Quantity');
+    expect(quantityInput).toHaveAttribute('inputmode', 'numeric');
+    expect(quantityInput).toHaveAttribute('pattern', '[0-9]*');
+  });
+
   // ---------------------------------------------------------------------------
   // AC 1 / AC 5 — the capture input still forces the rear camera on mobile.
   // ---------------------------------------------------------------------------
@@ -590,6 +602,23 @@ describe('IntakePage', () => {
       await waitFor(() => expect(receiveMock).toHaveBeenCalledWith(existing.id, 50));
       expect(createMock).not.toHaveBeenCalled();
       expect(await screen.findByText('detail page')).toBeInTheDocument();
+    });
+
+    // EVT-38 finding #8 — the barcode add-to-existing quantity field must
+    // show a numeric keypad, not the full iOS keyboard.
+    it('shows the numeric keypad on the "Quantity to add" field (EVT-38 AC1)', async () => {
+      mockDirectories();
+      const existing = itemRow({ properties: { mpn: 'RC0402FR-071KL' } });
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([existing]);
+
+      renderIntakePage();
+      await openBarcodeScanner();
+
+      await decode(envelope('1PRC0402FR-071KL', 'Q50'));
+
+      const quantityInput = await screen.findByLabelText('Quantity to add');
+      expect(quantityInput).toHaveAttribute('inputmode', 'numeric');
+      expect(quantityInput).toHaveAttribute('pattern', '[0-9]*');
     });
 
     it('AC4: "Create new item instead" on the match screen falls back to the normal prefilled draft', async () => {

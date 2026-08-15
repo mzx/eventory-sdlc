@@ -45,6 +45,7 @@ export function ItemPrintPage() {
             alt="QR sticker"
             width={384}
             height={384}
+            sx={{ maxWidth: '100%', height: 'auto' }}
           />
           <Button
             className="no-print"

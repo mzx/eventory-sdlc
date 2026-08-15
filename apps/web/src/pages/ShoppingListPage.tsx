@@ -188,7 +188,7 @@ export function ShoppingListPage() {
             fullWidth
             value={restockQuantity}
             onChange={(e) => setRestockQuantity(e.target.value)}
-            inputProps={{ min: 0 }}
+            inputProps={{ min: 0, inputMode: 'numeric', pattern: '[0-9]*' }}
           />
           {restockError && (
             <Alert severity="error" sx={{ mt: 2 }}>
