@@ -32,7 +32,7 @@ Schema + migration only; the app keeps working exactly as today against a
 default workspace:
 
 - `Workspace` (id uuid, name, createdAt) and `WorkspaceMember`
-  (workspaceId, userId, role `owner|member`, createdAt,
+  (workspaceId, userId, role `owner|member|viewer`, createdAt,
   `@@unique([workspaceId, userId])`)
 - `workspaceId` (non-null FK, `onDelete: Restrict`) added to: Item, Location,
   Category, Tag, Project, StockMovement, ShoppingListEntry, Photo (photos need

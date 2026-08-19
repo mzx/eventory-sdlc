@@ -43,6 +43,10 @@ isolation on the highest-risk surfaces: items, photos, file storage, QR.
   endpoint touched here proven 404/403-for-foreign + correct-for-own; harness
   reused by EVT-41
 - StockMovement writes on these paths inherit the item's workspace (asserted)
+- **Role-aware writes (viewer role, operator decision 2026-08-20)**: the tenant
+  context exposes the caller's role; ALL mutating endpoints in this task's
+  modules require `owner|member` — a `viewer` gets 403 on writes and full 200
+  on reads. Implement as one reusable guard/decorator, not per-endpoint ifs
 
 ## Non-goals
 
@@ -61,6 +65,7 @@ isolation on the highest-risk surfaces: items, photos, file storage, QR.
 - [ ] Items endpoints: foreign ids → 404 across GET/PATCH/DELETE/consume/count/movements; own-workspace correct (e2e matrix)
 - [ ] Photo metadata and raw /storage requests for foreign photos → 404/403; own → 200 (e2e)
 - [ ] QR: member resolves; non-member gets neutral response (e2e)
+- [ ] Viewer-role matrix: a `viewer` member reads everything (200) but every mutating endpoint in this task's modules returns 403, via the shared write-guard (e2e)
 - [ ] Two-workspace isolation harness landed and documented for reuse
 - [ ] `pnpm verify` green; coverage meets the 80% threshold
 <!-- AC:END -->

@@ -36,9 +36,13 @@ tenancy and must be recast as workspace membership.
   `member` default) → shareable link/code; invitee signs in with Google and
   redeems → membership. Revocation of pending invites. No email sending —
   links shared out-of-band (household scale)
-- **Roles**: `owner` manages members/invites/rename; `member` full inventory
-  access, no member management. Owner removes members; members leave; the
-  last owner cannot leave/demote without transfer
+- **Roles** (operator decision 2026-08-20: three roles): `owner` manages
+  members/invites/rename; `member` full inventory access, no member
+  management; `viewer` read-only inventory access (enforced by EVT-40/41's
+  shared write-guard). Invitations specify the role they grant
+  (`member` default, `viewer` selectable). Owner can change an existing
+  member's role between `member` and `viewer`. Owner removes members; members
+  leave; the last owner cannot leave/demote without transfer
 - **Auth rework**: new sign-ins no longer land in global "pending" — a user
   with zero memberships sees "create a workspace or redeem an invite".
   EVENTORY_ADMIN_EMAILS keeps meaning instance-admin (AdminUsersPage) but no
@@ -64,6 +68,7 @@ tenancy and must be recast as workspace membership.
 - [ ] Create/list/rename workspaces with owner-role enforcement (e2e)
 - [ ] Invite lifecycle: create → redeem (new Google user) → member sees data; revoke blocks redemption; expiry + single-use enforced (e2e)
 - [ ] Removal/leave semantics incl. last-owner protection (e2e)
+- [ ] Viewer-granting invites work end-to-end (redeemed viewer can read, cannot write); owner can toggle member↔viewer and the change takes effect immediately (e2e)
 - [ ] Zero-membership users can create/redeem but cannot touch inventory endpoints (e2e)
 - [ ] Fresh-deployment first-user path works with no env vars; README + .env examples updated
 - [ ] `pnpm verify` green; coverage meets the 80% threshold

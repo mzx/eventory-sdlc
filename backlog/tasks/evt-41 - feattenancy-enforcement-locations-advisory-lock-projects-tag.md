@@ -43,6 +43,9 @@ context + isolation harness.
 - **Shopping list + verification queues**: scoped queries; low-stock trigger
   writes entries in the item's workspace; badge counts scoped
 - Extend the isolation e2e matrix to every endpoint in these modules
+- Apply EVT-40's shared write-guard across these modules: `viewer` reads
+  everything, 403 on every mutation (moves, renames, backflush, BOM edits,
+  restock, counts)
 
 ## Non-goals
 
@@ -63,5 +66,6 @@ context + isolation harness.
 - [ ] BOM line linking a foreign-workspace item rejected with a test
 - [ ] Low-stock entries, verification queues, badge counts workspace-scoped (e2e)
 - [ ] Same tag name creatable in two workspaces via the API
+- [ ] Viewer-role matrix extended to these modules: reads 200, all mutations 403 (e2e)
 - [ ] `pnpm verify` green; coverage meets the 80% threshold
 <!-- AC:END -->

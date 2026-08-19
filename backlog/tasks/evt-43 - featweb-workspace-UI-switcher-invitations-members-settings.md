@@ -41,6 +41,12 @@ switch, invite the household, manage members.
 - **Redemption route**: `/invite/<token>` — sign-in-if-needed → redeem → land
   in the workspace
 - Mobile-first per EVT-35..38 standards (44px targets, xs layouts)
+- **Viewer-aware UI**: when the active membership is `viewer`, mutating
+  affordances (Add item, edit/delete, consume/count, move container,
+  backflush, restock, running-low) are hidden or disabled with a "read-only
+  access" hint — the UI mirrors, never substitutes for, the server-side guard.
+  Members settings shows a role column with owner-only member↔viewer toggle
+  and role selection on invite creation
 
 ## Non-goals
 
@@ -60,6 +66,7 @@ switch, invite the household, manage members.
 - [ ] Switching workspaces swaps ALL visible data with no stale flashes (test with two mocked workspaces)
 - [ ] Switcher in avatar menu and mobile nav; create-workspace flow works
 - [ ] Zero-membership onboarding replaces the pending page; redemption route works end-to-end
-- [ ] Members settings: invite create/copy/revoke, remove, last-owner protection surfaced
+- [ ] Members settings: invite create/copy/revoke, remove, last-owner protection surfaced; role column with owner-only member↔viewer toggle; invite role selection
+- [ ] Viewer sees a read-only UI: mutating affordances hidden/disabled with a hint, verified by tests rendering the same pages as viewer vs member
 - [ ] `pnpm verify` green; coverage meets the 80% threshold
 <!-- AC:END -->
