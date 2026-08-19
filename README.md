@@ -226,6 +226,13 @@ Google account — no manual SQL required. This works both for a brand-new deplo
 recovering an instance where someone else's row already consumed the first-user slot; the
 promotion is applied retroactively on sign-in even if the row already exists as `pending`.
 
+## Production backups (EVT-33)
+
+Nightly, off-VM, tested restore procedure — see
+[`docs/operations/backups.md`](./docs/operations/backups.md) for the full
+runbook (install, fetch, and restore for both "fresh VM" and "db corrupted,
+VM alive" scenarios).
+
 ## Other useful commands
 
 ```bash
