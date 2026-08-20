@@ -1,5 +1,7 @@
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import LogoutIcon from '@mui/icons-material/Logout';
+import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
 import {
   Avatar,
   Divider,
@@ -34,9 +36,18 @@ function initial(user: AuthUser): string {
 export function UserMenu({
   user,
   version = __BUILD_VERSION__,
+  activeWorkspaceName = null,
+  isOwner = false,
+  onSwitchWorkspace,
 }: {
   user: AuthUser;
   version?: string;
+  /** Name of the currently active workspace (EVT-43) — `null` while it's still resolving. */
+  activeWorkspaceName?: string | null;
+  /** Whether the caller is `owner` of the active workspace — gates the "Members" entry. */
+  isOwner?: boolean;
+  /** Opens the shared `WorkspaceSwitcherDialog` (owned by `App.tsx`, not this component — see its doc comment for why). */
+  onSwitchWorkspace?: () => void;
 }) {
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const open = Boolean(anchorEl);
@@ -59,6 +70,33 @@ export function UserMenu({
             {user.name ?? user.email}
           </Typography>
         </MenuItem>
+        <Divider />
+        {activeWorkspaceName && (
+          <MenuItem disabled sx={{ opacity: '1 !important' }}>
+            <Typography variant="caption" color="text.secondary" noWrap>
+              Workspace: {activeWorkspaceName}
+            </Typography>
+          </MenuItem>
+        )}
+        <MenuItem
+          onClick={() => {
+            handleClose();
+            onSwitchWorkspace?.();
+          }}
+        >
+          <ListItemIcon>
+            <SwapHorizIcon fontSize="small" />
+          </ListItemIcon>
+          Switch workspace
+        </MenuItem>
+        {isOwner && (
+          <MenuItem component={RouterLink} to="/settings/members" onClick={handleClose}>
+            <ListItemIcon>
+              <GroupOutlinedIcon fontSize="small" />
+            </ListItemIcon>
+            Members
+          </MenuItem>
+        )}
         <Divider />
         {user.role === 'admin' && (
           <MenuItem component={RouterLink} to="/admin/users" onClick={handleClose}>

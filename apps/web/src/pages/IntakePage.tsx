@@ -40,6 +40,8 @@ import {
 } from '../api';
 import { BarcodeScannerDialog } from '../components/BarcodeScannerDialog';
 import { parseEciaBarcode, type ParsedEciaBarcode } from '../lib/eciaBarcode';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /**
  * The screens of the intake flow:
@@ -87,6 +89,8 @@ function pathDepth(path: string): number {
  */
 export function IntakePage() {
   const navigate = useNavigate();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [searchParams] = useSearchParams();
   const preselectedLocationId = searchParams.get('locationId') ?? '';
 
@@ -125,9 +129,21 @@ export function IntakePage() {
   } | null>(null);
   const [barcodeAddQuantity, setBarcodeAddQuantity] = useState(1);
 
-  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: fetchTags });
-  const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
-  const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: fetchCategories });
+  const tagsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'tags'),
+    queryFn: fetchTags,
+    enabled: workspaceId != null,
+  });
+  const locationsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'locations'),
+    queryFn: fetchLocations,
+    enabled: workspaceId != null,
+  });
+  const categoriesQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'categories'),
+    queryFn: fetchCategories,
+    enabled: workspaceId != null,
+  });
 
   // Revoke the previous preview object URL whenever it changes (retake) and
   // on unmount, so we don't leak blob URLs for every photo taken.
@@ -347,6 +363,24 @@ export function IntakePage() {
   const locations = locationsQuery.data ?? [];
   const categories = categoriesQuery.data ?? [];
   const tagOptions = (tagsQuery.data ?? []).map((t) => t.name);
+
+  // Viewer-aware UI (EVT-43 AC6) — a viewer reaching /intake directly (the
+  // nav-level "Add item" affordance is already hidden for them, see
+  // App.tsx/BottomNav.tsx) sees a read-only notice instead of the create
+  // flow; the server would 403 the eventual POST /api/items anyway.
+  if (isViewer) {
+    return (
+      <Stack spacing={2} sx={{ maxWidth: 480 }}>
+        <Typography variant="h5" component="h1">
+          Add item
+        </Typography>
+        <Alert severity="info">{READ_ONLY_HINT}</Alert>
+        <Button onClick={() => navigate('/')} sx={{ alignSelf: 'flex-start' }}>
+          Back to items
+        </Button>
+      </Stack>
+    );
+  }
 
   if (step === 'photo') {
     return (

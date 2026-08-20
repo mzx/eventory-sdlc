@@ -25,6 +25,8 @@ import {
 } from '../api';
 import { LocationTree } from '../components/LocationTree';
 import { buildLocationTree } from '../lib/locationTree';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /**
  * `/locations` — collapsible tree of the whole location hierarchy with item
@@ -35,15 +37,21 @@ import { buildLocationTree } from '../lib/locationTree';
  */
 export function LocationsPage() {
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [addingRoot, setAddingRoot] = useState(false);
   const [rootName, setRootName] = useState('');
   const [rootKind, setRootKind] = useState<LocationKind>('area');
   const [mutationError, setMutationError] = useState<string | null>(null);
 
-  const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
+  const locationsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'locations'),
+    queryFn: fetchLocations,
+    enabled: workspaceId != null,
+  });
 
   function invalidate() {
-    return queryClient.invalidateQueries({ queryKey: ['locations'] });
+    return queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'locations') });
   }
 
   const createMutation = useMutation({
@@ -99,17 +107,23 @@ export function LocationsPage() {
         <Typography variant="h5" component="h1">
           Locations
         </Typography>
-        <Button
-          size="small"
-          startIcon={<AddIcon />}
-          onClick={() => setAddingRoot((v) => !v)}
-          variant="outlined"
-        >
-          Add root location
-        </Button>
+        {isViewer ? (
+          <Typography variant="caption" color="text.secondary">
+            {READ_ONLY_HINT}
+          </Typography>
+        ) : (
+          <Button
+            size="small"
+            startIcon={<AddIcon />}
+            onClick={() => setAddingRoot((v) => !v)}
+            variant="outlined"
+          >
+            Add root location
+          </Button>
+        )}
       </Stack>
 
-      {addingRoot && (
+      {addingRoot && !isViewer && (
         <Stack direction="row" spacing={1} alignItems="center">
           <TextField
             size="small"

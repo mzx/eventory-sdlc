@@ -19,6 +19,8 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { fetchItems, fetchTags, searchItemsByPhoto, type PhotoSearchResult } from '../api';
 import { ItemCard } from '../components/ItemCard';
+import { wsKey } from '../lib/queryKeys';
+import { useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 const SEARCH_DEBOUNCE_MS = 300;
 
@@ -33,6 +35,8 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 }
 
 export function ItemsPage() {
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [search, setSearch] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const debouncedSearch = useDebouncedValue(search, SEARCH_DEBOUNCE_MS);
@@ -43,15 +47,20 @@ export function ItemsPage() {
   const [photoSearch, setPhotoSearch] = useState<PhotoSearchResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: fetchTags });
+  const tagsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'tags'),
+    queryFn: fetchTags,
+    enabled: workspaceId != null,
+  });
 
   const itemsQuery = useQuery({
-    queryKey: ['items', { search: debouncedSearch, tag: activeTag }],
+    queryKey: wsKey(workspaceId, 'items', { search: debouncedSearch, tag: activeTag }),
     queryFn: () =>
       fetchItems({
         search: debouncedSearch || undefined,
         tag: activeTag ?? undefined,
       }),
+    enabled: workspaceId != null,
   });
 
   const photoSearchMutation = useMutation({
@@ -214,9 +223,15 @@ export function ItemsPage() {
           <Typography variant="body2" color="text.secondary" gutterBottom>
             Photograph something to add your first item.
           </Typography>
-          <Typography variant="body2">
-            <RouterLink to="/intake">Add item</RouterLink>
-          </Typography>
+          {isViewer ? (
+            <Typography variant="body2" color="text.secondary">
+              Read-only access — ask a workspace owner to add items.
+            </Typography>
+          ) : (
+            <Typography variant="body2">
+              <RouterLink to="/intake">Add item</RouterLink>
+            </Typography>
+          )}
         </Box>
       )}
 

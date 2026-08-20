@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { VerificationPage } from './VerificationPage';
 
 function row(overrides: Partial<api.VerificationQueueRow> = {}): api.VerificationQueueRow {
@@ -37,8 +39,23 @@ function renderPage() {
 }
 
 describe('VerificationPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('EVT-43 AC6: disables "Count" with a read-only hint for a viewer', async () => {
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([row()]);
+    setActiveWorkspaceRole('viewer');
+
+    renderPage();
+
+    const countButton = await screen.findByRole('button', { name: /count/i });
+    expect(countButton).toBeDisabled();
   });
 
   // =========================================================================

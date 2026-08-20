@@ -36,6 +36,8 @@ import {
   type CategoryListItem,
   type LocationListItem,
 } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /** One row of the dynamic properties (key/value) editor. */
 interface PropertyRow {
@@ -59,15 +61,29 @@ export function EditItemPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
 
   const itemQuery = useQuery({
-    queryKey: ['items', id],
+    queryKey: wsKey(workspaceId, 'items', id),
     queryFn: () => fetchItem(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
-  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: fetchTags });
-  const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
-  const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: fetchCategories });
+  const tagsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'tags'),
+    queryFn: fetchTags,
+    enabled: workspaceId != null,
+  });
+  const locationsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'locations'),
+    queryFn: fetchLocations,
+    enabled: workspaceId != null,
+  });
+  const categoriesQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'categories'),
+    queryFn: fetchCategories,
+    enabled: workspaceId != null,
+  });
 
   const [initialized, setInitialized] = useState(false);
   const [name, setName] = useState('');
@@ -141,8 +157,8 @@ export function EditItemPage() {
         ),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['items'] });
-      queryClient.invalidateQueries({ queryKey: ['tags'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'tags') });
       navigate(`/items/${id}`);
     },
   });
@@ -160,7 +176,7 @@ export function EditItemPage() {
       // is keyed as `['items', { search, tag }]` on ItemsPage — picks up a
       // newly auto-promoted primary photo (EVT-24 AC1) without a full
       // reload, matching setPrimaryMutation/removePhotoMutation below.
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
     },
     onError: (error: unknown) => handlePhotoActionError(error, 'Failed to upload photo'),
   });
@@ -169,7 +185,7 @@ export function EditItemPage() {
     mutationFn: (photoId: string) => updateItem(id as string, { photoIds: [photoId] }),
     onSuccess: () => {
       setPhotoActionError(null);
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
     },
     onError: (error: unknown) => handlePhotoActionError(error, 'Failed to set primary photo'),
   });
@@ -178,7 +194,7 @@ export function EditItemPage() {
     mutationFn: (photoId: string) => deletePhoto(photoId),
     onSuccess: () => {
       setPhotoActionError(null);
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
     },
     onError: (error: unknown) => handlePhotoActionError(error, 'Failed to remove photo'),
   });
@@ -221,6 +237,8 @@ export function EditItemPage() {
       <Typography variant="h5" component="h1">
         Edit {item.name}
       </Typography>
+
+      {isViewer && <Alert severity="info">{READ_ONLY_HINT}</Alert>}
 
       <TextField label="Name" value={name} onChange={(e) => setName(e.target.value)} />
 
@@ -443,7 +461,7 @@ export function EditItemPage() {
         <Button
           variant="contained"
           onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending || name.trim().length === 0}
+          disabled={isViewer || saveMutation.isPending || name.trim().length === 0}
         >
           Save
         </Button>

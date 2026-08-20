@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { LocationDetailPage } from './LocationDetailPage';
 
 function locationDetail(overrides: Partial<api.LocationDetail> = {}): api.LocationDetail {
@@ -80,8 +82,36 @@ function renderLocationDetailPage(id = 'shelf-3') {
 }
 
 describe('LocationDetailPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('EVT-43 AC6: hides "Move to…" and "Add item here" for a viewer', async () => {
+    vi.spyOn(api, 'fetchLocation').mockResolvedValue(locationDetail({ kind: 'container' }));
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      locListItem({ id: 'shelf-3', path: 'garage.shelf-3', kind: 'container' }),
+    ]);
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchContainerMovements').mockResolvedValue({
+      data: [],
+      page: 1,
+      pageSize: 20,
+      total: 0,
+      totalPages: 1,
+    });
+    setActiveWorkspaceRole('viewer');
+
+    renderLocationDetailPage();
+
+    await screen.findByText('Shelf 3');
+    expect(screen.queryByRole('button', { name: /move to/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add item here/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
   });
 
   it('shows breadcrumb, children, and items; "Add item here" links into intake with the location', async () => {

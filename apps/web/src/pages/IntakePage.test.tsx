@@ -2,9 +2,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
 import { responsiveDeclaration } from '../test/responsiveStyle';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { IntakePage } from './IntakePage';
 
 // `BarcodeScannerDialog` owns real camera/decoder wiring, covered by its own
@@ -83,8 +85,23 @@ function getGalleryInput(): HTMLInputElement {
 const getFileInput = getCameraInput;
 
 describe('IntakePage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('EVT-43 AC6: shows a read-only notice instead of the create flow for a viewer', async () => {
+    mockDirectories();
+    setActiveWorkspaceRole('viewer');
+
+    renderIntakePage();
+
+    expect(await screen.findByText(/read-only access/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Name')).not.toBeInTheDocument();
   });
 
   // ---------------------------------------------------------------------------

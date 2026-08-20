@@ -22,6 +22,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createProject, fetchProjects, type ProjectListRow, type ProjectStatus } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 const STATUS_GROUPS: { status: ProjectStatus; label: string }[] = [
   { status: 'in_progress', label: 'In progress' },
@@ -75,6 +77,7 @@ function CreateProjectDialog({ open, onClose }: { open: boolean; onClose: () => 
   const [status, setStatus] = useState<ProjectStatus>('planned');
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const workspaceId = useActiveWorkspaceId();
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -84,7 +87,7 @@ function CreateProjectDialog({ open, onClose }: { open: boolean; onClose: () => 
         status,
       }),
     onSuccess: (project) => {
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects') });
       setName('');
       setDescription('');
       setStatus('planned');
@@ -159,8 +162,14 @@ function CreateProjectDialog({ open, onClose }: { open: boolean; onClose: () => 
 
 /** `/projects` — status-grouped project list with a create-project dialog. */
 export function ProjectsPage() {
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [dialogOpen, setDialogOpen] = useState(false);
-  const projectsQuery = useQuery({ queryKey: ['projects'], queryFn: () => fetchProjects() });
+  const projectsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'projects'),
+    queryFn: () => fetchProjects(),
+    enabled: workspaceId != null,
+  });
   const projects = projectsQuery.data ?? [];
 
   return (
@@ -169,9 +178,15 @@ export function ProjectsPage() {
         <Typography variant="h5" component="h1">
           Projects
         </Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setDialogOpen(true)}>
-          New project
-        </Button>
+        {isViewer ? (
+          <Typography variant="caption" color="text.secondary">
+            {READ_ONLY_HINT}
+          </Typography>
+        ) : (
+          <Button variant="contained" startIcon={<AddIcon />} onClick={() => setDialogOpen(true)}>
+            New project
+          </Button>
+        )}
       </Stack>
 
       {projectsQuery.isLoading && (

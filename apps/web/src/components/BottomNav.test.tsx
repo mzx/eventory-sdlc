@@ -1,12 +1,18 @@
 import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { BottomNav } from './BottomNav';
 
-function renderNav(initialEntry: string) {
+function renderNav(initialEntry: string, props: Partial<Parameters<typeof BottomNav>[0]> = {}) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
-      <BottomNav openShoppingListCount={0} overdueVerificationCount={0} onScanClick={vi.fn()} />
+      <BottomNav
+        openShoppingListCount={0}
+        overdueVerificationCount={0}
+        onScanClick={vi.fn()}
+        {...props}
+      />
     </MemoryRouter>,
   );
 }
@@ -70,5 +76,42 @@ describe('BottomNav active-tab selection', () => {
     expect(within(nav).getByRole('link', { name: /^items$/i })).not.toHaveClass('Mui-selected');
     expect(within(nav).getByRole('link', { name: /^shopping$/i })).not.toHaveClass('Mui-selected');
     expect(within(nav).getByRole('button', { name: /^more$/i })).not.toHaveClass('Mui-selected');
+  });
+});
+
+describe('BottomNav workspace switcher + viewer-aware UI (EVT-43)', () => {
+  it('disables the "Add" tab for a viewer', () => {
+    renderNav('/', { isViewer: true });
+    expect(within(getNav()).getByRole('link', { name: /^add$/i })).toHaveClass('Mui-disabled');
+  });
+
+  it('keeps the "Add" tab enabled for a member', () => {
+    renderNav('/', { isViewer: false });
+    expect(within(getNav()).getByRole('link', { name: /^add$/i })).not.toHaveClass('Mui-disabled');
+  });
+
+  it('"Switch workspace" in More calls onSwitchWorkspace', async () => {
+    const onSwitchWorkspace = vi.fn();
+    renderNav('/', { onSwitchWorkspace });
+    const user = userEvent.setup();
+
+    await user.click(within(getNav()).getByRole('button', { name: /^more$/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /switch workspace/i }));
+
+    expect(onSwitchWorkspace).toHaveBeenCalled();
+  });
+
+  it('shows "Members" in More only for a workspace owner', async () => {
+    renderNav('/', { isOwner: false });
+    const user = userEvent.setup();
+    await user.click(within(getNav()).getByRole('button', { name: /^more$/i }));
+    expect(screen.queryByRole('menuitem', { name: /^members$/i })).not.toBeInTheDocument();
+  });
+
+  it('shows "Members" in More for a workspace owner', async () => {
+    renderNav('/', { isOwner: true });
+    const user = userEvent.setup();
+    await user.click(within(getNav()).getByRole('button', { name: /^more$/i }));
+    expect(await screen.findByRole('menuitem', { name: /^members$/i })).toBeInTheDocument();
   });
 });

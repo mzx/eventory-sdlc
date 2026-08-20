@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { ProjectDetailPage } from './ProjectDetailPage';
 
 function project(overrides: Partial<api.ProjectDetail> = {}): api.ProjectDetail {
@@ -172,6 +174,11 @@ function renderPage(projectId = 'project-1') {
 }
 
 describe('ProjectDetailPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -1044,6 +1051,35 @@ describe('ProjectDetailPage', () => {
       await screen.findByText('Complete project — confirm stock consumption');
       expect(dialog).not.toHaveClass('MuiDialog-paperFullScreen');
       expect(within(dialog).getByRole('table')).toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // Viewer-aware UI (EVT-43 AC6)
+  // =========================================================================
+
+  describe('viewer role', () => {
+    it('disables the Status select (blocks backflush) and hides Delete project for a viewer', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+      setActiveWorkspaceRole('viewer');
+
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      expect(screen.getByLabelText('Status')).toHaveAttribute('aria-disabled', 'true');
+      expect(screen.queryByRole('button', { name: /delete project/i })).not.toBeInTheDocument();
+      expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
+    });
+
+    it('allows status changes and shows Delete project for a member', async () => {
+      vi.spyOn(api, 'fetchProject').mockResolvedValue(project());
+      setActiveWorkspaceRole('member');
+
+      renderPage();
+
+      await screen.findByText('Garage workbench');
+      expect(screen.getByLabelText('Status')).not.toHaveAttribute('aria-disabled', 'true');
+      expect(screen.getByRole('button', { name: /delete project/i })).toBeInTheDocument();
     });
   });
 });

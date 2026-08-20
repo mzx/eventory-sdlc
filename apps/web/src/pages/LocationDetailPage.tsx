@@ -46,6 +46,8 @@ import {
 import { ItemCard } from '../components/ItemCard';
 import { QrThumb } from '../components/QrThumb';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /** Renders a materialized path like `garage.shelf-3` as `garage › shelf-3`. */
 function humanPath(path: string): string {
@@ -93,13 +95,16 @@ function MoveContainerDialog({
   destinations: LocationListItem[];
 }) {
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
   const [toParentId, setToParentId] = useState<string>(container.parentId ?? '');
 
   const moveMutation = useMutation({
     mutationFn: (target: string) => moveLocation(container.id, target || null),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['locations'] });
-      queryClient.invalidateQueries({ queryKey: ['locations', container.id, 'movements'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'locations') });
+      queryClient.invalidateQueries({
+        queryKey: wsKey(workspaceId, 'locations', container.id, 'movements'),
+      });
       onClose();
     },
   });
@@ -184,31 +189,37 @@ function ContainerMovementListItem({ movement }: { movement: ContainerMovementRo
 export function LocationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
 
   const locationQuery = useQuery({
-    queryKey: ['locations', id],
+    queryKey: wsKey(workspaceId, 'locations', id),
     queryFn: () => fetchLocation(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   // Reused to resolve ancestor breadcrumb segments and child item counts —
   // shares the ['locations'] cache with LocationsPage, so this is usually a
   // no-op fetch.
-  const allLocationsQuery = useQuery({ queryKey: ['locations'], queryFn: fetchLocations });
+  const allLocationsQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'locations'),
+    queryFn: fetchLocations,
+    enabled: workspaceId != null,
+  });
 
   const itemsQuery = useQuery({
-    queryKey: ['items', { locationId: id }],
+    queryKey: wsKey(workspaceId, 'items', { locationId: id }),
     queryFn: () => fetchItems({ locationId: id as string }),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   const isContainer = locationQuery.data?.kind === 'container';
 
   const movementsQuery = useQuery({
-    queryKey: ['locations', id, 'movements'],
+    queryKey: wsKey(workspaceId, 'locations', id, 'movements'),
     queryFn: () => fetchContainerMovements(id as string, { page: 1, pageSize: 20 }),
-    enabled: Boolean(id) && isContainer,
+    enabled: Boolean(id) && isContainer && workspaceId != null,
   });
 
   if (locationQuery.isLoading) {
@@ -288,8 +299,13 @@ export function LocationDetailPage() {
             {location.name}
           </Typography>
         </Stack>
-        <Stack direction="row" spacing={1}>
-          {isContainer && (
+        <Stack direction="row" spacing={1} alignItems="center">
+          {isViewer && (
+            <Typography variant="caption" color="text.secondary">
+              {READ_ONLY_HINT}
+            </Typography>
+          )}
+          {isContainer && !isViewer && (
             <Button
               variant="outlined"
               startIcon={<SwapHorizIcon />}
@@ -298,19 +314,21 @@ export function LocationDetailPage() {
               Move to…
             </Button>
           )}
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={() =>
-              navigate(`/intake?${new URLSearchParams({ locationId: location.id }).toString()}`)
-            }
-          >
-            Add item here
-          </Button>
+          {!isViewer && (
+            <Button
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={() =>
+                navigate(`/intake?${new URLSearchParams({ locationId: location.id }).toString()}`)
+              }
+            >
+              Add item here
+            </Button>
+          )}
         </Stack>
       </Stack>
 
-      {isContainer && (
+      {isContainer && !isViewer && (
         <MoveContainerDialog
           open={moveDialogOpen}
           onClose={() => setMoveDialogOpen(false)}

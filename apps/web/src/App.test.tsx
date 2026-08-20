@@ -22,6 +22,16 @@ function authUser(overrides: Partial<AuthUser> = {}): AuthUser {
   };
 }
 
+function workspace(overrides: Partial<api.WorkspaceSummary> = {}): api.WorkspaceSummary {
+  return {
+    id: 'ws-1',
+    name: 'Home',
+    role: 'owner',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
 function renderApp(initialEntry = '/') {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -69,6 +79,10 @@ describe('App / auth-aware shell', () => {
     // network call.
     vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
     vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    // AppShell's workspace-resolution gate (EVT-43 AC4) — a single owned
+    // workspace so these auth-focused tests reach the routed shell
+    // immediately, same as before EVT-43.
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([workspace()]);
   });
 
   afterEach(() => {
@@ -245,6 +259,7 @@ describe('App / phone-width bottom navigation (EVT-35)', () => {
     vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
     vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([shoppingListEntry]);
     vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([verificationEntry]);
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([workspace()]);
   });
 
   afterEach(() => {
@@ -394,5 +409,103 @@ describe('App / phone-width bottom navigation (EVT-35)', () => {
     expect(
       screen.queryByRole('navigation', { name: /primary mobile navigation/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Workspace UI — switcher, onboarding, viewer gating (EVT-43)
+// ===========================================================================
+
+describe('App / workspace UI (EVT-43)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('AC4: a zero-membership caller sees the onboarding page instead of the item shell', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([]);
+
+    renderApp('/');
+
+    expect(await screen.findByText('Welcome to Eventory')).toBeInTheDocument();
+    expect(screen.queryByText('No items yet')).not.toBeInTheDocument();
+  });
+
+  it('AC3: "Switch workspace" in the avatar menu opens the switcher listing every workspace', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([
+      workspace({ id: 'ws-1', name: 'Home' }),
+      workspace({ id: 'ws-2', name: 'Garage', role: 'member' }),
+    ]);
+    const user = userEvent.setup();
+
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    await user.click(screen.getByLabelText('account menu'));
+    await user.click(await screen.findByRole('menuitem', { name: /switch workspace/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: /switch workspace/i });
+    expect(within(dialog).getByText('Home')).toBeInTheDocument();
+    expect(within(dialog).getByText('Garage')).toBeInTheDocument();
+  });
+
+  it('AC3: switching workspaces in the dialog updates the active workspace shown in the avatar menu', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([
+      workspace({ id: 'ws-1', name: 'Home' }),
+      workspace({ id: 'ws-2', name: 'Garage', role: 'member' }),
+    ]);
+    const user = userEvent.setup();
+
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    await user.click(screen.getByLabelText('account menu'));
+    await user.click(await screen.findByRole('menuitem', { name: /switch workspace/i }));
+    const dialog = await screen.findByRole('dialog', { name: /switch workspace/i });
+    await user.click(within(dialog).getByText('Garage'));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await user.click(screen.getByLabelText('account menu'));
+    expect(await screen.findByText(/workspace: garage/i)).toBeInTheDocument();
+  });
+
+  it('AC5/owner-only: shows "Members" in the avatar menu only for a workspace owner', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([workspace({ role: 'member' })]);
+    const user = userEvent.setup();
+
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    await user.click(screen.getByLabelText('account menu'));
+    expect(screen.queryByRole('menuitem', { name: /^members$/i })).not.toBeInTheDocument();
+  });
+
+  it('AC6: a viewer does not see the "Add item" button in the desktop toolbar', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchWorkspaces').mockResolvedValue([workspace({ role: 'viewer' })]);
+
+    renderApp('/');
+    await screen.findByText('No items yet');
+
+    expect(screen.queryByRole('link', { name: /add item/i })).not.toBeInTheDocument();
   });
 });

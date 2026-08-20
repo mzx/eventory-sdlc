@@ -1,11 +1,13 @@
 import AddIcon from '@mui/icons-material/Add';
 import ConstructionOutlinedIcon from '@mui/icons-material/ConstructionOutlined';
 import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import MoreHorizOutlinedIcon from '@mui/icons-material/MoreHorizOutlined';
 import PlaceOutlinedIcon from '@mui/icons-material/PlaceOutlined';
 import QrCodeScannerOutlinedIcon from '@mui/icons-material/QrCodeScannerOutlined';
 import ShoppingCartOutlinedIcon from '@mui/icons-material/ShoppingCartOutlined';
+import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
 import {
   Badge,
   BottomNavigation,
@@ -43,10 +45,19 @@ export function BottomNav({
   openShoppingListCount,
   overdueVerificationCount,
   onScanClick,
+  isViewer = false,
+  isOwner = false,
+  onSwitchWorkspace,
 }: {
   openShoppingListCount: number;
   overdueVerificationCount: number;
   onScanClick: () => void;
+  /** Hides/disables the "Add" tab for a read-only viewer membership (EVT-43). */
+  isViewer?: boolean;
+  /** Whether the caller is `owner` of the active workspace — gates the "Members" entry. */
+  isOwner?: boolean;
+  /** Opens the shared `WorkspaceSwitcherDialog` (owned by `App.tsx`) from the "More" overflow. */
+  onSwitchWorkspace?: () => void;
 }) {
   const location = useLocation();
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
@@ -125,6 +136,7 @@ export function BottomNav({
           icon={<AddIcon />}
           component={RouterLink}
           to="/intake"
+          disabled={isViewer}
           sx={{ minHeight: 44 }}
         />
         <BottomNavigationAction
@@ -179,6 +191,25 @@ export function BottomNav({
           </ListItemIcon>
           Verification
         </MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeMore();
+            onSwitchWorkspace?.();
+          }}
+        >
+          <ListItemIcon>
+            <SwapHorizIcon fontSize="small" />
+          </ListItemIcon>
+          Switch workspace
+        </MenuItem>
+        {isOwner && (
+          <MenuItem component={RouterLink} to="/settings/members" onClick={closeMore}>
+            <ListItemIcon>
+              <GroupOutlinedIcon fontSize="small" />
+            </ListItemIcon>
+            Members
+          </MenuItem>
+        )}
       </Menu>
     </Paper>
   );

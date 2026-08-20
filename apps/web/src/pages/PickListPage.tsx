@@ -21,6 +21,8 @@ import {
   type AvailabilityLine,
   type ProjectAvailability,
 } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { useActiveWorkspaceId } from '../workspace/useActiveWorkspace';
 
 interface LocationGroup {
   /** Sort key — `''` for lines whose item has no location set, sorts first. */
@@ -73,17 +75,21 @@ function groupByLocation(lines: AvailabilityLine[]): LocationGroup[] {
 export function PickListPage() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
 
   const availabilityQuery = useQuery({
-    queryKey: ['projects', id, 'availability'],
+    queryKey: wsKey(workspaceId, 'projects', id, 'availability'),
     queryFn: () => fetchProjectAvailability(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   const pickMutation = useMutation({
     mutationFn: ({ lineId, picked }: { lineId: string; picked: boolean }) =>
       updateBomLine(id as string, lineId, { picked }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects', id, 'availability'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: wsKey(workspaceId, 'projects', id, 'availability'),
+      }),
   });
 
   return (

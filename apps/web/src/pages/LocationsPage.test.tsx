@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { LocationsPage } from './LocationsPage';
 
 function loc(overrides: Partial<api.LocationListItem> = {}): api.LocationListItem {
@@ -30,8 +32,24 @@ function renderLocationsPage() {
 }
 
 describe('LocationsPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('EVT-43 AC6: hides "Add root location" for a viewer', async () => {
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    setActiveWorkspaceRole('viewer');
+
+    renderLocationsPage();
+
+    await screen.findByText(/no locations yet/i);
+    expect(screen.queryByRole('button', { name: /add root location/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
   });
 
   it('renders a seeded tree nested with counts, and expand/collapse toggles children', async () => {

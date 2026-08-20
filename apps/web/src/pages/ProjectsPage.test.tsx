@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { ProjectsPage } from './ProjectsPage';
 
 function projectRow(overrides: Partial<api.ProjectListRow> = {}): api.ProjectListRow {
@@ -37,8 +39,24 @@ function renderProjectsPage() {
 }
 
 describe('ProjectsPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('EVT-43 AC6: hides "New project" for a viewer', async () => {
+    vi.spyOn(api, 'fetchProjects').mockResolvedValue([]);
+    setActiveWorkspaceRole('viewer');
+
+    renderProjectsPage();
+
+    await screen.findByText(/no projects yet/i);
+    expect(screen.queryByRole('button', { name: /new project/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
   });
 
   it('groups projects by status', async () => {

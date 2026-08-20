@@ -2,8 +2,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
 import { PickListPage } from './PickListPage';
 
 function availabilityLine(overrides: Partial<api.AvailabilityLine> = {}): api.AvailabilityLine {
@@ -47,6 +48,10 @@ function renderPage(projectId = 'project-1') {
 }
 
 describe('PickListPage (EVT-29 AC 3, 5)', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

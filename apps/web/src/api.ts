@@ -45,9 +45,70 @@ function notifyIfAuthFailure(status: number): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// active workspace (EVT-43) — persisted selection sent as X-Workspace-Id
+//
+// A plain module-level store (not React state) so the header can be built by
+// `request()`/the two multipart bypasses below without threading a workspace
+// id through every call site, and so a fresh page load restores the last
+// selection before React even mounts. `useActiveWorkspaceId` (see
+// `workspace/useActiveWorkspace.ts`) is the React-facing read side, wired up
+// via `useSyncExternalStore` against `subscribeActiveWorkspaceId` below —
+// mirrors this file's own `authFailureListener` pattern.
+// ---------------------------------------------------------------------------
+
+/** Header the API expects to select a non-default workspace (mirrors apps/api's `WORKSPACE_HEADER`). */
+const WORKSPACE_HEADER = 'X-Workspace-Id';
+const ACTIVE_WORKSPACE_STORAGE_KEY = 'eventory:activeWorkspaceId';
+
+function readStoredActiveWorkspaceId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+  } catch {
+    // localStorage unavailable (privacy mode, some test environments) — the
+    // in-memory value below is still authoritative for this page load.
+    return null;
+  }
+}
+
+let activeWorkspaceId: string | null = readStoredActiveWorkspaceId();
+const activeWorkspaceListeners = new Set<() => void>();
+
+/** Current active workspace id, or `null` before one has resolved. */
+export function getActiveWorkspaceId(): string | null {
+  return activeWorkspaceId;
+}
+
+/** Sets (and persists) the active workspace id; notifies every subscriber so React re-renders. */
+export function setActiveWorkspaceId(id: string | null): void {
+  if (activeWorkspaceId === id) return;
+  activeWorkspaceId = id;
+  try {
+    if (id) {
+      localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, id);
+    } else {
+      localStorage.removeItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore — in-memory value above is still authoritative for this tab
+  }
+  for (const listener of activeWorkspaceListeners) listener();
+}
+
+/** Subscribes to active-workspace-id changes; returns an unsubscribe function. `useSyncExternalStore`'s subscribe param. */
+export function subscribeActiveWorkspaceId(listener: () => void): () => void {
+  activeWorkspaceListeners.add(listener);
+  return () => activeWorkspaceListeners.delete(listener);
+}
+
+/** `X-Workspace-Id` header object when a workspace is active, else `{}` — spread into every fetch's headers. */
+function workspaceHeaders(): Record<string, string> {
+  return activeWorkspaceId ? { [WORKSPACE_HEADER]: activeWorkspaceId } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...workspaceHeaders() },
     ...init,
   });
   notifyIfAuthFailure(response.status);
@@ -260,6 +321,7 @@ export async function searchItemsByPhoto(file: File): Promise<PhotoSearchResult>
   formData.append('file', file);
   const response = await fetch(`${API_BASE}/items/search-by-photo`, {
     method: 'POST',
+    headers: workspaceHeaders(),
     body: formData,
   });
   notifyIfAuthFailure(response.status);
@@ -864,7 +926,7 @@ export class QrLookupNotFoundError extends Error {
  */
 export async function fetchByQr(token: string): Promise<ByQrResult> {
   const response = await fetch(`${API_BASE}/items/by-qr/${encodeURIComponent(token)}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...workspaceHeaders() },
   });
   if (response.status === 404) {
     throw new QrLookupNotFoundError(token);
@@ -912,6 +974,7 @@ export async function uploadPhoto(
   const suffix = analyze ? '?analyze=true' : '';
   const response = await fetch(`${API_BASE}/photos/upload${suffix}`, {
     method: 'POST',
+    headers: workspaceHeaders(),
     body: form,
   });
   notifyIfAuthFailure(response.status);
@@ -1143,4 +1206,143 @@ export interface VerificationQueueRow {
 /** GET /api/items/verification-queue — "today's count list", most-overdue first, capped at 20. */
 export async function fetchVerificationQueue(): Promise<VerificationQueueRow[]> {
   return request<VerificationQueueRow[]>('/items/verification-queue');
+}
+
+// ---------------------------------------------------------------------------
+// workspaces, membership, invitations (EVT-42 API surface / EVT-43 web UI)
+// ---------------------------------------------------------------------------
+
+/** `owner` is never grantable directly (see apps/api `INVITABLE_ROLES`) — only via `transferOwnership` server-side, which this client doesn't expose (EVT-43 non-goal). */
+export type WorkspaceRole = 'owner' | 'member' | 'viewer';
+/** Role an invite/role-change may GRANT — excludes `owner`, mirrors apps/api `INVITABLE_ROLES`. */
+export type InvitableWorkspaceRole = Exclude<WorkspaceRole, 'owner'>;
+export type WorkspaceInviteStatus = 'pending' | 'redeemed' | 'revoked' | 'expired';
+
+/** Row shape returned by `GET /api/workspaces` (see apps/api `WorkspaceSummary`) — the caller's own role is embedded per-workspace. */
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  role: WorkspaceRole;
+  createdAt: string;
+}
+
+/** Row shape returned by `GET /api/workspaces/:id/members` (see apps/api `MemberSummary`). */
+export interface WorkspaceMemberRow {
+  userId: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  role: WorkspaceRole;
+  memberSince: string;
+}
+
+/** Response shape of `POST /api/workspaces/:id/invites` — the raw, redeemable token, returned ONLY here (see apps/api `InviteWithToken`). */
+export interface WorkspaceInviteWithToken {
+  id: string;
+  token: string;
+  role: InvitableWorkspaceRole;
+  status: WorkspaceInviteStatus;
+  expiresAt: string;
+  createdAt: string;
+}
+
+/** Row shape returned by `GET /api/workspaces/:id/invites` (see apps/api `InviteSummary`) — never carries the raw token. */
+export interface WorkspaceInviteRow {
+  id: string;
+  role: InvitableWorkspaceRole;
+  status: WorkspaceInviteStatus;
+  expiresAt: string;
+  createdAt: string;
+  redeemedAt: string | null;
+}
+
+/** Response shape of `POST /api/invites/redeem` (see apps/api `RedeemResult`). */
+export interface RedeemInviteResult {
+  workspaceId: string;
+  role: WorkspaceRole;
+}
+
+/** GET /api/workspaces — every workspace the caller belongs to, oldest membership first, with their role in each. */
+export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
+  return request<WorkspaceSummary[]>('/workspaces');
+}
+
+/** POST /api/workspaces — create a workspace; the caller becomes its owner. */
+export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
+  return request<WorkspaceSummary>('/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** PATCH /api/workspaces/:id — rename. Owner-only server-side. */
+export async function renameWorkspace(id: string, name: string): Promise<WorkspaceSummary> {
+  return request<WorkspaceSummary>(`/workspaces/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** GET /api/workspaces/:id/members — roster + roles. Reachable by any member. */
+export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMemberRow[]> {
+  return request<WorkspaceMemberRow[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`);
+}
+
+/** PATCH /api/workspaces/:id/members/:userId/role — toggles member<->viewer. Owner-only server-side. */
+export async function changeWorkspaceMemberRole(
+  workspaceId: string,
+  userId: string,
+  role: InvitableWorkspaceRole,
+): Promise<WorkspaceMemberRow> {
+  return request<WorkspaceMemberRow>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}/role`,
+    { method: 'PATCH', body: JSON.stringify({ role }) },
+  );
+}
+
+/** DELETE /api/workspaces/:id/members/:userId — an owner removing someone else, or a member removing themselves ("leave"). */
+export async function removeWorkspaceMember(workspaceId: string, userId: string): Promise<void> {
+  return request<void>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** POST /api/workspaces/:id/invites — creates a single-use, 7-day invite. `role` defaults to `member` server-side when omitted. Owner-only. */
+export async function createWorkspaceInvite(
+  workspaceId: string,
+  role?: InvitableWorkspaceRole,
+): Promise<WorkspaceInviteWithToken> {
+  return request<WorkspaceInviteWithToken>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/invites`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ role }),
+    },
+  );
+}
+
+/** GET /api/workspaces/:id/invites — every invite (any status), newest first. Owner-only. */
+export async function fetchWorkspaceInvites(workspaceId: string): Promise<WorkspaceInviteRow[]> {
+  return request<WorkspaceInviteRow[]>(`/workspaces/${encodeURIComponent(workspaceId)}/invites`);
+}
+
+/** DELETE /api/workspaces/:id/invites/:inviteId — revokes a still-pending invite. Owner-only. */
+export async function revokeWorkspaceInvite(workspaceId: string, inviteId: string): Promise<void> {
+  return request<void>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/invites/${encodeURIComponent(inviteId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/**
+ * POST /api/invites/redeem — the raw token travels in the JSON body, never
+ * the URL (mirrors apps/api `RedeemInviteDto`'s doc comment: a path segment
+ * leaks a redeemable credential into proxy/access logs and browser history).
+ */
+export async function redeemInvite(token: string): Promise<RedeemInviteResult> {
+  return request<RedeemInviteResult>('/invites/redeem', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
 }

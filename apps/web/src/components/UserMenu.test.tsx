@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { describe, expect, it, vi } from 'vitest';
 import type { AuthUser } from '../api';
 import { UserMenu } from './UserMenu';
 
@@ -63,5 +64,43 @@ describe('UserMenu build version (EVT-34)', () => {
     expect(screen.getByText('Sam Carter')).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: /log out/i })).toBeInTheDocument();
     expect(screen.getByLabelText('build version')).toHaveTextContent('994831b · 2026-08-14');
+  });
+});
+
+describe('UserMenu workspace switcher (EVT-43)', () => {
+  it('shows the active workspace name and calls onSwitchWorkspace', async () => {
+    const onSwitchWorkspace = vi.fn();
+    render(
+      <UserMenu
+        user={authUser()}
+        activeWorkspaceName="Home"
+        onSwitchWorkspace={onSwitchWorkspace}
+      />,
+    );
+
+    await openMenu();
+
+    expect(screen.getByText(/workspace: home/i)).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('menuitem', { name: /switch workspace/i }));
+    expect(onSwitchWorkspace).toHaveBeenCalled();
+  });
+
+  it('shows the "Members" entry only for a workspace owner', async () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <UserMenu user={authUser()} isOwner={false} />
+      </MemoryRouter>,
+    );
+    await openMenu();
+    expect(screen.queryByRole('menuitem', { name: /^members$/i })).not.toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <UserMenu user={authUser()} isOwner />
+      </MemoryRouter>,
+    );
+    await openMenu();
+    expect(screen.getByRole('menuitem', { name: /^members$/i })).toBeInTheDocument();
   });
 });
