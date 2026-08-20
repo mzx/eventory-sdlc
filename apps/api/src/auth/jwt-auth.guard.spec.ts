@@ -66,7 +66,7 @@ describe('JwtAuthGuard', () => {
   });
 
   // =========================================================================
-  // Default (no decorator) — requires an approved user
+  // Default (no decorator) — requires a resolvable, non-rejected user
   // =========================================================================
 
   describe('default routes (no decorator)', () => {
@@ -86,12 +86,14 @@ describe('JwtAuthGuard', () => {
       await expect(guard.canActivate(context)).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
-    it('throws ForbiddenException (403) for a resolvable but pending user', async () => {
+    it('EVT-42: allows a resolvable pending user through (approval gate retired — see workspace membership)', async () => {
       reflector.getAllAndOverride.mockReturnValueOnce(false).mockReturnValueOnce(false);
-      authService.getUserFromToken.mockResolvedValue(makeUser({ status: UserStatus.pending }));
-      const { context } = makeContext({ [AUTH_COOKIE_NAME]: 'valid-token' });
+      const user = makeUser({ status: UserStatus.pending });
+      authService.getUserFromToken.mockResolvedValue(user);
+      const { context, request } = makeContext({ [AUTH_COOKIE_NAME]: 'valid-token' });
 
-      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(guard.canActivate(context)).resolves.toBe(true);
+      expect(request.user).toEqual(user);
     });
 
     it('throws ForbiddenException (403) for a rejected user', async () => {

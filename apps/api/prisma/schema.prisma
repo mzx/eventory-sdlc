@@ -70,9 +70,18 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// Household-member approval state (EVT-14). New sign-ins start `pending`
-/// and are blocked from every route except `/auth/me` until an admin flips
-/// them to `approved` (or `rejected`).
+/// Household-member account state. Pre-EVT-42, new sign-ins started
+/// `pending` and were blocked from every route except `/auth/me` until an
+/// admin flipped them to `approved`. EVT-42 recasts that global approval
+/// gate as workspace membership: `JwtAuthGuard` no longer blocks on
+/// `pending` — every new sign-in is created `approved` immediately (see
+/// `AuthService.upsertFromGoogleProfile`) and inventory access is instead
+/// gated by whether the caller belongs to a `Workspace`
+/// (`WorkspaceContextGuard`/`@CurrentWorkspace()`). `rejected` is the one
+/// state that still blocks every route — an instance-admin ban, applied via
+/// `PATCH /api/users/:id/status` (`UsersController`, `AdminUsersPage`).
+/// `pending` is kept only for backward-compat with rows created before this
+/// change / an admin manually re-pending someone; it has no gating effect.
 enum UserStatus {
   pending
   approved
@@ -99,17 +108,29 @@ enum WorkspaceRole {
   viewer
 }
 
-/// Row-scoping tenancy boundary (EVT-39). For now there is exactly one row
-/// — the "Default Workspace" created by the EVT-39 migration — and every
-/// pre-existing (and, until EVT-40 lands, every newly created) row across
-/// the domain tables backfills/defaults to it. See the schema-header note
-/// for the fixed literal id this row is created with.
+/// Lifecycle of a `WorkspaceInvite` (EVT-42). `pending` — usable until
+/// `expiresAt`. `redeemed` — single-use, claimed by exactly one user
+/// (`redeemedById`/`redeemedAt` populated). `revoked` — an owner cancelled
+/// it before redemption. Both terminal states permanently block redemption
+/// — see `WorkspacesService.redeem`'s atomic `status: pending` claim guard.
+enum InviteStatus {
+  pending
+  redeemed
+  revoked
+}
+
+/// Row-scoping tenancy boundary (EVT-39). Every pre-existing row backfills
+/// into the single "Default Workspace" created by the EVT-39 migration;
+/// EVT-42 adds self-service creation (`WorkspacesService.create`) on top —
+/// every workspace created after EVT-42 is a normal row like any other, the
+/// Default Workspace is not special at the schema level.
 model Workspace {
   id        String   @id @default(uuid()) @db.Uuid
   name      String
   createdAt DateTime @default(now())
 
   members             WorkspaceMember[]
+  invites             WorkspaceInvite[]
   items               Item[]
   locations           Location[]
   categories          Category[]
@@ -118,6 +139,37 @@ model Workspace {
   stockMovements      StockMovement[]
   shoppingListEntries ShoppingListEntry[]
   photos              Photo[]
+}
+
+/// Single-use, expiring workspace invitation (EVT-42) — an owner creates
+/// one (role `member` default, `viewer` selectable; never `owner`, enforced
+/// by `CreateInviteDto`'s validation) and shares the raw token out-of-band
+/// (household scale; no email delivery, a non-goal). Only a SHA-256 hash of
+/// the token is stored (`tokenHash`) — the same defense pattern as a
+/// password-reset token, so a DB read (backup leak, admin query) never
+/// exposes a redeemable credential.
+model WorkspaceInvite {
+  id           String       @id @default(uuid()) @db.Uuid
+  workspaceId  String       @db.Uuid
+  tokenHash    String       @unique
+  role         WorkspaceRole
+  status       InviteStatus @default(pending)
+  expiresAt    DateTime
+  /// Who created this invite. Nullable — same rationale as
+  /// `Item.createdById` (the creator can later be deleted).
+  createdById  String?      @db.Uuid
+  /// Who redeemed this invite (set together with `redeemedAt` in the same
+  /// atomic claim). Nullable until redeemed.
+  redeemedById String?      @db.Uuid
+  redeemedAt   DateTime?
+  createdAt    DateTime     @default(now())
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy  User?     @relation("InviteCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  redeemedBy User?     @relation("InviteRedeemedBy", fields: [redeemedById], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([status])
 }
 
 /// Explicit Workspace<->User membership (EVT-39) — `@@unique([workspaceId,
@@ -171,6 +223,10 @@ model User {
   // Workspace memberships (EVT-39) — cascades on user delete, see
   // WorkspaceMember's doc comment.
   workspaceMemberships WorkspaceMember[] @relation("WorkspaceMemberships")
+  // Invites this user created / redeemed (EVT-42) — both SetNull, same
+  // rationale as createdItems/uploadedPhotos above.
+  createdInvites       WorkspaceInvite[] @relation("InviteCreatedBy")
+  redeemedInvites      WorkspaceInvite[] @relation("InviteRedeemedBy")
 
   @@index([status])
 }

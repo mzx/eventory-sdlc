@@ -19,6 +19,7 @@ import { ShoppingListModule } from './shopping-list/shopping-list.module';
 import { TagsModule } from './tags/tags.module';
 import { UsersModule } from './users/users.module';
 import { WorkspaceContextGuard } from './workspace/workspace-context.guard';
+import { WorkspaceModule } from './workspace/workspace.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { WorkspaceContextGuard } from './workspace/workspace-context.guard';
     HealthModule,
     AuthModule,
     UsersModule,
+    WorkspaceModule,
     LocationsModule,
     TagsModule,
     CategoriesModule,

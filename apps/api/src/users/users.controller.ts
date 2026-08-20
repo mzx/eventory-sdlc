@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, UseGuards } from '@nestjs/common';
 import { AdminGuard } from '../auth/admin.guard';
 import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
+import { AllowMissingWorkspace } from '../workspace/workspace-context';
 import { UpdateUserRoleDto } from './update-user-role.dto';
 import { UpdateUserStatusDto } from './update-user-status.dto';
 import { UsersService } from './users.service';
@@ -8,11 +9,21 @@ import { UsersService } from './users.service';
 /**
  * Admin-only user management: list household members and approve/reject/
  * promote them. Every route here additionally requires the global
- * `JwtAuthGuard` (approved user) plus `AdminGuard` (role === admin) — see
- * `AdminGuard`'s doc comment for why only the role check is needed here.
+ * `JwtAuthGuard` (a resolvable, non-`rejected` user) plus `AdminGuard`
+ * (`role === admin && status === approved`) — see `AdminGuard`'s doc
+ * comment.
+ *
+ * `@AllowMissingWorkspace()` (EVT-42 round-2 fix, discovered via e2e
+ * regression) — this entire controller is INSTANCE-ADMIN management,
+ * completely orthogonal to `Workspace` membership; an admin managing other
+ * users' approval status must not themselves need to belong to a workspace
+ * (e.g. the very first admin, before they've created one yet). Without
+ * this, `WorkspaceContextGuard`'s default fail-closed behavior (see its doc
+ * comment) 403s a zero-membership admin here before `AdminGuard` even runs.
  */
 @Controller('users')
 @UseGuards(AdminGuard)
+@AllowMissingWorkspace()
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
