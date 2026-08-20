@@ -4,6 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { ItemDetailPage } from './ItemDetailPage';
 
 const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
@@ -81,6 +84,8 @@ function renderDetailPage(id = 'item-1', options: { state?: { justCreated?: bool
 
 describe('ItemDetailPage', () => {
   beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
     // Every test renders the History section — default to an empty page so
     // tests that don't care about EVT-25 history don't need their own mock.
     vi.spyOn(api, 'fetchItemMovements').mockResolvedValue(movementsPage());
@@ -561,8 +566,8 @@ describe('ItemDetailPage', () => {
       // verification status, so VerificationPage's queue query must be
       // invalidated too — not just 'items' (mirrors VerificationPage's own
       // countMutation.onSuccess, which invalidates both keys).
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['items'] });
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['verification-queue'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: wsKey('ws-1', 'items') });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: wsKey('ws-1', 'verification-queue') });
     });
   });
 
@@ -693,6 +698,39 @@ describe('ItemDetailPage', () => {
       await waitFor(() =>
         expect(screen.queryByText('How many are actually left?')).not.toBeInTheDocument(),
       );
+    });
+  });
+
+  // =========================================================================
+  // Viewer-aware UI (EVT-43 AC6)
+  // =========================================================================
+
+  describe('viewer role', () => {
+    it('hides Edit/Delete and disables Running low/Use for a viewer, with a read-only hint', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      setActiveWorkspaceRole('viewer');
+
+      renderDetailPage();
+
+      await screen.findByText('Cordless drill');
+      expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /running low/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Use' })).toBeDisabled();
+      expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
+    });
+
+    it('shows Edit/Delete and enables Running low/Use for a member', async () => {
+      vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+      setActiveWorkspaceRole('member');
+
+      renderDetailPage();
+
+      await screen.findByText('Cordless drill');
+      expect(screen.getByRole('button', { name: /^edit$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /running low/i })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Use' })).toBeEnabled();
     });
   });
 });

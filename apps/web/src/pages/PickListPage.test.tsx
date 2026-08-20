@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { PickListPage } from './PickListPage';
 
 function availabilityLine(overrides: Partial<api.AvailabilityLine> = {}): api.AvailabilityLine {
@@ -47,6 +49,10 @@ function renderPage(projectId = 'project-1') {
 }
 
 describe('PickListPage (EVT-29 AC 3, 5)', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -272,5 +278,41 @@ describe('PickListPage (EVT-29 AC 3, 5)', () => {
     expect(
       await screen.findByText('No item-linked BOM lines to pick — add one from the project page.'),
     ).toBeInTheDocument();
+  });
+
+  // EVT-43 round-2 review, MINOR 5: the pick checkbox is the one mutating
+  // affordance on this page and previously had no viewer gating at all.
+  describe('viewer role (EVT-43 AC6)', () => {
+    afterEach(() => {
+      setActiveWorkspaceRole(null);
+    });
+
+    it('disables the pick checkbox for a viewer', async () => {
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({ lines: [availabilityLine({ picked: false })] }),
+      );
+      setActiveWorkspaceRole('viewer');
+
+      renderPage();
+
+      const checkbox = await screen.findByLabelText('Picked Cordless drill');
+      // A genuinely `disabled` control can't be clicked at all — matching
+      // the app's own real-browser behavior (and the identical pattern in
+      // ShoppingListPage.test.tsx's viewer gating test) — so `toBeDisabled`
+      // is the whole assertion; there's nothing further to simulate.
+      expect(checkbox).toBeDisabled();
+    });
+
+    it('keeps the pick checkbox enabled for a member', async () => {
+      vi.spyOn(api, 'fetchProjectAvailability').mockResolvedValue(
+        availability({ lines: [availabilityLine({ picked: false })] }),
+      );
+      setActiveWorkspaceRole('member');
+
+      renderPage();
+
+      const checkbox = await screen.findByLabelText('Picked Cordless drill');
+      expect(checkbox).toBeEnabled();
+    });
   });
 });

@@ -2,8 +2,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { EditItemPage } from './EditItemPage';
 
 const detail = (overrides: Partial<api.ItemDetail> = {}): api.ItemDetail => ({
@@ -46,6 +49,11 @@ function renderEditPage(
 }
 
 describe('EditItemPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -297,7 +305,7 @@ describe('EditItemPage', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     // Seed the same list query key ItemsPage uses, as if the list had
     // already been visited and cached before navigating to the edit page.
-    const listQueryKey = ['items', { search: '', tag: null }];
+    const listQueryKey = wsKey('ws-1', 'items', { search: '', tag: null });
     queryClient.setQueryData(listQueryKey, []);
 
     renderEditPage(queryClient);
@@ -572,5 +580,23 @@ describe('EditItemPage', () => {
     await user.click(removeButtons[0]);
 
     expect(await screen.findByText('Failed to remove photo')).toBeInTheDocument();
+  });
+
+  // =========================================================================
+  // Viewer-aware UI (EVT-43 AC6)
+  // =========================================================================
+
+  it('disables Save and shows a read-only hint for a viewer', async () => {
+    vi.spyOn(api, 'fetchItem').mockResolvedValue(detail());
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchCategories').mockResolvedValue([]);
+    setActiveWorkspaceRole('viewer');
+
+    renderEditPage();
+    await screen.findByLabelText('Name');
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
   });
 });

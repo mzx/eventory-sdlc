@@ -4,6 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { expectAllQueryKeysScopedToWorkspace } from '../test/queryKeyAssertions';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { ItemsPage } from './ItemsPage';
 
 const item = (overrides: Partial<api.ItemListRow> = {}): api.ItemListRow => ({
@@ -30,17 +33,22 @@ function renderItemsPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <ItemsPage />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  return {
+    queryClient,
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <ItemsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 describe('ItemsPage', () => {
   beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
     vi.spyOn(api, 'fetchTags').mockResolvedValue([
       { id: 'tag-1', name: 'power-tools', color: null, itemCount: 1 },
     ]);
@@ -389,6 +397,67 @@ describe('ItemsPage', () => {
       expect(await screen.findByText(/Looks like: M4 hex bolt/)).toBeInTheDocument();
       expect(screen.getByText('M4 Hex Bolt (pack of 50)')).toBeInTheDocument();
       expect(screen.queryByText('Cordless drill')).not.toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // Workspace scoping (EVT-43 AC1/AC2)
+  // =========================================================================
+
+  describe('workspace scoping', () => {
+    it('AC1: every cached query key carries the active workspace id', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([item()]);
+
+      const { queryClient } = renderItemsPage();
+      await screen.findByTestId('item-card');
+
+      expectAllQueryKeysScopedToWorkspace(queryClient, 'ws-1');
+    });
+
+    it('AC2: switching workspaces swaps the item grid with no stale flash', async () => {
+      vi.spyOn(api, 'fetchItems').mockImplementation(async () => {
+        return api.getActiveWorkspaceId() === 'ws-1'
+          ? [item({ id: 'item-1', name: 'Cordless drill' })]
+          : [item({ id: 'item-2', name: 'Bandsaw blade' })];
+      });
+
+      renderItemsPage();
+      expect(await screen.findByText('Cordless drill')).toBeInTheDocument();
+
+      setActiveWorkspaceId('ws-2');
+
+      // The other workspace's item appears and the first workspace's item
+      // never re-renders in between (no stale-cache flash) — a brand-new
+      // queryKey has no prior cache entry to show while refetching.
+      expect(await screen.findByText('Bandsaw blade')).toBeInTheDocument();
+      expect(screen.queryByText('Cordless drill')).not.toBeInTheDocument();
+    });
+  });
+
+  // =========================================================================
+  // Viewer-aware UI (EVT-43 AC6)
+  // =========================================================================
+
+  describe('viewer role', () => {
+    it('hides the "Add item" empty-state link for a viewer, shown for a member', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      setActiveWorkspaceRole('viewer');
+
+      renderItemsPage();
+
+      await screen.findByText('No items yet');
+      expect(screen.queryByRole('link', { name: /add item/i })).not.toBeInTheDocument();
+      expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
+    });
+
+    it('shows the "Add item" empty-state link for a member', async () => {
+      vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+      setActiveWorkspaceRole('member');
+
+      renderItemsPage();
+
+      await screen.findByText('No items yet');
+      expect(screen.getByRole('link', { name: /add item/i })).toBeInTheDocument();
     });
   });
 });

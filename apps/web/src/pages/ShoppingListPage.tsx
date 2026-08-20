@@ -18,6 +18,7 @@ import {
   ListItemText,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -29,6 +30,8 @@ import {
   restockShoppingListEntry,
   type ShoppingListEntry,
 } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /** "2 / min 5 — Garage" style on-hand/min/location summary line (EVT-26 AC 4). */
 function entrySummary(entry: ShoppingListEntry): string {
@@ -51,7 +54,13 @@ function entrySummary(entry: ShoppingListEntry): string {
  */
 export function ShoppingListPage() {
   const queryClient = useQueryClient();
-  const listQuery = useQuery({ queryKey: ['shopping-list'], queryFn: fetchShoppingList });
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
+  const listQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'shopping-list'),
+    queryFn: fetchShoppingList,
+    enabled: workspaceId != null,
+  });
 
   const [restockTarget, setRestockTarget] = useState<ShoppingListEntry | null>(null);
   const [restockQuantity, setRestockQuantity] = useState('');
@@ -61,11 +70,11 @@ export function ShoppingListPage() {
     mutationFn: ({ entryId, quantity }: { entryId: string; quantity: number }) =>
       restockShoppingListEntry(entryId, quantity),
     onSuccess: (_result, { entryId }) => {
-      queryClient.invalidateQueries({ queryKey: ['shopping-list'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'shopping-list') });
       // The restocked item's own detail/history view (AC 5: "the item's
       // badge/state updates without reload") reads these — a plain
       // ['items'] invalidation also covers the list/grid thumbnails.
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
       setRestockTarget((current) => (current?.id === entryId ? null : current));
       setRestockError(null);
     },
@@ -163,14 +172,24 @@ export function ShoppingListPage() {
                 secondary={entrySummary(entry)}
                 slotProps={{ secondary: { noWrap: true } }}
               />
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={() => openRestockDialog(entry)}
-                sx={{ flexShrink: 0 }}
-              >
-                Restocked
-              </Button>
+              {isViewer ? (
+                <Tooltip title={READ_ONLY_HINT}>
+                  <span>
+                    <Button variant="outlined" size="small" disabled sx={{ flexShrink: 0 }}>
+                      Restocked
+                    </Button>
+                  </span>
+                </Tooltip>
+              ) : (
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => openRestockDialog(entry)}
+                  sx={{ flexShrink: 0 }}
+                >
+                  Restocked
+                </Button>
+              )}
             </ListItem>
           ))}
         </List>

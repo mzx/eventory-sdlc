@@ -2,6 +2,8 @@ import { Alert, Box, Button, CircularProgress, Stack, Typography } from '@mui/ma
 import { useQuery } from '@tanstack/react-query';
 import { useParams } from 'react-router-dom';
 import { fetchItem, qrImageUrl } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { useActiveWorkspaceId } from '../workspace/useActiveWorkspace';
 
 /**
  * Minimal print view for an item's QR sticker, rendered outside the app
@@ -14,10 +16,11 @@ import { fetchItem, qrImageUrl } from '../api';
  */
 export function ItemPrintPage() {
   const { id } = useParams<{ id: string }>();
+  const workspaceId = useActiveWorkspaceId();
   const itemQuery = useQuery({
-    queryKey: ['items', id],
+    queryKey: wsKey(workspaceId, 'items', id),
     queryFn: () => fetchItem(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   return (

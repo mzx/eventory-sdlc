@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
 import { ScanPage } from './ScanPage';
 
 function renderScanPage(token = 'token-1') {
@@ -22,6 +23,10 @@ function renderScanPage(token = 'token-1') {
 }
 
 describe('ScanPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

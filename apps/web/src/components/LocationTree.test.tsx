@@ -2,10 +2,11 @@ import { ThemeProvider } from '@mui/material';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LocationNode } from '../lib/locationTree';
 import { responsiveDeclaration } from '../test/responsiveStyle';
 import { theme } from '../theme';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { LocationTree } from './LocationTree';
 
 function node(
@@ -23,6 +24,14 @@ const nodes: LocationNode[] = [
   node('garage', 'Garage', 42, [node('workbench', 'Workbench', 12, [], 'garage')]),
   node('attic', 'Attic', 7),
 ];
+
+// The workspace-role store is real module state (see workspace/useActiveWorkspace.ts),
+// shared across every test in this file — `test/setup.ts`'s global
+// `afterEach` already resets it to `null` (never-viewer) after each test, so
+// only tests that need `viewer` set it explicitly below.
+beforeEach(() => {
+  setActiveWorkspaceRole('owner');
+});
 
 function renderTree(props: Partial<Parameters<typeof LocationTree>[0]> = {}) {
   return render(
@@ -274,5 +283,40 @@ describe('LocationTree add-child kind toggle', () => {
     await user.type(screen.getByLabelText('New child location name for Garage'), 'Tote Box{Enter}');
 
     expect(onAddChild).toHaveBeenCalledWith('garage', 'Tote Box', 'container');
+  });
+});
+
+// EVT-43 round-2 review, MAJOR 2: LocationTree previously wired real
+// add/rename/delete mutations regardless of role — the only interactive
+// surface in the locations feature that didn't gate itself for a viewer.
+describe('LocationTree viewer gating (EVT-43 AC6)', () => {
+  afterEach(() => {
+    setActiveWorkspaceRole(null);
+  });
+
+  it('hides the desktop add/rename/delete icon row for a viewer', () => {
+    setActiveWorkspaceRole('viewer');
+    renderTree();
+
+    expect(screen.queryByRole('button', { name: 'Add child to Garage' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Rename Garage' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete Garage' })).not.toBeInTheDocument();
+  });
+
+  it('hides the mobile "More actions" overflow button for a viewer', () => {
+    setActiveWorkspaceRole('viewer');
+    renderTree();
+
+    expect(
+      screen.queryByRole('button', { name: 'More actions for Garage' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the desktop icon row and overflow button again for a member', () => {
+    setActiveWorkspaceRole('member');
+    renderTree();
+
+    expect(screen.getByRole('button', { name: 'Add child to Garage' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'More actions for Garage' })).toBeInTheDocument();
   });
 });

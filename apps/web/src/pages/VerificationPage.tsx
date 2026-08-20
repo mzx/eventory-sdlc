@@ -12,6 +12,7 @@ import {
   ListItemAvatar,
   ListItemText,
   Stack,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -19,6 +20,8 @@ import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { countItem, fetchVerificationQueue, photoUrl, type VerificationQueueRow } from '../api';
 import { CountDialog } from '../components/CountDialog';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /** "3 days overdue" / "Due today" summary line. */
 function overdueSummary(row: VerificationQueueRow): string {
@@ -42,9 +45,12 @@ function rowSummary(row: VerificationQueueRow): string {
  */
 export function VerificationPage() {
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const listQuery = useQuery({
-    queryKey: ['verification-queue'],
+    queryKey: wsKey(workspaceId, 'verification-queue'),
     queryFn: fetchVerificationQueue,
+    enabled: workspaceId != null,
   });
 
   const [countTarget, setCountTarget] = useState<VerificationQueueRow | null>(null);
@@ -52,8 +58,8 @@ export function VerificationPage() {
     mutationFn: ({ itemId, quantity }: { itemId: string; quantity: number }) =>
       countItem(itemId, quantity),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['verification-queue'] });
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'verification-queue') });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
       return result;
     },
   });
@@ -136,14 +142,24 @@ export function VerificationPage() {
                 secondary={rowSummary(row)}
                 slotProps={{ secondary: { noWrap: true } }}
               />
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={() => setCountTarget(row)}
-                sx={{ flexShrink: 0 }}
-              >
-                Count
-              </Button>
+              {isViewer ? (
+                <Tooltip title={READ_ONLY_HINT}>
+                  <span>
+                    <Button variant="outlined" size="small" disabled sx={{ flexShrink: 0 }}>
+                      Count
+                    </Button>
+                  </span>
+                </Tooltip>
+              ) : (
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setCountTarget(row)}
+                  sx={{ flexShrink: 0 }}
+                >
+                  Count
+                </Button>
+              )}
             </ListItem>
           ))}
         </List>

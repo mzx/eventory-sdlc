@@ -1,5 +1,7 @@
 import { afterEach, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 
 // jsdom does not implement `window.matchMedia` (a known gap — see
 // https://github.com/jsdom/jsdom/issues/3522). MUI's `useMediaQuery` calls
@@ -36,4 +38,14 @@ if (typeof window !== 'undefined' && !window.matchMedia) {
 // override never leaks into a later test in the same file.
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+// Resets the active-workspace id/role stores (EVT-43) after every test —
+// vitest reuses one module graph per test FILE (not per `it`), so without
+// this a `setActiveWorkspaceId(...)` in one test would otherwise leak into
+// every later test in the same file/suite via `localStorage` + the
+// in-memory store alike.
+afterEach(() => {
+  setActiveWorkspaceId(null);
+  setActiveWorkspaceRole(null);
 });

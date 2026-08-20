@@ -1,14 +1,41 @@
 import GoogleIcon from '@mui/icons-material/Google';
 import { Box, Button, Paper, Stack, Typography } from '@mui/material';
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { authGoogleUrl } from '../api';
+import { setPendingInviteToken } from '../workspace/useActiveWorkspace';
+
+/** Matches `/invite/:token` — deliberately mirrors `App.tsx`'s route, not a shared constant, since neither side needs the other to change in lockstep. */
+const INVITE_PATH_RE = /^\/invite\/([^/]+)/;
 
 /**
  * Shown by `AuthGate` whenever there is no signed-in user (never visited,
  * logged out, or session expired). Not a router route — `AuthGate` renders
  * it in place of the app shell so a signed-out visit to ANY path shows this
  * without ever flashing app content (EVT-15 AC1).
+ *
+ * EVT-43 AC4 "sign-in-if-needed" — a signed-out visit to `/invite/:token`
+ * lands here (like every other path); this stashes the token (survives the
+ * Google OAuth full-page round trip, which always redirects back to `/`
+ * regardless of the original path — see apps/api
+ * `AuthController.googleCallback`) so `AppShell` can resume redemption once
+ * signed in, and forwards it as `?invite=` so a not-yet-allowlisted invitee
+ * can complete their first sign-in at all (EVT-45's `GoogleSignInGuard`).
  */
 export function LoginPage() {
+  const location = useLocation();
+  const inviteToken = INVITE_PATH_RE.exec(location.pathname)?.[1];
+
+  useEffect(() => {
+    if (inviteToken) {
+      setPendingInviteToken(inviteToken);
+    }
+  }, [inviteToken]);
+
+  const googleUrl = inviteToken
+    ? `${authGoogleUrl()}?invite=${encodeURIComponent(inviteToken)}`
+    : authGoogleUrl();
+
   return (
     <Box
       sx={{
@@ -33,7 +60,7 @@ export function LoginPage() {
             variant="contained"
             size="large"
             startIcon={<GoogleIcon />}
-            href={authGoogleUrl()}
+            href={googleUrl}
             fullWidth
           >
             Sign in with Google

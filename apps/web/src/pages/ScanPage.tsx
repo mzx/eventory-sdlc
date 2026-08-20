@@ -2,6 +2,8 @@ import { Box, Button, CircularProgress, Stack, Typography } from '@mui/material'
 import { useQuery } from '@tanstack/react-query';
 import { Link as RouterLink, Navigate, useParams } from 'react-router-dom';
 import { fetchByQr, QrLookupNotFoundError } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { useActiveWorkspaceId } from '../workspace/useActiveWorkspace';
 
 /**
  * `/r/:token` — the QR sticker landing route (EVT-13). Stickers (`GET
@@ -13,9 +15,17 @@ import { fetchByQr, QrLookupNotFoundError } from '../api';
  */
 export function ScanPage() {
   const { token } = useParams<{ token: string }>();
+  // Deliberately NOT gated on `workspaceId != null` (unlike every other
+  // workspace-scoped query in this app) — the server resolves a scanned
+  // token against the SCANNED resource's own workspace, not the caller's
+  // active one (see apps/api's `@AllowMissingWorkspace()` doc comment on
+  // `ItemsController.findByQr`), so this must work before/without an active
+  // selection too. `wsKey` is still used for cache-key consistency/audit
+  // (EVT-43 AC1) even though the fetch itself doesn't depend on it.
+  const workspaceId = useActiveWorkspaceId();
 
   const query = useQuery({
-    queryKey: ['scan', token],
+    queryKey: wsKey(workspaceId, 'scan', token),
     queryFn: () => fetchByQr(token as string),
     enabled: Boolean(token),
     retry: false,

@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
+import { setActiveWorkspaceId } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { ShoppingListPage } from './ShoppingListPage';
 
 function entry(overrides: Partial<api.ShoppingListEntry> = {}): api.ShoppingListEntry {
@@ -42,8 +44,23 @@ function renderPage() {
 }
 
 describe('ShoppingListPage', () => {
+  beforeEach(() => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('EVT-43 AC6: disables "Restocked" with a read-only hint for a viewer', async () => {
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([entry()]);
+    setActiveWorkspaceRole('viewer');
+
+    renderPage();
+
+    const restockButton = await screen.findByRole('button', { name: /restocked/i });
+    expect(restockButton).toBeDisabled();
   });
 
   // =========================================================================

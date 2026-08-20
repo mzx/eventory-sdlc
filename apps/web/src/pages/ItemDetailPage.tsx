@@ -33,6 +33,7 @@ import {
   TableCell,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -53,8 +54,10 @@ import {
   type StockMovementRow,
 } from '../api';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { wsKey } from '../lib/queryKeys';
 import { CountDialog } from '../components/CountDialog';
 import { QrThumb } from '../components/QrThumb';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 /** How many additional rows "Load more" reveals each click (EVT-25 AC 6). */
 const MOVEMENTS_PAGE_SIZE_STEP = 20;
@@ -172,6 +175,8 @@ export function ItemDetailPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // Set by IntakePage's `navigate(..., { state: { justCreated: true } })`
@@ -182,9 +187,9 @@ export function ItemDetailPage() {
   );
 
   const itemQuery = useQuery({
-    queryKey: ['items', id],
+    queryKey: wsKey(workspaceId, 'items', id),
     queryFn: () => fetchItem(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   // "Load more" grows pageSize on a fixed page 1 rather than tracking a page
@@ -192,15 +197,15 @@ export function ItemDetailPage() {
   // window actually being displayed.
   const [movementsLimit, setMovementsLimit] = useState(MOVEMENTS_PAGE_SIZE_STEP);
   const movementsQuery = useQuery({
-    queryKey: ['items', id, 'movements', movementsLimit],
+    queryKey: wsKey(workspaceId, 'items', id, 'movements', movementsLimit),
     queryFn: () => fetchItemMovements(id as string, { page: 1, pageSize: movementsLimit }),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteItem(id as string),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
       navigate('/');
     },
     onError: (error: unknown) => {
@@ -219,7 +224,7 @@ export function ItemDetailPage() {
     onSuccess: () => {
       // The nav badge (AC 6) and the Shopping List page (AC 4) both read
       // this query key.
-      queryClient.invalidateQueries({ queryKey: ['shopping-list'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'shopping-list') });
       setRunningLowToastOpen(true);
     },
   });
@@ -232,11 +237,11 @@ export function ItemDetailPage() {
   const countMutation = useMutation({
     mutationFn: (quantity: number) => countItem(id as string, quantity),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
       // A count can clear an item's overdue verification, so the queue
       // VerificationPage reads must also be invalidated here (mirrors
       // VerificationPage's own countMutation.onSuccess).
-      queryClient.invalidateQueries({ queryKey: ['verification-queue'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'verification-queue') });
     },
   });
 
@@ -250,7 +255,7 @@ export function ItemDetailPage() {
   const consumeMutation = useMutation({
     mutationFn: (quantity: number) => consumeItem(id as string, quantity),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['items'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'items') });
       setUseDialogOpen(false);
       setUseError(null);
       if (result.offerVerification) {
@@ -319,62 +324,82 @@ export function ItemDetailPage() {
             </Typography>
           )}
           <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', rowGap: 1 }}>
-            <Button
-              size="small"
-              variant="outlined"
-              color="warning"
-              startIcon={<WarningAmberOutlinedIcon fontSize="small" />}
-              onClick={() => runningLowMutation.mutate()}
-              disabled={runningLowMutation.isPending}
-            >
-              Running low
-            </Button>
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<RemoveCircleOutlineIcon fontSize="small" />}
-              onClick={() => {
-                setUseQuantity('1');
-                setUseError(null);
-                setUseDialogOpen(true);
-              }}
-              disabled={item.quantity <= 0}
-            >
-              Use
-            </Button>
+            <Tooltip title={isViewer ? READ_ONLY_HINT : ''}>
+              <span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  startIcon={<WarningAmberOutlinedIcon fontSize="small" />}
+                  onClick={() => runningLowMutation.mutate()}
+                  disabled={isViewer || runningLowMutation.isPending}
+                >
+                  Running low
+                </Button>
+              </span>
+            </Tooltip>
+            <Tooltip title={isViewer ? READ_ONLY_HINT : ''}>
+              <span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<RemoveCircleOutlineIcon fontSize="small" />}
+                  onClick={() => {
+                    setUseQuantity('1');
+                    setUseError(null);
+                    setUseDialogOpen(true);
+                  }}
+                  disabled={isViewer || item.quantity <= 0}
+                >
+                  Use
+                </Button>
+              </span>
+            </Tooltip>
             {overdue && (
-              <Button
-                size="small"
-                variant="outlined"
-                color="info"
-                startIcon={<FactCheckOutlinedIcon fontSize="small" />}
-                onClick={() => setCountDialogOpen(true)}
-              >
-                Verify count
-              </Button>
+              <Tooltip title={isViewer ? READ_ONLY_HINT : ''}>
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="info"
+                    startIcon={<FactCheckOutlinedIcon fontSize="small" />}
+                    onClick={() => setCountDialogOpen(true)}
+                    disabled={isViewer}
+                  >
+                    Verify count
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
+            {isViewer && (
+              <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
+                Read-only access
+              </Typography>
             )}
           </Stack>
         </Box>
-        <Stack direction="row" spacing={1}>
-          <Button
-            variant="contained"
-            startIcon={<EditOutlinedIcon />}
-            onClick={() => navigate(`/items/${item.id}/edit`)}
-          >
-            Edit
-          </Button>
-          <Button
-            variant="outlined"
-            color="error"
-            startIcon={<DeleteOutlineIcon />}
-            onClick={() => {
-              setDeleteError(null);
-              setConfirmOpen(true);
-            }}
-          >
-            Delete
-          </Button>
-        </Stack>
+        {!isViewer && (
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="contained"
+              startIcon={<EditOutlinedIcon />}
+              onClick={() => navigate(`/items/${item.id}/edit`)}
+            >
+              Edit
+            </Button>
+            <Button
+              variant="outlined"
+              color="error"
+              startIcon={<DeleteOutlineIcon />}
+              onClick={() => {
+                setDeleteError(null);
+                setConfirmOpen(true);
+              }}
+            >
+              Delete
+            </Button>
+          </Stack>
+        )}
       </Stack>
 
       {gallery.length > 0 ? (

@@ -51,6 +51,8 @@ import {
   type ItemListRow,
   type ProjectStatus,
 } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 const SEARCH_DEBOUNCE_MS = 300;
 const STATUS_LABEL: Record<ProjectStatus, string> = {
@@ -95,13 +97,17 @@ function clampQuantity(raw: string): number {
 /** One row in the BOM table. Linked rows navigate to the item detail page. */
 function BomLineRow({ projectId, line }: { projectId: string; line: BomLine }) {
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const deleteMutation = useMutation({
     mutationFn: () => deleteBomLine(projectId, line.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects', projectId] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects', projectId) }),
   });
   const unlinkMutation = useMutation({
     mutationFn: () => updateBomLine(projectId, line.id, { itemId: null }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects', projectId] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects', projectId) }),
   });
 
   return (
@@ -113,26 +119,30 @@ function BomLineRow({ projectId, line }: { projectId: string; line: BomLine }) {
       <TableCell>{line.unit ?? ''}</TableCell>
       <TableCell>{line.notes ?? ''}</TableCell>
       <TableCell align="right">
-        {line.item && (
-          <Tooltip title="Unlink from inventory item">
+        {!isViewer && (
+          <>
+            {line.item && (
+              <Tooltip title="Unlink from inventory item">
+                <IconButton
+                  size="small"
+                  aria-label={`Unlink ${line.name}`}
+                  onClick={() => unlinkMutation.mutate()}
+                  disabled={unlinkMutation.isPending}
+                >
+                  <LinkOffIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
             <IconButton
               size="small"
-              aria-label={`Unlink ${line.name}`}
-              onClick={() => unlinkMutation.mutate()}
-              disabled={unlinkMutation.isPending}
+              aria-label={`Delete ${line.name}`}
+              onClick={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending}
             >
-              <LinkOffIcon fontSize="small" />
+              <DeleteOutlineIcon fontSize="small" />
             </IconButton>
-          </Tooltip>
+          </>
         )}
-        <IconButton
-          size="small"
-          aria-label={`Delete ${line.name}`}
-          onClick={() => deleteMutation.mutate()}
-          disabled={deleteMutation.isPending}
-        >
-          <DeleteOutlineIcon fontSize="small" />
-        </IconButton>
       </TableCell>
     </TableRow>
   );
@@ -147,6 +157,8 @@ function BomLineRow({ projectId, line }: { projectId: string; line: BomLine }) {
  * widths regardless of breakpoint.
  */
 function AddBomLineForm({ projectId }: { projectId: string }) {
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const [inputValue, setInputValue] = useState('');
   const [selectedItem, setSelectedItem] = useState<ItemListRow | null>(null);
   const [quantity, setQuantity] = useState('1');
@@ -154,9 +166,9 @@ function AddBomLineForm({ projectId }: { projectId: string }) {
   const debouncedSearch = useDebouncedValue(inputValue, SEARCH_DEBOUNCE_MS);
 
   const itemsQuery = useQuery({
-    queryKey: ['items', 'bom-autocomplete', debouncedSearch],
+    queryKey: wsKey(workspaceId, 'items', 'bom-autocomplete', debouncedSearch),
     queryFn: () => fetchItems({ search: debouncedSearch }),
-    enabled: debouncedSearch.trim().length > 0 && selectedItem === null,
+    enabled: workspaceId != null && debouncedSearch.trim().length > 0 && selectedItem === null,
   });
 
   const queryClient = useQueryClient();
@@ -169,13 +181,17 @@ function AddBomLineForm({ projectId }: { projectId: string }) {
         unit: unit.trim() || undefined,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects', projectId] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects', projectId) });
       setInputValue('');
       setSelectedItem(null);
       setQuantity('1');
       setUnit('');
     },
   });
+
+  if (isViewer) {
+    return null;
+  }
 
   const canAdd = (selectedItem !== null || inputValue.trim().length > 0) && !addMutation.isPending;
 
@@ -266,6 +282,7 @@ function AvailabilityLineCard({
   onAddToShoppingList: (itemId: string) => void;
   isAdding: boolean;
 }) {
+  const isViewer = useIsViewer();
   return (
     <Box
       data-testid="availability-line-card"
@@ -285,7 +302,7 @@ function AvailabilityLineCard({
         {line.quantity} {line.unit ?? ''} required · {line.onHand ?? '—'} on hand
         {line.location?.path ? ` · ${line.location.path}` : ''}
       </Typography>
-      {line.status === 'short' && line.itemId && (
+      {!isViewer && line.status === 'short' && line.itemId && (
         <Button
           size="small"
           sx={{ mt: 1 }}
@@ -319,14 +336,18 @@ function AvailabilityPanel({ projectId }: { projectId: string }) {
   const theme = useTheme();
   const isXs = useMediaQuery(theme.breakpoints.down('sm'));
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const availabilityQuery = useQuery({
-    queryKey: ['projects', projectId, 'availability'],
+    queryKey: wsKey(workspaceId, 'projects', projectId, 'availability'),
     queryFn: () => fetchProjectAvailability(projectId),
+    enabled: workspaceId != null,
   });
 
   const addToShoppingListMutation = useMutation({
     mutationFn: (itemId: string) => markRunningLow(itemId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shopping-list'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'shopping-list') }),
   });
 
   if (availabilityQuery.isLoading) {
@@ -420,7 +441,7 @@ function AvailabilityPanel({ projectId }: { projectId: string }) {
                     />
                   </TableCell>
                   <TableCell align="right">
-                    {line.status === 'short' && line.itemId && (
+                    {!isViewer && line.status === 'short' && line.itemId && (
                       <Button
                         size="small"
                         onClick={() => addToShoppingListMutation.mutate(line.itemId as string)}
@@ -539,6 +560,7 @@ function BackflushDialog({
   const theme = useTheme();
   const fullScreen = useMediaQuery(theme.breakpoints.down('sm'));
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
   const linkedLines = preview.lines.filter((line) => !line.skipped);
   const skippedLines = preview.lines.filter((line) => line.skipped);
 
@@ -559,7 +581,7 @@ function BackflushDialog({
         ...(preview.alreadyBackflushed && { confirmAgain }),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects', projectId] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects', projectId) });
       onClose();
     },
   });
@@ -731,15 +753,18 @@ export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
   const projectQuery = useQuery({
-    queryKey: ['projects', id],
+    queryKey: wsKey(workspaceId, 'projects', id),
     queryFn: () => fetchProject(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   const statusMutation = useMutation({
     mutationFn: (status: ProjectStatus) => updateProject(id as string, { status }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects', id] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects', id) }),
   });
 
   // Marking a project `completed` triggers the backflush confirmation
@@ -776,7 +801,7 @@ export function ProjectDetailPage() {
   const deleteProjectMutation = useMutation({
     mutationFn: () => deleteProject(id as string),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      queryClient.invalidateQueries({ queryKey: wsKey(workspaceId, 'projects') });
       navigate('/projects');
     },
   });
@@ -827,7 +852,7 @@ export function ProjectDetailPage() {
             label="Status"
             value={project.status}
             onChange={(e) => handleStatusChange(e.target.value as ProjectStatus)}
-            disabled={previewMutation.isPending}
+            disabled={isViewer || previewMutation.isPending}
             sx={{ minWidth: 160 }}
           >
             {STATUS_OPTIONS.map((s) => (
@@ -836,16 +861,23 @@ export function ProjectDetailPage() {
               </MenuItem>
             ))}
           </TextField>
-          <Button
-            size="small"
-            color="error"
-            variant="outlined"
-            startIcon={<DeleteOutlineIcon fontSize="small" />}
-            onClick={() => setDeleteConfirmOpen(true)}
-            disabled={deleteProjectMutation.isPending}
-          >
-            Delete project
-          </Button>
+          {!isViewer && (
+            <Button
+              size="small"
+              color="error"
+              variant="outlined"
+              startIcon={<DeleteOutlineIcon fontSize="small" />}
+              onClick={() => setDeleteConfirmOpen(true)}
+              disabled={deleteProjectMutation.isPending}
+            >
+              Delete project
+            </Button>
+          )}
+          {isViewer && (
+            <Typography variant="caption" color="text.secondary">
+              {READ_ONLY_HINT}
+            </Typography>
+          )}
         </Stack>
       </Stack>
 

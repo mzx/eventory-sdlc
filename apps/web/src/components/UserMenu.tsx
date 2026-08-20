@@ -1,5 +1,7 @@
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import LogoutIcon from '@mui/icons-material/Logout';
+import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
 import {
   Avatar,
   Divider,
@@ -11,7 +13,8 @@ import {
 } from '@mui/material';
 import { useState, type MouseEvent } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { authLogoutUrl, type AuthUser } from '../api';
+import { authLogoutUrl, setActiveWorkspaceId, type AuthUser } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 
 /** Renders `name`'s initial, or `?` when both `name` and `email` are absent. */
 function initial(user: AuthUser): string {
@@ -34,9 +37,18 @@ function initial(user: AuthUser): string {
 export function UserMenu({
   user,
   version = __BUILD_VERSION__,
+  activeWorkspaceName = null,
+  isOwner = false,
+  onSwitchWorkspace,
 }: {
   user: AuthUser;
   version?: string;
+  /** Name of the currently active workspace (EVT-43) — `null` while it's still resolving. */
+  activeWorkspaceName?: string | null;
+  /** Whether the caller is `owner` of the active workspace — gates the "Members" entry. */
+  isOwner?: boolean;
+  /** Opens the shared `WorkspaceSwitcherDialog` (owned by `App.tsx`, not this component — see its doc comment for why). */
+  onSwitchWorkspace?: () => void;
 }) {
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
   const open = Boolean(anchorEl);
@@ -60,6 +72,33 @@ export function UserMenu({
           </Typography>
         </MenuItem>
         <Divider />
+        {activeWorkspaceName && (
+          <MenuItem disabled sx={{ opacity: '1 !important' }}>
+            <Typography variant="caption" color="text.secondary" noWrap>
+              Workspace: {activeWorkspaceName}
+            </Typography>
+          </MenuItem>
+        )}
+        <MenuItem
+          onClick={() => {
+            handleClose();
+            onSwitchWorkspace?.();
+          }}
+        >
+          <ListItemIcon>
+            <SwapHorizIcon fontSize="small" />
+          </ListItemIcon>
+          Switch workspace
+        </MenuItem>
+        {isOwner && (
+          <MenuItem component={RouterLink} to="/settings/members" onClick={handleClose}>
+            <ListItemIcon>
+              <GroupOutlinedIcon fontSize="small" />
+            </ListItemIcon>
+            Members
+          </MenuItem>
+        )}
+        <Divider />
         {user.role === 'admin' && (
           <MenuItem component={RouterLink} to="/admin/users" onClick={handleClose}>
             <ListItemIcon>
@@ -68,7 +107,26 @@ export function UserMenu({
             Admin &rsaquo; Users
           </MenuItem>
         )}
-        <MenuItem component="a" href={authLogoutUrl()}>
+        <MenuItem
+          component="a"
+          href={authLogoutUrl()}
+          onClick={() => {
+            // Round-2 review, MAJOR 1 ("nothing clears the key on logout"):
+            // this is a full-page nav (`<a href>`), not a client-side route
+            // — the JS module graph tears down and reloads from scratch, but
+            // `localStorage` survives the reload. Left unhandled, the NEXT
+            // sign-in on this browser (a different account on a shared
+            // machine, or the same account after switching workspaces
+            // elsewhere) inherits this session's `X-Workspace-Id`, which may
+            // 403 every request until `useMyWorkspaces`'s own fallback
+            // effect resolves it. Clearing synchronously here — the browser
+            // doesn't navigate away until this handler returns — removes
+            // that stale carry-over entirely rather than relying on
+            // self-heal to paper over it after the fact.
+            setActiveWorkspaceId(null);
+            setActiveWorkspaceRole(null);
+          }}
+        >
           <ListItemIcon>
             <LogoutIcon fontSize="small" />
           </ListItemIcon>

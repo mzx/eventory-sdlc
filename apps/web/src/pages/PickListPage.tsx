@@ -11,6 +11,7 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -21,6 +22,8 @@ import {
   type AvailabilityLine,
   type ProjectAvailability,
 } from '../api';
+import { wsKey } from '../lib/queryKeys';
+import { READ_ONLY_HINT, useActiveWorkspaceId, useIsViewer } from '../workspace/useActiveWorkspace';
 
 interface LocationGroup {
   /** Sort key — `''` for lines whose item has no location set, sorts first. */
@@ -73,17 +76,22 @@ function groupByLocation(lines: AvailabilityLine[]): LocationGroup[] {
 export function PickListPage() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
+  const workspaceId = useActiveWorkspaceId();
+  const isViewer = useIsViewer();
 
   const availabilityQuery = useQuery({
-    queryKey: ['projects', id, 'availability'],
+    queryKey: wsKey(workspaceId, 'projects', id, 'availability'),
     queryFn: () => fetchProjectAvailability(id as string),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && workspaceId != null,
   });
 
   const pickMutation = useMutation({
     mutationFn: ({ lineId, picked }: { lineId: string; picked: boolean }) =>
       updateBomLine(id as string, lineId, { picked }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['projects', id, 'availability'] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: wsKey(workspaceId, 'projects', id, 'availability'),
+      }),
   });
 
   return (
@@ -132,7 +140,11 @@ export function PickListPage() {
       )}
 
       {availabilityQuery.data && (
-        <PickListBody availability={availabilityQuery.data} onPick={pickMutation.mutate} />
+        <PickListBody
+          availability={availabilityQuery.data}
+          onPick={pickMutation.mutate}
+          isViewer={isViewer}
+        />
       )}
     </Box>
   );
@@ -141,9 +153,12 @@ export function PickListPage() {
 function PickListBody({
   availability,
   onPick,
+  isViewer,
 }: {
   availability: ProjectAvailability;
   onPick: (input: { lineId: string; picked: boolean }) => void;
+  /** EVT-43 AC6 (round-2 review, MINOR 5) — the pick checkbox is a real mutation, gated read-only like the rest of the app. */
+  isViewer: boolean;
 }) {
   const groups = groupByLocation(availability.lines);
   const total = groups.reduce((sum, g) => sum + g.lines.length, 0);
@@ -187,12 +202,19 @@ function PickListBody({
               {group.lines.map((line) => (
                 <TableRow key={line.lineId}>
                   <TableCell padding="checkbox">
-                    <Checkbox
-                      checked={line.picked}
-                      onChange={(e) => onPick({ lineId: line.lineId, picked: e.target.checked })}
-                      inputProps={{ 'aria-label': `Picked ${line.name}` }}
-                      sx={{ '& .MuiSvgIcon-root': { fontSize: 28 } }}
-                    />
+                    <Tooltip title={isViewer ? READ_ONLY_HINT : ''}>
+                      <span>
+                        <Checkbox
+                          checked={line.picked}
+                          onChange={(e) =>
+                            onPick({ lineId: line.lineId, picked: e.target.checked })
+                          }
+                          disabled={isViewer}
+                          inputProps={{ 'aria-label': `Picked ${line.name}` }}
+                          sx={{ '& .MuiSvgIcon-root': { fontSize: 28 } }}
+                        />
+                      </span>
+                    </Tooltip>
                   </TableCell>
                   <TableCell>{line.name}</TableCell>
                   <TableCell align="right">

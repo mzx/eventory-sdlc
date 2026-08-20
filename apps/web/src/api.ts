@@ -45,12 +45,181 @@ function notifyIfAuthFailure(status: number): void {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// ---------------------------------------------------------------------------
+// active workspace (EVT-43) — persisted selection sent as X-Workspace-Id
+//
+// A plain module-level store (not React state) so the header can be built by
+// `request()`/the two multipart bypasses below without threading a workspace
+// id through every call site, and so a fresh page load restores the last
+// selection before React even mounts. `useActiveWorkspaceId` (see
+// `workspace/useActiveWorkspace.ts`) is the React-facing read side, wired up
+// via `useSyncExternalStore` against `subscribeActiveWorkspaceId` below —
+// mirrors this file's own `authFailureListener` pattern.
+// ---------------------------------------------------------------------------
+
+/** Header the API expects to select a non-default workspace (mirrors apps/api's `WORKSPACE_HEADER`). */
+const WORKSPACE_HEADER = 'X-Workspace-Id';
+const ACTIVE_WORKSPACE_STORAGE_KEY = 'eventory:activeWorkspaceId';
+
+function readStoredActiveWorkspaceId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+  } catch {
+    // localStorage unavailable (privacy mode, some test environments) — the
+    // in-memory value below is still authoritative for this page load.
+    return null;
+  }
+}
+
+let activeWorkspaceId: string | null = readStoredActiveWorkspaceId();
+const activeWorkspaceListeners = new Set<() => void>();
+
+/** Current active workspace id, or `null` before one has resolved. */
+export function getActiveWorkspaceId(): string | null {
+  return activeWorkspaceId;
+}
+
+/** Sets (and persists) the active workspace id; notifies every subscriber so React re-renders. */
+export function setActiveWorkspaceId(id: string | null): void {
+  if (activeWorkspaceId === id) return;
+  activeWorkspaceId = id;
+  try {
+    if (id) {
+      localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, id);
+    } else {
+      localStorage.removeItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore — in-memory value above is still authoritative for this tab
+  }
+  for (const listener of activeWorkspaceListeners) listener();
+}
+
+/** Subscribes to active-workspace-id changes; returns an unsubscribe function. `useSyncExternalStore`'s subscribe param. */
+export function subscribeActiveWorkspaceId(listener: () => void): () => void {
+  activeWorkspaceListeners.add(listener);
+  return () => activeWorkspaceListeners.delete(listener);
+}
+
+/** `X-Workspace-Id` header object when a workspace is active, else `{}` — spread into every fetch's headers. */
+function workspaceHeaders(): Record<string, string> {
+  return activeWorkspaceId ? { [WORKSPACE_HEADER]: activeWorkspaceId } : {};
+}
+
+// ---------------------------------------------------------------------------
+// stale-workspace-header self-heal (EVT-43 round-2 review, MAJOR 1)
+//
+// `WorkspaceContextGuard` (apps/api/src/workspace/workspace-context.guard.ts)
+// 403s a request carrying an `X-Workspace-Id` the caller isn't a member of —
+// BEFORE it ever consults `@AllowMissingWorkspace()`. A removed member (or a
+// different account signing in on the same browser after a previous user's
+// id was left in localStorage) keeps sending that now-invalid id on every
+// request; nothing previously cleared it, so it was a silent, unrecoverable
+// lockout. The two branches below close that gap:
+//
+//   1. `WORKSPACE_INDEPENDENT` request calls (`fetchWorkspaces`,
+//      `createWorkspace`, `redeemInvite`) never attach the header at all —
+//      those three routes don't need (or want) it; sending a stale id there
+//      just breaks the very escape hatches meant to recover from one.
+//   2. `selfHealStaleWorkspaceHeader` inspects any OTHER 403 for the guard's
+//      two fixed rejection messages. A match means the STORED id itself is
+//      the problem (not a legitimate in-workspace permission denial, e.g.
+//      `WorkspaceWriteGuard`'s "Viewers cannot modify workspace data" 403,
+//      which must NOT clear the caller's selection) — clears it and notifies
+//      every registered `workspaceContextInvalidatedListeners` entry so each
+//      mounted `useMyWorkspaces` (see workspace/useActiveWorkspace.ts) can
+//      invalidate its cached list and fall back to a still-valid membership.
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors `NOT_A_MEMBER_MESSAGE`/`NO_WORKSPACE_MESSAGE` in
+ * apps/api/src/workspace/workspace-context.guard.ts — the two fixed 403
+ * bodies `WorkspaceContextGuard` throws when the ambient workspace itself
+ * fails to resolve (bad header, or no header and no membership at all).
+ * Deliberately narrow: matching this set means the caller's SELECTED
+ * workspace is invalid, not that they lack permission to act within a
+ * workspace they really belong to.
+ */
+const WORKSPACE_CONTEXT_403_MESSAGES = new Set([
+  'Not a member of the requested workspace',
+  'No workspace access',
+]);
+
+// A `Set`, not a single nullable slot (EVT-43 review, convergent MAJOR):
+// `useMyWorkspaces` (see useActiveWorkspace.ts) mounts in multiple
+// components at once — the app shell, the switcher, onboarding, members
+// settings. A single slot meant ANY one of them unmounting (e.g.
+// `InviteRedeemPage` after redeem, `OnboardingPage` after its first
+// workspace, or `AppShell` navigating to the sibling-routed print pages
+// `/items/:id/print` and `/projects/:id/pick-list`) nulled the listener out
+// from under every other still-mounted consumer — silently disabling the
+// self-heal below for the rest of the session, so a later workspace-context
+// 403 cleared the stored id but never invalidated the cached workspaces
+// list, and the fallback effect re-selected the very membership the server
+// just rejected: an id-flapping 403 loop only a reload broke. Mirrors
+// `activeWorkspaceListeners` above and `activeWorkspaceRoleListeners` in
+// `useActiveWorkspace.ts` — every consumer adds its own listener on mount
+// and removes ONLY that listener on unmount.
+const workspaceContextInvalidatedListeners = new Set<() => void>();
+
+/**
+ * Registers a listener invoked (after the stored id has already been
+ * cleared) when a response 403s specifically because the persisted
+ * `X-Workspace-Id` is stale/foreign. `useMyWorkspaces` wires this to
+ * invalidate the cached workspaces list so its own self-healing effect can
+ * pick a still-valid membership — see the module doc comment above. Returns
+ * an unsubscribe function that removes ONLY this listener, `useEffect`
+ * cleanup style — safe to call from multiple mounted consumers at once.
+ */
+export function addWorkspaceContextInvalidatedListener(listener: () => void): () => void {
+  workspaceContextInvalidatedListeners.add(listener);
+  return () => workspaceContextInvalidatedListeners.delete(listener);
+}
+
+/**
+ * Best-effort: reads a CLONED response body (never consumes the caller's own
+ * read of it) so a non-JSON or already-drained body just no-ops rather than
+ * throwing here.
+ */
+async function selfHealStaleWorkspaceHeader(response: Response): Promise<void> {
+  if (response.status !== 403) return;
+  try {
+    const body = (await response.clone().json()) as { message?: unknown };
+    if (typeof body.message === 'string' && WORKSPACE_CONTEXT_403_MESSAGES.has(body.message)) {
+      setActiveWorkspaceId(null);
+      for (const listener of workspaceContextInvalidatedListeners) listener();
+    }
+  } catch {
+    // Non-JSON or unreadable body — nothing to self-heal from.
+  }
+}
+
+interface RequestOptions extends RequestInit {
+  /**
+   * Omit `X-Workspace-Id` even when a workspace is active — for the three
+   * workspace-independent endpoints (list/create workspaces, redeem invite)
+   * that must never depend on, or be blocked by, the caller's currently
+   * selected workspace (EVT-43 round-2 review, MAJOR 1).
+   */
+  skipWorkspaceHeader?: boolean;
+}
+
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
+  const { skipWorkspaceHeader, headers: callerHeaders, ...rest } = init ?? {};
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
+    ...rest,
+    // Explicit merge (not `{ headers: {...}, ...init }`, which let a
+    // call-site's own `headers` silently replace — not extend — this
+    // object, dropping `X-Workspace-Id` and falling back server-side to the
+    // caller's oldest membership) — round-2 review, suggestion 7.
+    headers: {
+      'Content-Type': 'application/json',
+      ...(skipWorkspaceHeader ? {} : workspaceHeaders()),
+      ...callerHeaders,
+    },
   });
   notifyIfAuthFailure(response.status);
+  await selfHealStaleWorkspaceHeader(response);
   if (!response.ok) {
     throw new Error(`Request to ${path} failed with status ${response.status}`);
   }
@@ -260,9 +429,11 @@ export async function searchItemsByPhoto(file: File): Promise<PhotoSearchResult>
   formData.append('file', file);
   const response = await fetch(`${API_BASE}/items/search-by-photo`, {
     method: 'POST',
+    headers: workspaceHeaders(),
     body: formData,
   });
   notifyIfAuthFailure(response.status);
+  await selfHealStaleWorkspaceHeader(response);
   if (!response.ok) {
     throw new Error(`Request to /items/search-by-photo failed with status ${response.status}`);
   }
@@ -864,11 +1035,12 @@ export class QrLookupNotFoundError extends Error {
  */
 export async function fetchByQr(token: string): Promise<ByQrResult> {
   const response = await fetch(`${API_BASE}/items/by-qr/${encodeURIComponent(token)}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...workspaceHeaders() },
   });
   if (response.status === 404) {
     throw new QrLookupNotFoundError(token);
   }
+  await selfHealStaleWorkspaceHeader(response);
   if (!response.ok) {
     throw new Error(`Request to /items/by-qr/${token} failed with status ${response.status}`);
   }
@@ -912,9 +1084,11 @@ export async function uploadPhoto(
   const suffix = analyze ? '?analyze=true' : '';
   const response = await fetch(`${API_BASE}/photos/upload${suffix}`, {
     method: 'POST',
+    headers: workspaceHeaders(),
     body: form,
   });
   notifyIfAuthFailure(response.status);
+  await selfHealStaleWorkspaceHeader(response);
   if (!response.ok) {
     throw new Error(`Photo upload failed with status ${response.status}`);
   }
@@ -1143,4 +1317,161 @@ export interface VerificationQueueRow {
 /** GET /api/items/verification-queue — "today's count list", most-overdue first, capped at 20. */
 export async function fetchVerificationQueue(): Promise<VerificationQueueRow[]> {
   return request<VerificationQueueRow[]>('/items/verification-queue');
+}
+
+// ---------------------------------------------------------------------------
+// workspaces, membership, invitations (EVT-42 API surface / EVT-43 web UI)
+// ---------------------------------------------------------------------------
+
+/** `owner` is never grantable directly (see apps/api `INVITABLE_ROLES`) — only via `transferOwnership` server-side, which this client doesn't expose (EVT-43 non-goal). */
+export type WorkspaceRole = 'owner' | 'member' | 'viewer';
+/** Role an invite/role-change may GRANT — excludes `owner`, mirrors apps/api `INVITABLE_ROLES`. */
+export type InvitableWorkspaceRole = Exclude<WorkspaceRole, 'owner'>;
+export type WorkspaceInviteStatus = 'pending' | 'redeemed' | 'revoked' | 'expired';
+
+/** Row shape returned by `GET /api/workspaces` (see apps/api `WorkspaceSummary`) — the caller's own role is embedded per-workspace. */
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  role: WorkspaceRole;
+  createdAt: string;
+}
+
+/** Row shape returned by `GET /api/workspaces/:id/members` (see apps/api `MemberSummary`). */
+export interface WorkspaceMemberRow {
+  userId: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  role: WorkspaceRole;
+  memberSince: string;
+}
+
+/** Response shape of `POST /api/workspaces/:id/invites` — the raw, redeemable token, returned ONLY here (see apps/api `InviteWithToken`). */
+export interface WorkspaceInviteWithToken {
+  id: string;
+  token: string;
+  role: InvitableWorkspaceRole;
+  status: WorkspaceInviteStatus;
+  expiresAt: string;
+  createdAt: string;
+}
+
+/** Row shape returned by `GET /api/workspaces/:id/invites` (see apps/api `InviteSummary`) — never carries the raw token. */
+export interface WorkspaceInviteRow {
+  id: string;
+  role: InvitableWorkspaceRole;
+  status: WorkspaceInviteStatus;
+  expiresAt: string;
+  createdAt: string;
+  redeemedAt: string | null;
+}
+
+/** Response shape of `POST /api/invites/redeem` (see apps/api `RedeemResult`). */
+export interface RedeemInviteResult {
+  workspaceId: string;
+  role: WorkspaceRole;
+}
+
+/**
+ * GET /api/workspaces — every workspace the caller belongs to, oldest
+ * membership first, with their role in each. `skipWorkspaceHeader`: this is
+ * the call that DISCOVERS which workspaces exist — sending a stale/foreign
+ * `X-Workspace-Id` would 403 it before it ever runs, which is exactly the
+ * escape hatch a removed member (or a shared browser's next user) needs to
+ * recover (EVT-43 round-2 review, MAJOR 1).
+ */
+export async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
+  return request<WorkspaceSummary[]>('/workspaces', { skipWorkspaceHeader: true });
+}
+
+/**
+ * POST /api/workspaces — create a workspace; the caller becomes its owner.
+ * `skipWorkspaceHeader`: a zero-membership caller (or one recovering from a
+ * stale selection) must be able to create their first workspace regardless
+ * of whatever id is currently persisted — see `fetchWorkspaces` above.
+ */
+export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
+  return request<WorkspaceSummary>('/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+    skipWorkspaceHeader: true,
+  });
+}
+
+/** PATCH /api/workspaces/:id — rename. Owner-only server-side. */
+export async function renameWorkspace(id: string, name: string): Promise<WorkspaceSummary> {
+  return request<WorkspaceSummary>(`/workspaces/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** GET /api/workspaces/:id/members — roster + roles. Reachable by any member. */
+export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMemberRow[]> {
+  return request<WorkspaceMemberRow[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`);
+}
+
+/** PATCH /api/workspaces/:id/members/:userId/role — toggles member<->viewer. Owner-only server-side. */
+export async function changeWorkspaceMemberRole(
+  workspaceId: string,
+  userId: string,
+  role: InvitableWorkspaceRole,
+): Promise<WorkspaceMemberRow> {
+  return request<WorkspaceMemberRow>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}/role`,
+    { method: 'PATCH', body: JSON.stringify({ role }) },
+  );
+}
+
+/** DELETE /api/workspaces/:id/members/:userId — an owner removing someone else, or a member removing themselves ("leave"). */
+export async function removeWorkspaceMember(workspaceId: string, userId: string): Promise<void> {
+  return request<void>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** POST /api/workspaces/:id/invites — creates a single-use, 7-day invite. `role` defaults to `member` server-side when omitted. Owner-only. */
+export async function createWorkspaceInvite(
+  workspaceId: string,
+  role?: InvitableWorkspaceRole,
+): Promise<WorkspaceInviteWithToken> {
+  return request<WorkspaceInviteWithToken>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/invites`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ role }),
+    },
+  );
+}
+
+/** GET /api/workspaces/:id/invites — every invite (any status), newest first. Owner-only. */
+export async function fetchWorkspaceInvites(workspaceId: string): Promise<WorkspaceInviteRow[]> {
+  return request<WorkspaceInviteRow[]>(`/workspaces/${encodeURIComponent(workspaceId)}/invites`);
+}
+
+/** DELETE /api/workspaces/:id/invites/:inviteId — revokes a still-pending invite. Owner-only. */
+export async function revokeWorkspaceInvite(workspaceId: string, inviteId: string): Promise<void> {
+  return request<void>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/invites/${encodeURIComponent(inviteId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/**
+ * POST /api/invites/redeem — the raw token travels in the JSON body, never
+ * the URL (mirrors apps/api `RedeemInviteDto`'s doc comment: a path segment
+ * leaks a redeemable credential into proxy/access logs and browser history).
+ * `skipWorkspaceHeader`: the invitee is very likely NOT a member of whatever
+ * workspace id happens to be persisted (zero-membership onboarding, or a
+ * stale id from a previous account on a shared browser) — sending it would
+ * 403 the redemption itself (EVT-43 round-2 review, MAJOR 1).
+ */
+export async function redeemInvite(token: string): Promise<RedeemInviteResult> {
+  return request<RedeemInviteResult>('/invites/redeem', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+    skipWorkspaceHeader: true,
+  });
 }
