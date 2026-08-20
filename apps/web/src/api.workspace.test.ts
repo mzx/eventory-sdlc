@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  addWorkspaceContextInvalidatedListener,
   createWorkspace,
   fetchByQr,
   fetchItems,
@@ -8,7 +9,6 @@ import {
   redeemInvite,
   searchItemsByPhoto,
   setActiveWorkspaceId,
-  setWorkspaceContextInvalidatedListener,
   subscribeActiveWorkspaceId,
   uploadPhoto,
 } from './api';
@@ -212,8 +212,10 @@ describe('active workspace store + X-Workspace-Id header (EVT-43)', () => {
   // `X-Workspace-Id` the server now rejects — nothing previously cleared it,
   // so it was a silent, unrecoverable lockout.
   describe('self-heals a stale/foreign X-Workspace-Id on a workspace-context 403 (round-2 review, MAJOR 1)', () => {
+    const unsubscribers: Array<() => void> = [];
+
     afterEach(() => {
-      setWorkspaceContextInvalidatedListener(null);
+      for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     });
 
     it('clears the stored id and notifies the invalidation listener on "Not a member of the requested workspace"', async () => {
@@ -222,7 +224,7 @@ describe('active workspace store + X-Workspace-Id header (EVT-43)', () => {
         forbiddenResponse('Not a member of the requested workspace'),
       );
       const listener = vi.fn();
-      setWorkspaceContextInvalidatedListener(listener);
+      unsubscribers.push(addWorkspaceContextInvalidatedListener(listener));
 
       await expect(fetchItems()).rejects.toThrow();
 
@@ -245,7 +247,7 @@ describe('active workspace store + X-Workspace-Id header (EVT-43)', () => {
         forbiddenResponse('Viewers cannot modify workspace data'),
       );
       const listener = vi.fn();
-      setWorkspaceContextInvalidatedListener(listener);
+      unsubscribers.push(addWorkspaceContextInvalidatedListener(listener));
 
       await expect(fetchItems()).rejects.toThrow();
 
@@ -262,6 +264,33 @@ describe('active workspace store + X-Workspace-Id header (EVT-43)', () => {
       // failure still surfaces (no unhandled rejection from the self-heal
       // path itself), and the stored id is left untouched.
       expect(getActiveWorkspaceId()).toBe('ws-1');
+    });
+
+    // EVT-43 review, convergent MAJOR: the listener store is a `Set`, not a
+    // single nullable slot — every registered listener must fire, and
+    // unsubscribing one must not affect any other still-registered listener.
+    // This is the module-level counterpart to the React-level regression
+    // test in useActiveWorkspace.test.tsx (which reproduces the actual bug:
+    // one `useMyWorkspaces()` consumer's unmount nulling the self-heal for
+    // every other still-mounted consumer).
+    it('notifies every registered listener, and unsubscribing one leaves the others intact', async () => {
+      setActiveWorkspaceId('removed-ws');
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        forbiddenResponse('Not a member of the requested workspace'),
+      );
+      const survivor = vi.fn();
+      const unmounted = vi.fn();
+      unsubscribers.push(addWorkspaceContextInvalidatedListener(survivor));
+      const unsubscribeUnmounted = addWorkspaceContextInvalidatedListener(unmounted);
+
+      // Simulates a sibling consumer unmounting (e.g. InviteRedeemPage after
+      // redeem) BEFORE the 403 below — it must remove only its own listener.
+      unsubscribeUnmounted();
+
+      await expect(fetchItems()).rejects.toThrow();
+
+      expect(survivor).toHaveBeenCalledTimes(1);
+      expect(unmounted).not.toHaveBeenCalled();
     });
   });
 });

@@ -146,6 +146,77 @@ describe('useMyWorkspaces (EVT-43)', () => {
     await waitFor(() => expect(fetchWorkspacesMock).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByTestId('workspace-id')).toHaveTextContent('ws-2'));
   });
+
+  // Test reviewer's ask (EVT-43 review, convergent MAJOR): `useMyWorkspaces()`
+  // is mounted by multiple components at once in the real app (app shell,
+  // switcher, onboarding, members settings). The previous implementation
+  // registered its self-heal listener in a single nullable module slot, so
+  // ANY one consumer unmounting — e.g. `InviteRedeemPage` after redeem,
+  // `OnboardingPage` after its first workspace, or `AppShell` navigating to
+  // the sibling-routed print pages `/items/:id/print` and
+  // `/projects/:id/pick-list` — nulled the listener out from under every
+  // OTHER still-mounted consumer, silently disabling the self-heal for the
+  // rest of the session (a workspace-context 403 would then clear the
+  // stored id but never invalidate the cached list, so the fallback effect
+  // re-selected the very membership the server just rejected — an
+  // id-flapping 403 loop only a reload broke).
+  //
+  // Reproduces that scenario directly: a transient consumer and a surviving
+  // consumer both mount `useMyWorkspaces()` against the same `QueryClient`;
+  // the transient one unmounts (standing in for a page navigating away)
+  // while the surviving one (standing in for the app shell) stays mounted.
+  // A subsequent workspace-context 403 must still self-heal through the
+  // survivor's own listener. Fails on the old single-slot implementation —
+  // the transient consumer's unmount-cleanup would null the shared slot
+  // regardless of which listener was "current", silently disabling the
+  // survivor's self-heal too.
+  it('a still-mounted consumer keeps self-healing after another useMyWorkspaces() consumer unmounts (partial-unmount regression)', async () => {
+    const fetchWorkspacesMock = vi
+      .spyOn(api, 'fetchWorkspaces')
+      .mockResolvedValueOnce([workspace({ id: 'ws-1', role: 'owner' })])
+      .mockResolvedValueOnce([workspace({ id: 'ws-2', name: 'Garage', role: 'member' })]);
+    api.setActiveWorkspaceId('removed-ws');
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    function TransientConsumer() {
+      useMyWorkspaces();
+      return null;
+    }
+
+    function Shell({ mountTransient }: { mountTransient: boolean }) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {mountTransient && <TransientConsumer />}
+          <Probe />
+        </QueryClientProvider>
+      );
+    }
+
+    const { rerender } = render(<Shell mountTransient />);
+
+    await waitFor(() => expect(screen.getByTestId('workspace-id')).toHaveTextContent('ws-1'));
+
+    // Only the transient consumer unmounts — `Probe` (the surviving
+    // component instance, standing in for the app shell) stays mounted.
+    rerender(<Shell mountTransient={false} />);
+
+    api.setActiveWorkspaceId('removed-ws');
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          statusCode: 403,
+          message: 'Not a member of the requested workspace',
+          error: 'Forbidden',
+        }),
+        { status: 403 },
+      ),
+    );
+    await expect(api.fetchItems()).rejects.toThrow();
+
+    await waitFor(() => expect(fetchWorkspacesMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('workspace-id')).toHaveTextContent('ws-2'));
+  });
 });
 
 describe('pending invite token helpers (EVT-43 AC4)', () => {

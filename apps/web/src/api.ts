@@ -126,9 +126,9 @@ function workspaceHeaders(): Record<string, string> {
 //      the problem (not a legitimate in-workspace permission denial, e.g.
 //      `WorkspaceWriteGuard`'s "Viewers cannot modify workspace data" 403,
 //      which must NOT clear the caller's selection) — clears it and notifies
-//      `workspaceContextInvalidatedListener` so `useMyWorkspaces` (see
-//      workspace/useActiveWorkspace.ts) can invalidate its cached list and
-//      fall back to a still-valid membership.
+//      every registered `workspaceContextInvalidatedListeners` entry so each
+//      mounted `useMyWorkspaces` (see workspace/useActiveWorkspace.ts) can
+//      invalidate its cached list and fall back to a still-valid membership.
 // ---------------------------------------------------------------------------
 
 /**
@@ -145,17 +145,35 @@ const WORKSPACE_CONTEXT_403_MESSAGES = new Set([
   'No workspace access',
 ]);
 
-let workspaceContextInvalidatedListener: (() => void) | null = null;
+// A `Set`, not a single nullable slot (EVT-43 review, convergent MAJOR):
+// `useMyWorkspaces` (see useActiveWorkspace.ts) mounts in multiple
+// components at once — the app shell, the switcher, onboarding, members
+// settings. A single slot meant ANY one of them unmounting (e.g.
+// `InviteRedeemPage` after redeem, `OnboardingPage` after its first
+// workspace, or `AppShell` navigating to the sibling-routed print pages
+// `/items/:id/print` and `/projects/:id/pick-list`) nulled the listener out
+// from under every other still-mounted consumer — silently disabling the
+// self-heal below for the rest of the session, so a later workspace-context
+// 403 cleared the stored id but never invalidated the cached workspaces
+// list, and the fallback effect re-selected the very membership the server
+// just rejected: an id-flapping 403 loop only a reload broke. Mirrors
+// `activeWorkspaceListeners` above and `activeWorkspaceRoleListeners` in
+// `useActiveWorkspace.ts` — every consumer adds its own listener on mount
+// and removes ONLY that listener on unmount.
+const workspaceContextInvalidatedListeners = new Set<() => void>();
 
 /**
  * Registers a listener invoked (after the stored id has already been
  * cleared) when a response 403s specifically because the persisted
  * `X-Workspace-Id` is stale/foreign. `useMyWorkspaces` wires this to
  * invalidate the cached workspaces list so its own self-healing effect can
- * pick a still-valid membership — see the module doc comment above.
+ * pick a still-valid membership — see the module doc comment above. Returns
+ * an unsubscribe function that removes ONLY this listener, `useEffect`
+ * cleanup style — safe to call from multiple mounted consumers at once.
  */
-export function setWorkspaceContextInvalidatedListener(listener: (() => void) | null): void {
-  workspaceContextInvalidatedListener = listener;
+export function addWorkspaceContextInvalidatedListener(listener: () => void): () => void {
+  workspaceContextInvalidatedListeners.add(listener);
+  return () => workspaceContextInvalidatedListeners.delete(listener);
 }
 
 /**
@@ -169,7 +187,7 @@ async function selfHealStaleWorkspaceHeader(response: Response): Promise<void> {
     const body = (await response.clone().json()) as { message?: unknown };
     if (typeof body.message === 'string' && WORKSPACE_CONTEXT_403_MESSAGES.has(body.message)) {
       setActiveWorkspaceId(null);
-      workspaceContextInvalidatedListener?.();
+      for (const listener of workspaceContextInvalidatedListeners) listener();
     }
   } catch {
     // Non-JSON or unreadable body — nothing to self-heal from.

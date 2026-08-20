@@ -17,10 +17,10 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
+  addWorkspaceContextInvalidatedListener,
   fetchWorkspaces,
   getActiveWorkspaceId,
   setActiveWorkspaceId,
-  setWorkspaceContextInvalidatedListener,
   subscribeActiveWorkspaceId,
   type WorkspaceRole,
   type WorkspaceSummary,
@@ -85,22 +85,30 @@ export function useMyWorkspaces(): UseQueryResult<WorkspaceSummary[]> {
   const activeId = useActiveWorkspaceId();
 
   // Round-2 review, MAJOR 1: `api.ts`'s `selfHealStaleWorkspaceHeader`
-  // clears a stale/foreign `X-Workspace-Id` (and notifies this listener) the
-  // moment ANY request 403s specifically because of it — e.g. a member who
-  // was just removed from the workspace they were sitting in. Invalidating
-  // here forces a fresh `GET /api/workspaces` (which never sends the header
-  // at all — see `fetchWorkspaces`'s doc comment — so it always succeeds
-  // regardless of the id that was just cleared); the effect below then picks
-  // a still-valid fallback membership from the refreshed list. Registered
-  // unconditionally on every mount — idempotent, since the id only actually
-  // changes when the effect below finds a real mismatch — so mounting
-  // `useMyWorkspaces()` from multiple components at once (app shell +
-  // switcher + members settings, per the module doc comment above) is safe.
+  // clears a stale/foreign `X-Workspace-Id` (and notifies every registered
+  // listener) the moment ANY request 403s specifically because of it — e.g.
+  // a member who was just removed from the workspace they were sitting in.
+  // Invalidating here forces a fresh `GET /api/workspaces` (which never
+  // sends the header at all — see `fetchWorkspaces`'s doc comment — so it
+  // always succeeds regardless of the id that was just cleared); the effect
+  // below then picks a still-valid fallback membership from the refreshed
+  // list. Registered unconditionally on every mount — idempotent, since the
+  // id only actually changes when the effect below finds a real mismatch —
+  // so mounting `useMyWorkspaces()` from multiple components at once (app
+  // shell + switcher + members settings, per the module doc comment above)
+  // is safe.
+  //
+  // `addWorkspaceContextInvalidatedListener` is `Set`-backed (EVT-43 review,
+  // convergent MAJOR): each mount adds its OWN listener and the returned
+  // unsubscribe removes ONLY that one on unmount, so one consumer unmounting
+  // (e.g. `InviteRedeemPage` after redeem, `OnboardingPage` after its first
+  // workspace, or `AppShell` navigating to a sibling-routed print page) can
+  // no longer null out the self-heal for every other still-mounted
+  // consumer — see `api.ts`'s doc comment on the listener `Set` itself.
   useEffect(() => {
-    setWorkspaceContextInvalidatedListener(() => {
+    return addWorkspaceContextInvalidatedListener(() => {
       void queryClient.invalidateQueries({ queryKey: WORKSPACES_QUERY_KEY });
     });
-    return () => setWorkspaceContextInvalidatedListener(null);
   }, [queryClient]);
 
   useEffect(() => {
