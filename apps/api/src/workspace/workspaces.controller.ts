@@ -11,9 +11,11 @@ import {
   Post,
 } from '@nestjs/common';
 import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
+import { AllowMissingWorkspace } from './workspace-context';
 import {
   CreateInviteDto,
   CreateWorkspaceDto,
+  RedeemInviteDto,
   RenameWorkspaceDto,
   UpdateMemberRoleDto,
 } from './workspaces.dto';
@@ -27,9 +29,15 @@ import { InvitesService, WorkspacesService } from './workspaces.service';
  * `@CurrentWorkspace()`/`WorkspaceWriteGuard`, since those authorize against
  * the caller's DEFAULT/header-selected workspace, unrelated to the `:id`
  * path param here. See `WorkspacesService`'s doc comment for the
- * authorization model these handlers rely on instead. This is also what
- * makes `POST /api/workspaces` reachable by a zero-membership user (AC5) —
- * no workspace context is required to create one.
+ * authorization model these handlers rely on instead.
+ *
+ * `create`/`listMine` are additionally `@AllowMissingWorkspace()` — every
+ * OTHER route on this controller requires `WorkspaceContextGuard` to have
+ * resolved SOME ambient workspace for the caller (EVT-42 round-2 security
+ * review, CRITICAL fail-closed fix), which is trivially true for a caller
+ * managing a workspace they already belong to, but NOT true for a
+ * zero-membership caller creating their very first one — see
+ * `AllowMissingWorkspace`'s doc comment for the exhaustive opt-out list.
  */
 @Controller('workspaces')
 export class WorkspacesController {
@@ -39,12 +47,14 @@ export class WorkspacesController {
   ) {}
 
   /** POST /api/workspaces — create a workspace; the caller becomes its owner. */
+  @AllowMissingWorkspace()
   @Post()
   create(@Body() body: CreateWorkspaceDto, @CurrentUser() user: AuthenticatedUser) {
     return this.workspacesService.create(body.name, user!.id);
   }
 
   /** GET /api/workspaces — every workspace the caller belongs to, with their role in each. */
+  @AllowMissingWorkspace()
   @Get()
   listMine(@CurrentUser() user: AuthenticatedUser) {
     return this.workspacesService.listMine(user!.id);
@@ -142,16 +152,23 @@ export class WorkspacesController {
  * (not a workspace id the invitee doesn't know yet) is the only thing the
  * invitee has. Requires only the global `JwtAuthGuard` — the invitee signs
  * in via Google FIRST (creating/resolving their `User` row), THEN redeems
- * while authenticated; no workspace membership is required to reach this
- * route (AC5's "zero-membership users can... redeem").
+ * while authenticated. `@AllowMissingWorkspace()` — a zero-membership
+ * invitee must be able to reach this (AC5's "zero-membership users
+ * can... redeem").
  */
 @Controller('invites')
 export class InvitesController {
   constructor(private readonly invitesService: InvitesService) {}
 
-  /** POST /api/invites/:token/redeem */
-  @Post(':token/redeem')
-  redeem(@Param('token') token: string, @CurrentUser() user: AuthenticatedUser) {
-    return this.invitesService.redeem(token, user!.id);
+  /**
+   * POST /api/invites/redeem — token travels in the JSON body, not the URL
+   * (EVT-42 round-2 review, minor: a path segment leaks a redeemable
+   * credential into proxy/access logs and browser history the moment
+   * request logging is enabled; a POST body does not).
+   */
+  @AllowMissingWorkspace()
+  @Post('redeem')
+  redeem(@Body() body: RedeemInviteDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.invitesService.redeem(body.token, user!.id);
   }
 }

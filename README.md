@@ -235,21 +235,29 @@ status only (who can see/manage the household's user list — `GET /api/users` a
 Pre-EVT-42, a brand-new sign-in landed `pending` and was locked out of every route except
 `GET /auth/me` until an admin flipped them to `approved`. That global approval gate is
 retired: every new sign-in is `approved` immediately (`JwtAuthGuard` now only blocks a
-`rejected` — i.e. explicitly instance-admin-banned — user). Inventory access is instead
-governed entirely by `Workspace` membership:
+`rejected` — i.e. explicitly instance-admin-banned — user). A legacy row that's still
+`pending` from before this change (or manually re-pended by an admin) is treated as
+approved-equivalent for inventory purposes — `pending` has no gating effect anywhere
+anymore; `PATCH /api/users/:id/status` only accepts `approved`/`rejected` as of this task.
+Inventory access is instead governed entirely by `Workspace` membership:
 
 - `POST /api/workspaces` — any signed-in user (regardless of instance-admin status or
   workspace membership) can create a workspace; the creator becomes its `owner`.
-- `POST /api/invites/:token/redeem` — an owner shares a single-use, expiring invite
-  token (created via `POST /api/workspaces/:id/invites`, role `member` or `viewer`) out of
-  band; the invitee signs in with Google, then redeems it while authenticated.
+- `POST /api/invites/redeem` (body `{ "token": "..." }`) — an owner shares a single-use,
+  expiring invite token (created via `POST /api/workspaces/:id/invites`, role `member` or
+  `viewer`) out of band; the invitee signs in with Google, then redeems it while
+  authenticated.
 - A user who belongs to zero workspaces can still sign in and hit the two routes above, but
-  every inventory endpoint (items/locations/etc.) 403s them until they create or join one.
+  every OTHER protected route 403s them (`WorkspaceContextGuard` fails closed by default —
+  see that guard's doc comment — unless a route is explicitly decorated
+  `@AllowMissingWorkspace()`).
 
-This means a **fresh deployment needs zero env vars** to become fully operational: the first
-sign-in auto-promotes to instance-admin (unrelated to workspace access), then immediately
-creates their own workspace via `POST /api/workspaces` and is instantly productive — no
-"pending" page, no second admin action required.
+This means a fresh deployment's **API** needs zero env vars to become operational: the first
+sign-in auto-promotes to instance-admin (unrelated to workspace access), then can immediately
+call `POST /api/workspaces` and start writing inventory data — no "pending" page, no second
+admin action required. There is, as of this task, **no web UI** for "create a workspace or
+redeem an invite" yet — a browser user with zero memberships lands in the app shell with
+403s on every request and no visible next step; that UI is explicitly EVT-43's scope.
 
 ## Production backups (EVT-33)
 

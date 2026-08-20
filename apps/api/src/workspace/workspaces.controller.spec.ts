@@ -176,11 +176,11 @@ describe('InvitesController', () => {
     controller = module.get<InvitesController>(InvitesController);
   });
 
-  it('redeem delegates to InvitesService.redeem', async () => {
+  it('redeem delegates to InvitesService.redeem with the token from the body', async () => {
     const result = { workspaceId: WORKSPACE_ID, role: WorkspaceRole.member };
     invitesService.redeem.mockResolvedValue(result);
 
-    expect(await controller.redeem('raw-token', USER)).toBe(result);
+    expect(await controller.redeem({ token: 'raw-token' }, USER)).toBe(result);
     expect(invitesService.redeem).toHaveBeenCalledWith('raw-token', 'user-1');
   });
 });

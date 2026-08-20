@@ -2,6 +2,7 @@ import { ArgumentMetadata, ValidationPipe } from '@nestjs/common';
 import {
   CreateInviteDto,
   CreateWorkspaceDto,
+  RedeemInviteDto,
   RenameWorkspaceDto,
   UpdateMemberRoleDto,
 } from './workspaces.dto';
@@ -37,6 +38,21 @@ describe('CreateWorkspaceDto', () => {
   it('rejects a name over 255 chars', async () => {
     await expect(pipe.transform({ name: 'x'.repeat(256) }, metadata)).rejects.toThrow();
   });
+
+  // EVT-42 round-2 review, minor — whitespace-only must not pass
+  // @IsNotEmpty() by virtue of being technically non-empty.
+  it('REJECTS a whitespace-only name (trimmed before validation)', async () => {
+    await expect(pipe.transform({ name: '   ' }, metadata)).rejects.toThrow();
+  });
+
+  it('trims leading/trailing whitespace from an otherwise-valid name', async () => {
+    const result = await pipe.transform({ name: '  Garage  ' }, metadata);
+    expect(result.name).toBe('Garage');
+  });
+
+  it('rejects a non-string name (trim transform passes it through untouched, @IsString() catches it)', async () => {
+    await expect(pipe.transform({ name: 123 }, metadata)).rejects.toThrow();
+  });
 });
 
 describe('RenameWorkspaceDto', () => {
@@ -49,6 +65,15 @@ describe('RenameWorkspaceDto', () => {
 
   it('rejects a missing name', async () => {
     await expect(pipe.transform({}, metadata)).rejects.toThrow();
+  });
+
+  it('REJECTS a whitespace-only name (trimmed before validation)', async () => {
+    await expect(pipe.transform({ name: '\t\n ' }, metadata)).rejects.toThrow();
+  });
+
+  it('trims leading/trailing whitespace from an otherwise-valid name', async () => {
+    const result = await pipe.transform({ name: '  New Name  ' }, metadata);
+    expect(result.name).toBe('New Name');
   });
 });
 
@@ -98,5 +123,23 @@ describe('UpdateMemberRoleDto', () => {
 
   it('rejects a missing role', async () => {
     await expect(pipe.transform({}, metadata)).rejects.toThrow();
+  });
+});
+
+describe('RedeemInviteDto', () => {
+  const metadata: ArgumentMetadata = { type: 'body', metatype: RedeemInviteDto, data: '' };
+
+  it('accepts a valid token', async () => {
+    const result = await pipe.transform({ token: 'a'.repeat(64) }, metadata);
+    expect(result).toBeInstanceOf(RedeemInviteDto);
+    expect(result.token).toBe('a'.repeat(64));
+  });
+
+  it('rejects a missing token', async () => {
+    await expect(pipe.transform({}, metadata)).rejects.toThrow();
+  });
+
+  it('rejects a blank token', async () => {
+    await expect(pipe.transform({ token: '' }, metadata)).rejects.toThrow();
   });
 });

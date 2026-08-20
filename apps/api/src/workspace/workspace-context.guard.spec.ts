@@ -22,6 +22,7 @@ function makeContext(opts: {
   headers?: Record<string, string | string[] | undefined>;
   isPublic?: boolean;
   allowPending?: boolean;
+  allowMissingWorkspace?: boolean;
 }) {
   const request: Record<string, unknown> = {
     user: opts.user,
@@ -31,6 +32,7 @@ function makeContext(opts: {
     getAllAndOverride: jest.fn((key: string) => {
       if (key === 'eventory:isPublic') return opts.isPublic ?? false;
       if (key === 'eventory:allowPending') return opts.allowPending ?? false;
+      if (key === 'eventory:allowMissingWorkspace') return opts.allowMissingWorkspace ?? false;
       return false;
     }),
   };
@@ -97,9 +99,33 @@ describe('WorkspaceContextGuard', () => {
       );
     });
 
-    it('sets workspace to null (not a throw) when the caller has zero memberships', async () => {
+    it('EVT-42 round-2 (CRITICAL, fail-closed): throws ForbiddenException when the caller has zero memberships, on a route with NO opt-out', async () => {
       const { context, request, reflector } = makeContext({
         user: { id: USER_ID, status: UserStatus.approved },
+      });
+      guard = new WorkspaceContextGuard(reflector as unknown as Reflector, prismaMock as never);
+      prismaMock.workspaceMember.findFirst.mockResolvedValue(null);
+
+      await expect(guard.canActivate(context)).rejects.toThrow(ForbiddenException);
+      expect(request.workspace).toBeNull();
+    });
+
+    it('@AllowMissingWorkspace(): resolves true (no throw) for a zero-membership caller on an opted-out route', async () => {
+      const { context, request, reflector } = makeContext({
+        user: { id: USER_ID, status: UserStatus.approved },
+        allowMissingWorkspace: true,
+      });
+      guard = new WorkspaceContextGuard(reflector as unknown as Reflector, prismaMock as never);
+      prismaMock.workspaceMember.findFirst.mockResolvedValue(null);
+
+      await expect(guard.canActivate(context)).resolves.toBe(true);
+      expect(request.workspace).toBeNull();
+    });
+
+    it('@AllowPending(): resolves true (no throw) for an APPROVED zero-membership caller — GET /auth/me must always resolve', async () => {
+      const { context, request, reflector } = makeContext({
+        user: { id: USER_ID, status: UserStatus.approved },
+        allowPending: true,
       });
       guard = new WorkspaceContextGuard(reflector as unknown as Reflector, prismaMock as never);
       prismaMock.workspaceMember.findFirst.mockResolvedValue(null);

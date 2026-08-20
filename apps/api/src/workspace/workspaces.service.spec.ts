@@ -52,11 +52,16 @@ function makePrismaMock() {
     workspace: typeof workspace;
     workspaceMember: typeof workspaceMember;
     workspaceInvite: typeof workspaceInvite;
+    $queryRaw: jest.Mock;
     $transaction: jest.Mock;
   } = {
     workspace,
     workspaceMember,
     workspaceInvite,
+    // `lockOwnerRows` (SELECT ... FOR UPDATE) — a no-op in this mock; tests
+    // that care about lock ORDERING assert on `$queryRaw`'s call order
+    // relative to `workspaceMember.count`, not its return value.
+    $queryRaw: jest.fn().mockResolvedValue([]),
     $transaction: jest.fn((callback: (tx: unknown) => unknown) => callback(mock)),
   };
   return mock;
@@ -318,6 +323,44 @@ describe('WorkspacesService', () => {
         service.changeRole(WORKSPACE_ID, OWNER_ID, WorkspaceRole.member, OTHER_ID),
       ).resolves.toMatchObject({ role: WorkspaceRole.member });
     });
+
+    // -------------------------------------------------------------------
+    // EVT-42 round-2 review, MAJOR — race simulation. `lockOwnerRows`
+    // (SELECT ... FOR UPDATE) forces a concurrent transaction targeting the
+    // SAME workspace to block, then re-read the owner count fresh once it
+    // resumes. Here we simulate "resumed after a concurrently-committed
+    // demotion already happened": the lock is acquired, but the re-read
+    // count is already down to 1 — the operation must reject, not proceed
+    // on a stale read.
+    // -------------------------------------------------------------------
+
+    it('EVT-42 round-2 (MAJOR): rejects when the post-lock owner count is already down to 1 (concurrent demote won the race)', async () => {
+      const callOrder: string[] = [];
+      prisma.workspaceMember.findUnique
+        .mockResolvedValueOnce(makeMembership({ userId: OTHER_ID })) // actor is a different owner
+        .mockResolvedValueOnce(makeMembership()); // target is OWNER_ID, currently owner
+      prisma.$queryRaw.mockImplementation(() => {
+        callOrder.push('lock');
+        return Promise.resolve([]);
+      });
+      prisma.workspaceMember.count.mockImplementation(() => {
+        callOrder.push('count');
+        // Simulates: by the time this transaction acquired the lock, a
+        // concurrent transaction already committed a demotion, leaving
+        // only 1 owner — the pre-fix code would have read `2` here (a
+        // stale, non-locked count) and incorrectly allowed this to proceed.
+        return Promise.resolve(1);
+      });
+
+      await expect(
+        service.changeRole(WORKSPACE_ID, OWNER_ID, WorkspaceRole.member, OTHER_ID),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(prisma.workspaceMember.update).not.toHaveBeenCalled();
+      // The lock is acquired BEFORE the count is re-read — ordering matters,
+      // see `lockOwnerRows`'s doc comment for why.
+      expect(callOrder).toEqual(['lock', 'count']);
+    });
   });
 
   // =========================================================================
@@ -441,6 +484,28 @@ describe('WorkspacesService', () => {
       await expect(service.removeMember(WORKSPACE_ID, OTHER_ID, OWNER_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+
+    // EVT-42 round-2 review, MAJOR — same race simulation as `changeRole`
+    // above, applied to removal.
+    it('EVT-42 round-2 (MAJOR): rejects when the post-lock owner count is already down to 1 (concurrent removal won the race)', async () => {
+      const callOrder: string[] = [];
+      prisma.workspaceMember.findUnique.mockResolvedValueOnce(makeMembership()); // actor === target, owner
+      prisma.$queryRaw.mockImplementation(() => {
+        callOrder.push('lock');
+        return Promise.resolve([]);
+      });
+      prisma.workspaceMember.count.mockImplementation(() => {
+        callOrder.push('count');
+        return Promise.resolve(1);
+      });
+
+      await expect(service.removeMember(WORKSPACE_ID, OWNER_ID, OWNER_ID)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      expect(prisma.workspaceMember.delete).not.toHaveBeenCalled();
+      expect(callOrder).toEqual(['lock', 'count']);
     });
   });
 });

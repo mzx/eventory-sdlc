@@ -5,8 +5,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InviteStatus, WorkspaceMember, WorkspaceRole } from '@prisma/client';
+import { InviteStatus, Prisma, WorkspaceMember, WorkspaceRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+
+/** Either the top-level `PrismaService` or a `$transaction` callback's `tx` — both expose the same model delegates. */
+type PrismaOrTx = PrismaService | Prisma.TransactionClient;
 
 // ---------------------------------------------------------------------------
 // Output shapes
@@ -107,8 +110,13 @@ export class WorkspacesService {
   // membership/role helpers — shared with InvitesService below
   // -------------------------------------------------------------------------
 
-  async requireMembership(workspaceId: string, userId: string): Promise<WorkspaceMember> {
-    const membership = await this.prisma.workspaceMember.findUnique({
+  /** `client` defaults to `this.prisma`; pass a `$transaction` callback's `tx` to read within that transaction. */
+  async requireMembership(
+    workspaceId: string,
+    userId: string,
+    client: PrismaOrTx = this.prisma,
+  ): Promise<WorkspaceMember> {
+    const membership = await client.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId, userId } },
     });
     if (!membership) {
@@ -117,8 +125,12 @@ export class WorkspacesService {
     return membership;
   }
 
-  async requireOwner(workspaceId: string, userId: string): Promise<WorkspaceMember> {
-    const membership = await this.requireMembership(workspaceId, userId);
+  async requireOwner(
+    workspaceId: string,
+    userId: string,
+    client: PrismaOrTx = this.prisma,
+  ): Promise<WorkspaceMember> {
+    const membership = await this.requireMembership(workspaceId, userId, client);
     if (membership.role !== WorkspaceRole.owner) {
       throw new ForbiddenException('Only a workspace owner can perform this action');
     }
@@ -126,20 +138,45 @@ export class WorkspacesService {
   }
 
   /**
+   * Row-locks every current `owner` membership for `workspaceId`
+   * (`SELECT ... FOR UPDATE`) so two concurrent last-owner-affecting
+   * operations against the SAME workspace properly serialize, rather than
+   * each independently observing a stale owner count and both committing
+   * (EVT-42 round-2 review, MAJOR — the previous non-transactional
+   * check-then-act let two concurrent demote/remove requests against a
+   * 2-owner workspace each read `ownerCount === 2` and both commit, leaving
+   * zero owners; a plain re-count inside a transaction is NOT sufficient on
+   * its own under Postgres's default READ COMMITTED isolation, because two
+   * concurrent statements updating DIFFERENT rows don't conflict with each
+   * other and each sees the other's write only after it commits — this is
+   * the classic write-skew anomaly. Explicitly locking the `owner` rows
+   * first forces the second transaction to block until the first commits,
+   * then re-evaluate against the now-current state). MUST be called first,
+   * inside the same `$transaction` `tx`, before computing `ownerCount`.
+   */
+  private async lockOwnerRows(tx: Prisma.TransactionClient, workspaceId: string): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM "WorkspaceMember" WHERE "workspaceId" = ${workspaceId}::uuid AND role = 'owner' FOR UPDATE`;
+  }
+
+  /**
    * Guards against removing/demoting the LAST owner of a workspace (AC3) —
    * a workspace with zero owners can never again be administered.
    * `transferOwnership` (promoting a co-owner first) is the only way past
    * this once it applies. No-op when `currentRole` isn't `owner` — demoting
-   * a plain member/viewer never reduces the owner count.
+   * a plain member/viewer never reduces the owner count. MUST be called
+   * inside a `$transaction`, passing that transaction's `tx` — see
+   * `lockOwnerRows`'s doc comment for why.
    */
   private async assertSafeToRemoveOwner(
+    tx: Prisma.TransactionClient,
     workspaceId: string,
     currentRole: WorkspaceRole,
   ): Promise<void> {
     if (currentRole !== WorkspaceRole.owner) {
       return;
     }
-    const ownerCount = await this.prisma.workspaceMember.count({
+    await this.lockOwnerRows(tx, workspaceId);
+    const ownerCount = await tx.workspaceMember.count({
       where: { workspaceId, role: WorkspaceRole.owner },
     });
     if (ownerCount <= 1) {
@@ -219,7 +256,10 @@ export class WorkspacesService {
    * Changes an existing member's role between `member` and `viewer` (AC4) —
    * `UpdateMemberRoleDto` validation makes `owner` unreachable here, so this
    * ALSO covers demoting a co-owner down to member/viewer, subject to the
-   * last-owner guard. Owner-only.
+   * last-owner guard. Owner-only. Runs entirely inside one `$transaction` —
+   * see `assertSafeToRemoveOwner`'s doc comment for why the owner-count
+   * check and the mutation must share a transaction (EVT-42 round-2 review,
+   * MAJOR).
    */
   async changeRole(
     workspaceId: string,
@@ -227,22 +267,24 @@ export class WorkspacesService {
     newRole: WorkspaceRole,
     actorId: string,
   ): Promise<MemberSummary> {
-    await this.requireOwner(workspaceId, actorId);
-    const target = await this.prisma.workspaceMember.findUnique({
-      where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
-      include: { user: MEMBER_USER_SELECT },
-    });
-    if (!target) {
-      throw new NotFoundException('Member not found');
-    }
-    await this.assertSafeToRemoveOwner(workspaceId, target.role);
+    return this.prisma.$transaction(async (tx) => {
+      await this.requireOwner(workspaceId, actorId, tx);
+      const target = await tx.workspaceMember.findUnique({
+        where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
+        include: { user: MEMBER_USER_SELECT },
+      });
+      if (!target) {
+        throw new NotFoundException('Member not found');
+      }
+      await this.assertSafeToRemoveOwner(tx, workspaceId, target.role);
 
-    const updated = await this.prisma.workspaceMember.update({
-      where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
-      data: { role: newRole },
-      include: { user: MEMBER_USER_SELECT },
+      const updated = await tx.workspaceMember.update({
+        where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
+        data: { role: newRole },
+        include: { user: MEMBER_USER_SELECT },
+      });
+      return toMemberSummary(updated);
     });
-    return toMemberSummary(updated);
   }
 
   /**
@@ -282,27 +324,31 @@ export class WorkspacesService {
    * Removes a member from a workspace — an owner removing someone else, OR
    * a member/viewer/owner removing themselves ("leave"). Non-owner callers
    * may only target themselves (403 otherwise). Guarded against removing
-   * the last owner (AC3), same rule as `changeRole`.
+   * the last owner (AC3), same rule as `changeRole`. Runs entirely inside
+   * one `$transaction` — see `assertSafeToRemoveOwner`'s doc comment
+   * (EVT-42 round-2 review, MAJOR).
    */
   async removeMember(workspaceId: string, targetUserId: string, actorId: string): Promise<void> {
-    const actorMembership = await this.requireMembership(workspaceId, actorId);
-    const isSelf = targetUserId === actorId;
-    if (!isSelf && actorMembership.role !== WorkspaceRole.owner) {
-      throw new ForbiddenException('Only a workspace owner can remove another member');
-    }
+    await this.prisma.$transaction(async (tx) => {
+      const actorMembership = await this.requireMembership(workspaceId, actorId, tx);
+      const isSelf = targetUserId === actorId;
+      if (!isSelf && actorMembership.role !== WorkspaceRole.owner) {
+        throw new ForbiddenException('Only a workspace owner can remove another member');
+      }
 
-    const target = isSelf
-      ? actorMembership
-      : await this.prisma.workspaceMember.findUnique({
-          where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
-        });
-    if (!target) {
-      throw new NotFoundException('Member not found');
-    }
-    await this.assertSafeToRemoveOwner(workspaceId, target.role);
+      const target = isSelf
+        ? actorMembership
+        : await tx.workspaceMember.findUnique({
+            where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
+          });
+      if (!target) {
+        throw new NotFoundException('Member not found');
+      }
+      await this.assertSafeToRemoveOwner(tx, workspaceId, target.role);
 
-    await this.prisma.workspaceMember.delete({
-      where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
+      await tx.workspaceMember.delete({
+        where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
+      });
     });
   }
 }

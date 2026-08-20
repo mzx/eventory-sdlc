@@ -151,12 +151,27 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
       await member.patch(`/api/workspaces/${ws.body.id}`).send({ name: 'Hijacked' }).expect(403);
     });
 
-    it('a non-member gets 404 (does not confirm the workspace exists)', async () => {
+    it('EVT-42 round-2 (fail-closed): a TOTAL stranger (zero memberships anywhere) gets 403 from WorkspaceContextGuard before ever reaching the handler', async () => {
       const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
       const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
       const stranger = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
 
-      await stranger.patch(`/api/workspaces/${ws.body.id}`).send({ name: 'Hijacked' }).expect(404);
+      await stranger.patch(`/api/workspaces/${ws.body.id}`).send({ name: 'Hijacked' }).expect(403);
+    });
+
+    it('a member of a DIFFERENT workspace gets 404 targeting a foreign workspace (does not confirm existence)', async () => {
+      const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
+      const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
+      // Not a stranger — has SOME ambient workspace (their own), just not
+      // this one, so WorkspaceContextGuard resolves fine and the 404 comes
+      // from WorkspacesService.requireMembership as before.
+      const otherOwner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
+      await otherOwner.post('/api/workspaces').send({ name: 'Shed' });
+
+      await otherOwner
+        .patch(`/api/workspaces/${ws.body.id}`)
+        .send({ name: 'Hijacked' })
+        .expect(404);
     });
   });
 
@@ -180,7 +195,8 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
       const inviteeHttp = wrapWithCookie(app, authService, invitee);
 
       const redeemRes = await inviteeHttp
-        .post(`/api/invites/${inviteRes.body.token}/redeem`)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
         .expect(201);
       expect(redeemRes.body).toEqual({ workspaceId: ws.body.id, role: WorkspaceRole.member });
 
@@ -199,7 +215,10 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
 
       const invitee = await authService.upsertFromGoogleProfile(makeProfile());
       const inviteeHttp = wrapWithCookie(app, authService, invitee);
-      await inviteeHttp.post(`/api/invites/${inviteRes.body.token}/redeem`).expect(409);
+      await inviteeHttp
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
+        .expect(409);
     });
 
     it('single-use: a second redemption of the same token 409s', async () => {
@@ -209,12 +228,14 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
 
       const firstInvitee = await authService.upsertFromGoogleProfile(makeProfile());
       await wrapWithCookie(app, authService, firstInvitee)
-        .post(`/api/invites/${inviteRes.body.token}/redeem`)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
         .expect(201);
 
       const secondInvitee = await authService.upsertFromGoogleProfile(makeProfile());
       await wrapWithCookie(app, authService, secondInvitee)
-        .post(`/api/invites/${inviteRes.body.token}/redeem`)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
         .expect(409);
     });
 
@@ -230,14 +251,16 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
 
       const invitee = await authService.upsertFromGoogleProfile(makeProfile());
       await wrapWithCookie(app, authService, invitee)
-        .post(`/api/invites/${inviteRes.body.token}/redeem`)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
         .expect(409);
     });
 
     it('an unknown token 404s', async () => {
       const invitee = await authService.upsertFromGoogleProfile(makeProfile());
       await wrapWithCookie(app, authService, invitee)
-        .post('/api/invites/not-a-real-token/redeem')
+        .post('/api/invites/redeem')
+        .send({ token: 'not-a-real-token' })
         .expect(404);
     });
 
@@ -347,7 +370,8 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
       const invitee = await authService.upsertFromGoogleProfile(makeProfile());
       const inviteeHttp = wrapWithCookie(app, authService, invitee);
       const redeemRes = await inviteeHttp
-        .post(`/api/invites/${inviteRes.body.token}/redeem`)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
         .expect(201);
       expect(redeemRes.body.role).toBe(WorkspaceRole.viewer);
 
@@ -403,7 +427,8 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
 
       const invitee = await authService.upsertFromGoogleProfile(makeProfile());
       await wrapWithCookie(app, authService, invitee)
-        .post(`/api/invites/${inviteRes.body.token}/redeem`)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
         .expect(201);
     });
 
@@ -412,6 +437,66 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
       const http = wrapWithCookie(app, authService, user);
 
       await http.get('/api/items').expect(403);
+    });
+
+    // -------------------------------------------------------------------
+    // EVT-42 round-2 security review, CRITICAL — the fail-closed
+    // WorkspaceContextGuard fix must hold even for controllers that
+    // declare ZERO `@CurrentWorkspace()` routes of their own
+    // (LocationsController/CategoriesController/ProjectsController/
+    // ShoppingListController — EVT-41's still-unlanded scoping work). Before
+    // the fix, a zero-membership caller reached these handlers regardless
+    // (`request.workspace = null` but the guard still returned `true`); the
+    // concrete attack was a throwaway Google account dumping every
+    // workspace's locations/categories/projects/shopping-list, reads AND
+    // writes, with zero allowlisting required.
+    // -------------------------------------------------------------------
+
+    it('EVT-42 round-2 (CRITICAL): a zero-membership user is blocked (403) from locations, categories, projects, and shopping-list — reads AND writes', async () => {
+      const user = await authService.upsertFromGoogleProfile(makeProfile());
+      const http = wrapWithCookie(app, authService, user);
+
+      await http.get('/api/locations').expect(403);
+      await http.post('/api/locations').send({ name: 'Garage' }).expect(403);
+
+      await http.get('/api/categories').expect(403);
+      await http.post('/api/categories').send({ name: 'Tools' }).expect(403);
+
+      await http.get('/api/projects').expect(403);
+      await http.post('/api/projects').send({ name: 'Deck build' }).expect(403);
+
+      await http.get('/api/shopping-list').expect(403);
+      await http.post('/api/shopping-list').send({}).expect(403);
+    });
+
+    it('EVT-42 round-2: workspace-create, invite-redeem, and /auth/me all still work for the SAME zero-membership user', async () => {
+      const user = await authService.upsertFromGoogleProfile(makeProfile());
+      const http = wrapWithCookie(app, authService, user);
+
+      await http.get('/api/auth/me').expect(200);
+
+      const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
+      const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
+      const inviteRes = await owner.post(`/api/workspaces/${ws.body.id}/invites`).send({});
+
+      await http.post('/api/invites/redeem').send({ token: inviteRes.body.token }).expect(201);
+
+      // Also still able to create their OWN workspace independently.
+      const secondUser = await authService.upsertFromGoogleProfile(makeProfile());
+      await wrapWithCookie(app, authService, secondUser)
+        .post('/api/workspaces')
+        .send({ name: 'Second User Workspace' })
+        .expect(201);
+    });
+
+    it('EVT-42 round-2: GET /api/items/by-qr/:qr stays neutral (404, not 403) for a zero-membership caller — @AllowMissingWorkspace()', async () => {
+      const user = await authService.upsertFromGoogleProfile(makeProfile());
+      const http = wrapWithCookie(app, authService, user);
+
+      // A zero-membership caller must get the SAME neutral 404 an unknown
+      // token gets — a 403 here would additionally reveal "you have no
+      // workspace at all", a distinction the scan-landing route must not leak.
+      await http.get('/api/items/by-qr/some-unknown-qr-token').expect(404);
     });
   });
 

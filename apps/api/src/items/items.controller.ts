@@ -23,7 +23,11 @@ import { uploadThrottlerConfig } from '../common/throttle.config';
 import { PayloadTooLargeFilter } from '../photos/photo-upload.helpers';
 import { ListMovementsQueryDto } from '../stock-movements/list-movements-query.dto';
 import { StockMovementsService } from '../stock-movements/stock-movements.service';
-import { CurrentWorkspace, WorkspaceContext } from '../workspace/workspace-context';
+import {
+  AllowMissingWorkspace,
+  CurrentWorkspace,
+  WorkspaceContext,
+} from '../workspace/workspace-context';
 import { WorkspaceWriteGuard } from '../workspace/workspace-write.guard';
 import { CreateItemDto } from './create-item.dto';
 import { ItemsService } from './items.service';
@@ -68,7 +72,14 @@ export class ItemsController {
    *
    * NOTE: This route MUST be declared before `/:id` so NestJS doesn't
    * treat "by-qr" as a UUID and route it to `findById`.
+   *
+   * `@AllowMissingWorkspace()` (EVT-42 round-2 security review, CRITICAL
+   * fail-closed fix) — a zero-membership caller must still reach this
+   * handler and get the same neutral 404 as an unknown token, not a 403
+   * from `WorkspaceContextGuard` that would reveal they have no workspace
+   * at all.
    */
+  @AllowMissingWorkspace()
   @Get('by-qr/:qr')
   findByQr(@Param('qr') qr: string, @CurrentUser() user: AuthenticatedUser) {
     return this.itemsService.findByQr(qr, user.id);
