@@ -94,10 +94,14 @@ export function checkFreshness(filenames, now, maxAgeDays = 2) {
 
 /**
  * Mirrors the selection semantics of `find <dir> -mtime +N -delete`: an item
- * is a prune candidate once its age exceeds N whole days. Used by
- * fetch-backups.sh's local mirror is a documented behavioral reference for
- * the same choice made in bash by scripts/prod-backup.sh (see
- * scripts/prod-backup-script.test.mjs).
+ * is a prune candidate once its age exceeds N whole days. Not called from
+ * any script directly — bash's `find -mtime` does the real pruning in both
+ * scripts/prod-backup.sh (VM side) and scripts/fetch-backups.sh (local
+ * mirror side). This is a tested, executable behavioral reference for that
+ * bash semantics, so a future change to the pruning rule has a Node-side
+ * assertion to update in lockstep rather than only living in shell (see
+ * scripts/prod-backup-script.test.mjs, which asserts on the shell script's
+ * text).
  * @param {{name: string, ageDays: number}[]} entries
  * @param {number} retentionDays
  * @returns {string[]} names of entries older than retentionDays
@@ -107,8 +111,11 @@ export function selectPruneCandidates(entries, retentionDays) {
 }
 
 /**
- * Argument validation shared by any caller that accepts a retention-days
- * knob (BACKUP_RETENTION_DAYS / LOCAL_RETENTION_DAYS env vars).
+ * Argument validation shared by any caller that accepts a "number of days"
+ * knob — both the retention-days env vars (BACKUP_RETENTION_DAYS /
+ * LOCAL_RETENTION_DAYS) and the freshness CLI's maxAgeDays argument below
+ * (MAX_AGE_DAYS_WARN) share the same "positive integer number of days"
+ * shape, so both validate through this one function.
  * @param {string|number|undefined} input
  * @param {number} fallback
  * @returns {number}
@@ -132,6 +139,21 @@ async function runCli(argv) {
   if (cmd !== 'freshness' || !dir) {
     console.error('usage: node scripts/backup-lib.mjs freshness <dir> [maxAgeDays]');
     process.exit(2);
+    return;
+  }
+  // Validate the threshold BEFORE trusting it: `ageDays > NaN` is always
+  // false, so a garbage MAX_AGE_DAYS_WARN (e.g. a typo'd env var) would
+  // otherwise make checkFreshness() report "not stale" forever and this
+  // alerting path would fail open silently.
+  let maxAgeDays;
+  try {
+    maxAgeDays = validateRetentionDays(maxAgeDaysArg, 2);
+  } catch (err) {
+    console.error(
+      `usage: node scripts/backup-lib.mjs freshness <dir> [maxAgeDays] — ${err.message}`,
+    );
+    process.exit(2);
+    return;
   }
   const { readdirSync } = await import('node:fs');
   let filenames;
@@ -142,7 +164,6 @@ async function runCli(argv) {
     process.exit(1);
     return;
   }
-  const maxAgeDays = maxAgeDaysArg ? Number(maxAgeDaysArg) : 2;
   const result = checkFreshness(filenames, new Date(), maxAgeDays);
   if (!result.ok) {
     console.error(`WARNING: ${result.reason} in "${dir}"`);

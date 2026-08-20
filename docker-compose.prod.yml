@@ -79,6 +79,17 @@ services:
 
 volumes:
   eventory-db-data:
+  # Pinned to the literal name (rather than left to Compose's default
+  # `<project>_eventory-photo-storage` prefixing) because scripts/prod-backup.sh
+  # and the restore runbook (docs/operations/backups.md) both reach this
+  # volume via a bare `docker run -v eventory-photo-storage:...` — a
+  # project-unaware command that would otherwise silently create and tar an
+  # empty phantom volume every night (EVT-33 review round 2, finding 1).
+  # ONE-TIME MIGRATION for the already-deployed VM: see "One-time volume
+  # migration (existing VM only)" in docs/operations/backups.md before the
+  # next `./deploy.sh` — the data currently lives under the old prefixed
+  # name.
   eventory-photo-storage:
+    name: eventory-photo-storage
   eventory-caddy-data:
   eventory-caddy-config:

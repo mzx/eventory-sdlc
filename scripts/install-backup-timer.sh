@@ -56,7 +56,7 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now eventory-backup.timer
 
-echo "==> Installed. Nightly backup runs ~03:15 (+/- 5m jitter), Persistent=true (catches up on next boot if missed)."
+echo "==> Installed. Nightly backup runs ~03:15 (0-5m random delay), Persistent=true (catches up on next boot if missed)."
 echo "==> Check status:   systemctl status eventory-backup.timer"
 echo "==> Check history:  journalctl -u eventory-backup.service --since '2 days ago'"
 echo "==> Run once now:   systemctl start eventory-backup.service"

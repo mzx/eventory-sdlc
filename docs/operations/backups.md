@@ -16,7 +16,9 @@ fat-fingered `docker volume rm` was irreversible total data loss.
 ### On the VM: nightly dump + tar + rotation
 
 `scripts/prod-backup.sh` (installed as a systemd timer, see below) runs once
-a night at `/opt/eventory` and produces, into `/opt/eventory/backups/`:
+a night at `/opt/eventory` and produces, into `/var/backups/eventory/`
+(deliberately **outside** `/opt/eventory` — see "Why BACKUP_DIR lives outside
+the deploy tree" below):
 
 - `eventory-db-<UTC timestamp>.dump` — a `pg_dump --format=custom` of the
   `eventory` database, taken via `docker compose exec db pg_dump …` so the
@@ -25,25 +27,58 @@ a night at `/opt/eventory` and produces, into `/opt/eventory/backups/`:
   `pg_dump` can silently produce a dump the same server's `pg_restore`
   rejects).
 - `eventory-photos-<UTC timestamp>.tar.gz` — a tar of the
-  `eventory-photo-storage` named volume, taken via a throwaway `alpine`
-  container mounting the volume read-only (no need to know the volume's
+  `eventory-photo-storage` named volume, taken via a throwaway `postgres:16`
+  container (already pinned, already vetted as the `db` service's own image,
+  ships `tar`/`gzip` — no separate unpinned `alpine:latest` running as root
+  nightly) mounting the volume read-only (no need to know the volume's
   on-disk path). Uploads in flight during the nightly window are accepted
   for nightly home use — a photo mid-upload may be truncated or missing in
   that night's tar, but the *next* night's backup will have it.
-- Both artifacts are written to a `.tmp` path and atomically `mv`'d into
-  place, and each is checked non-empty, **before** rotation or the success
-  marker run — a failed dump never displaces the last good backup, and never
+- Both artifacts are written to a `.tmp` path and checked non-empty **before**
+  the atomic `mv` into their final name, and before rotation or the success
+  marker run — a failed/empty dump never displaces the last good backup
+  under its final name, is never synced by `fetch-backups.sh`, and never
   produces a fresh-looking success marker.
+- **Permissions**: the script runs under `umask 077`, `BACKUP_DIR` is
+  `chmod 700`, and every artifact (dump, tar, `last-success.txt`) ends up
+  `chmod 600` — the DB dump contains every user's email + OAuth id and the
+  photo tar is the operator's full inventory; nothing here should be
+  world-readable to any other local account on the VM. The photo tar is
+  produced *inside* a container process, whose own umask the host's `umask
+  077` cannot reach, so `umask 077` is set explicitly inside that container's
+  command too.
 - **Rotation**: `find … -mtime +N -delete` prunes dumps/tars older than
   `BACKUP_RETENTION_DAYS` (default **14**).
 - **Success marker**: `backups/last-success.txt`, an ISO-8601 UTC timestamp,
   written only after both artifacts are confirmed non-empty.
 
-No credentials are embedded in the script — `POSTGRES_USER` / `POSTGRES_DB`
-are read from the VM's existing `.env.prod`, and `pg_dump` authenticates
-over Postgres's trusted local socket inside the container (same mechanism
-`deploy.sh` already uses for its password-sync step) — `POSTGRES_PASSWORD`
-is never read or logged.
+No credentials are embedded in the script, and none are sourced into its
+process environment either — `POSTGRES_USER` / `POSTGRES_DB` are pulled from
+the VM's existing `.env.prod` with a targeted `grep`, not by sourcing the
+whole file (which would otherwise export `POSTGRES_PASSWORD`, `JWT_SECRET`,
+`GOOGLE_CLIENT_SECRET`, etc. into this process for no reason). `pg_dump`
+authenticates over Postgres's trusted local socket inside the container
+(same mechanism `deploy.sh` already uses for its password-sync step) —
+`POSTGRES_PASSWORD` is never read or logged.
+
+### Why BACKUP_DIR lives outside the deploy tree
+
+`deploy.sh`'s on-VM clean-tree step
+(`find . -mindepth 1 -maxdepth 1 ! -name .env.prod ! -name eventory.tar.gz
+-exec rm -rf {} +`) deletes **everything** under `/opt/eventory` on every
+`./deploy.sh` run, to make sure files removed from the repo don't linger and
+poison the Docker build. If `BACKUP_DIR` lived under `/opt/eventory` (e.g.
+the original `/opt/eventory/backups`), every deploy would silently delete
+the entire on-VM backup history — precisely in the post-deploy window a
+restore is most likely to be needed, and with no local signal that it
+happened (the Mac-side `fetch-backups.sh` staleness check only notices once
+the *next* fetch runs, and even then only if a fetch has never yet
+completed since).
+
+The fix is to default `BACKUP_DIR` to `/var/backups/eventory`, entirely
+outside anything `deploy.sh` touches — the primary defense against this
+class of bug. `scripts/fetch-backups.sh`'s `REMOTE_BACKUP_DIR` default was
+updated to match.
 
 **Install the timer once**, on the VM, after a normal `./deploy.sh`:
 
@@ -71,7 +106,7 @@ Re-run `install-backup-timer.sh` any time after a `deploy.sh` update to
 
 `scripts/fetch-backups.sh` runs on the operator's Mac and:
 
-1. `rsync`s `/opt/eventory/backups/` down to `~/eventory-backups/` over the
+1. `rsync`s `/var/backups/eventory/` down to `~/eventory-backups/` over the
    same key-auth SSH `deploy.sh` already uses (no new credentials, no
    object-storage account to manage). This was picked over S3-compatible
    object storage and Vultr snapshots as the simplest reliable mechanism for
@@ -95,6 +130,60 @@ Run it manually, or schedule it (cron, or a `launchd` agent) on the Mac:
 ```bash
 ./scripts/fetch-backups.sh
 ```
+
+## One-time volume migration (existing VM only)
+
+`docker-compose.prod.yml`'s `eventory-photo-storage` volume now has an
+explicit `name: eventory-photo-storage` (EVT-33 review round 2, finding 1):
+without it, Compose names the actual on-disk volume
+`<project>_eventory-photo-storage` (project = the basename of `APP_DIR`,
+i.e. `eventory` for `/opt/eventory`), but `scripts/prod-backup.sh` and this
+runbook's restore commands both reach the volume via a bare
+`docker run -v eventory-photo-storage:...` — a command that has no idea
+about Compose's project prefixing. Without the pin, that `docker run` would
+silently create and tar a brand-new **empty** volume literally named
+`eventory-photo-storage` every night — every nightly photos backup would
+contain zero real photos, while still reporting success (a non-empty tar of
+an empty directory still passes the `[[ -s ]]` check).
+
+**If you have already deployed before this fix**, your real photos live in
+the *old* prefixed volume (`eventory_eventory-photo-storage`), and pinning
+the name in compose means the *next* `./deploy.sh` will look for (and, if
+missing, silently create empty) the unprefixed `eventory-photo-storage`
+volume instead. Run this **once**, on the VM, **before** your next
+`./deploy.sh`, to copy the data across to the name Compose will use going
+forward:
+
+```bash
+ssh root@<vm-ip>
+# 1. Confirm the old volume exists and has the data you expect:
+docker volume ls | grep eventory-photo-storage
+docker run --rm -v eventory_eventory-photo-storage:/data:ro alpine sh -c 'ls /data | wc -l'
+
+# 2. Create the new pinned-name volume and copy everything across:
+docker volume create eventory-photo-storage
+docker run --rm \
+  -v eventory_eventory-photo-storage:/from:ro \
+  -v eventory-photo-storage:/to \
+  alpine sh -c 'cp -a /from/. /to/'
+
+# 3. Verify the copy is complete and byte-identical:
+docker run --rm \
+  -v eventory_eventory-photo-storage:/from:ro \
+  -v eventory-photo-storage:/to:ro \
+  alpine sh -c 'diff -rq /from /to && echo IDENTICAL'
+
+# 4. Only after step 3 prints IDENTICAL, proceed with the normal
+#    ./deploy.sh — Compose will now attach the already-populated
+#    eventory-photo-storage volume (it won't recreate it; Docker volumes
+#    are created only if the name doesn't already exist). Leave the old
+#    eventory_eventory-photo-storage volume in place for a few days as a
+#    safety net before removing it manually.
+```
+
+If this is a **fresh** VM with nothing deployed yet, skip this section
+entirely — `./deploy.sh` will create `eventory-photo-storage` under its
+pinned name from the start, with nothing to migrate.
 
 ## Restore runbook
 
@@ -128,20 +217,31 @@ backups sitting in `~/eventory-backups/` on your Mac (from `fetch-backups.sh`).
 #    docker-compose.prod.yml ps` on the VM to confirm `db` shows healthy).
 
 # 3. From your Mac, copy the backup files up (or SCP them from wherever the
-#    off-VM copy lives) and pipe the restore straight into the db container:
-scp ~/eventory-backups/eventory-db-<TIMESTAMP>.dump root@<vm-ip>:/tmp/
+#    off-VM copy lives) into a 0700 staging dir on the VM — NOT /tmp, which
+#    is world-readable and these files contain every user's email/OAuth id:
+ssh root@<vm-ip> 'mkdir -p -m 700 /root/eventory-restore'
+scp ~/eventory-backups/eventory-db-<TIMESTAMP>.dump root@<vm-ip>:/root/eventory-restore/
 ssh root@<vm-ip>
 cd /opt/eventory
 docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-  pg_restore -U eventory -d eventory --clean --if-exists < /tmp/eventory-db-<TIMESTAMP>.dump
-rm /tmp/eventory-db-<TIMESTAMP>.dump
+  pg_restore -U eventory -d eventory --clean --if-exists < /root/eventory-restore/eventory-db-<TIMESTAMP>.dump
+rm /root/eventory-restore/eventory-db-<TIMESTAMP>.dump
 
-# 4. Restore photos into the (empty) eventory-photo-storage volume:
-scp ~/eventory-backups/eventory-photos-<TIMESTAMP>.tar.gz root@<vm-ip>:/tmp/
+# 4. Restore photos into the (empty) eventory-photo-storage volume. Verify
+#    the archive with `tar tzf` BEFORE `rm -rf`-ing the target — an empty or
+#    corrupt TIMESTAMP/archive must never wipe the only copy of the data
+#    without extracting first:
+scp ~/eventory-backups/eventory-photos-<TIMESTAMP>.tar.gz root@<vm-ip>:/root/eventory-restore/
 ssh root@<vm-ip> '
-  docker run --rm -v eventory-photo-storage:/data -v /tmp:/backup \
-    alpine sh -c "rm -rf /data/* && tar xzf /backup/eventory-photos-<TIMESTAMP>.tar.gz -C /data" &&
-  rm /tmp/eventory-photos-<TIMESTAMP>.tar.gz
+  TIMESTAMP=<TIMESTAMP>
+  [ -n "$TIMESTAMP" ] || { echo "ERROR: TIMESTAMP not set" >&2; exit 1; }
+  ARCHIVE="/root/eventory-restore/eventory-photos-${TIMESTAMP}.tar.gz"
+  [ -s "$ARCHIVE" ] || { echo "ERROR: $ARCHIVE missing or empty" >&2; exit 1; }
+  docker run --rm -v "$ARCHIVE":/backup.tar.gz:ro postgres:16 tar tzf /backup.tar.gz >/dev/null ||
+    { echo "ERROR: $ARCHIVE failed tar integrity check — not touching the volume" >&2; exit 1; }
+  docker run --rm -v eventory-photo-storage:/data -v "$ARCHIVE":/backup.tar.gz:ro \
+    postgres:16 sh -c "rm -rf /data/* && tar xzf /backup.tar.gz -C /data" &&
+  rm "$ARCHIVE"
 '
 
 # 5. Restart api so it picks up the restored data with a clean connection:
@@ -156,7 +256,7 @@ ssh root@<vm-ip> 'cd /opt/eventory && docker compose -f docker-compose.prod.yml 
 
 Starting point: the VM and its containers are up, but the data is wrong
 (bad migration, accidental delete, corruption) and you want to roll back to
-last night's backup. Uses the backup already sitting in `/opt/eventory/backups/`
+last night's backup. Uses the backup already sitting in `/var/backups/eventory/`
 on the VM — no network transfer needed.
 
 ```bash
@@ -166,19 +266,30 @@ cd /opt/eventory
 # 1. Stop api so nothing writes to the db mid-restore:
 docker compose -f docker-compose.prod.yml stop api
 
-# 2. Find the backup you want (or use the newest):
-ls -la backups/eventory-db-*.dump
+# 2. Find the backup you want (or use the newest). Backups live in
+#    BACKUP_DIR (default /var/backups/eventory — see "Why BACKUP_DIR lives
+#    outside the deploy tree" above), NOT under /opt/eventory:
+ls -la /var/backups/eventory/eventory-db-*.dump
 TIMESTAMP=<pick one, e.g. 20260820T031500Z>
+[ -n "$TIMESTAMP" ] || { echo "ERROR: TIMESTAMP not set" >&2; exit 1; }
 
 # 3. Restore (--clean --if-exists: drops+recreates existing objects,
 #    --if-exists suppresses noisy-but-harmless "does not exist" errors):
+DUMP="/var/backups/eventory/eventory-db-${TIMESTAMP}.dump"
+[ -s "$DUMP" ] || { echo "ERROR: $DUMP missing or empty" >&2; exit 1; }
 docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
-  pg_restore -U eventory -d eventory --clean --if-exists < "backups/eventory-db-${TIMESTAMP}.dump"
+  pg_restore -U eventory -d eventory --clean --if-exists < "$DUMP"
 
-# 4. Same idea for photos, if that volume is also affected:
-docker run --rm -v eventory-photo-storage:/data \
-  -v "$(pwd)/backups":/backup:ro \
-  alpine sh -c "rm -rf /data/* && tar xzf /backup/eventory-photos-${TIMESTAMP}.tar.gz -C /data"
+# 4. Same idea for photos, if that volume is also affected. Verify the
+#    archive with `tar tzf` BEFORE `rm -rf`-ing the target — an empty or
+#    corrupt TIMESTAMP/archive must never wipe the only copy of the data
+#    without extracting first:
+ARCHIVE="/var/backups/eventory/eventory-photos-${TIMESTAMP}.tar.gz"
+[ -s "$ARCHIVE" ] || { echo "ERROR: $ARCHIVE missing or empty" >&2; exit 1; }
+docker run --rm -v "$ARCHIVE":/backup.tar.gz:ro postgres:16 tar tzf /backup.tar.gz >/dev/null ||
+  { echo "ERROR: $ARCHIVE failed tar integrity check — not touching the volume" >&2; exit 1; }
+docker run --rm -v eventory-photo-storage:/data -v "$ARCHIVE":/backup.tar.gz:ro \
+  postgres:16 sh -c "rm -rf /data/* && tar xzf /backup.tar.gz -C /data"
 
 # 5. Bring api back up and verify:
 docker compose -f docker-compose.prod.yml start api
@@ -205,14 +316,45 @@ EVT-33 PR description; summary:
 5. Verified: `SELECT count(*) FROM items` → 4, and every row's content
    matched the source exactly.
 6. Repeated the same shape for photos: populated a throwaway named volume
-   with sample files, tarred it via the exact alpine-container command
-   `prod-backup.sh` uses, restored into a second fresh volume via this
-   runbook's tar-extract command, and `diff -r`'d source vs restored — `IDENTICAL`.
+   with sample files, tarred it via the exact `postgres:16`-container
+   command `prod-backup.sh` uses (including the `umask 077` set inside the
+   container and the positional-arg archive name), restored into a second
+   fresh volume via this runbook's tar-extract command, and `diff -r`'d
+   source vs restored — `IDENTICAL`.
 7. Exercised `node scripts/backup-lib.mjs freshness <dir> 2` against both a
    fresh dump (reported OK, exit 0) and a synthetic 2020-dated filename
    (reported `WARNING: … 2423.0 days old …`, exit 1) — confirms AC5's
    staleness warning fires correctly.
 8. Tore down all throwaway containers/volumes/scratch files.
+
+**Round-2 re-verification (review findings 1-8):** re-exercised after the
+volume-name-pinning + permissions-hardening + image-pinning fixes above,
+against throwaway resources only:
+- Simulated the existing-VM scenario: created a volume under the *old*
+  Compose-prefixed name (`eventory_eventory-photo-storage`) with sample
+  files, then ran exactly the "One-time volume migration" commands above
+  (`docker volume create` + `cp -a` copy + `diff -rq`) — reported
+  `IDENTICAL`, confirming the migration path is correct.
+- Ran the updated `prod-backup.sh` photos step (`postgres:16`, `umask 077`
+  inside the container, non-empty check on the `.tmp` file before `mv`)
+  against the newly-named `eventory-photo-storage` volume, confirmed the
+  resulting `.tar.gz` is `0600`, and confirmed a throwaway restore via this
+  runbook's updated tar-extract command (including the `tar tzf` integrity
+  check) round-trips byte-identical (`diff -r` → `IDENTICAL`).
+- Confirmed `chmod 700`/`chmod 600` land as expected on `BACKUP_DIR` and
+  both artifacts when the script is run with a scratch `BACKUP_DIR`.
+- Re-ran the full DB dump/restore round trip (fresh `postgres:16` seed
+  container → `.tmp`-file-non-empty-then-`mv` dump → second throwaway
+  `postgres:16` container → `pg_restore`) end to end: 4 seeded rows,
+  restored row count and content matched exactly.
+- Confirmed `. "$ENV_FILE"`'s replacement (`grep`-only extraction of
+  `POSTGRES_USER`/`POSTGRES_DB`) still resolves both values correctly
+  against a sample `.env.prod`-shaped file containing other secret keys,
+  and that those other keys are absent from the script's exported
+  environment.
+- Confirmed `node scripts/backup-lib.mjs freshness <dir> <garbage>` now
+  exits 2 with a usage error instead of silently defaulting to "not stale"
+  (finding 10).
 
 ## Known limitations (documented per the task's non-goals)
 
