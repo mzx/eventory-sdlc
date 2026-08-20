@@ -19,6 +19,8 @@ function makeLocation(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const WORKSPACE = { id: 'workspace-1', role: 'owner' } as never;
+
 // ─── LocationsController unit tests ────────────────────────────────────────
 
 describe('LocationsController', () => {
@@ -54,13 +56,13 @@ describe('LocationsController', () => {
   // ── findAll ──────────────────────────────────────────────────────────────
 
   describe('GET /locations (findAll)', () => {
-    it('delegates to LocationsService.findAll and returns the result', async () => {
+    it('delegates to LocationsService.findAll with the caller workspace and returns the result', async () => {
       const list = [makeLocation(), makeLocation({ id: 'loc-2', path: 'garage.shelf' })];
       serviceMock.findAll.mockResolvedValue(list);
 
-      const result = await controller.findAll();
+      const result = await controller.findAll(WORKSPACE);
 
-      expect(serviceMock.findAll).toHaveBeenCalledTimes(1);
+      expect(serviceMock.findAll).toHaveBeenCalledWith('workspace-1');
       expect(result).toBe(list);
     });
   });
@@ -68,7 +70,7 @@ describe('LocationsController', () => {
   // ── findOne ──────────────────────────────────────────────────────────────
 
   describe('GET /locations/:id (findOne)', () => {
-    it('delegates to LocationsService.findOne with the location id', async () => {
+    it('delegates to LocationsService.findOne with the location id and caller workspace', async () => {
       const detail = {
         ...makeLocation(),
         notes: null,
@@ -78,9 +80,9 @@ describe('LocationsController', () => {
       };
       serviceMock.findOne.mockResolvedValue(detail);
 
-      const result = await controller.findOne('loc-1');
+      const result = await controller.findOne('loc-1', WORKSPACE);
 
-      expect(serviceMock.findOne).toHaveBeenCalledWith('loc-1');
+      expect(serviceMock.findOne).toHaveBeenCalledWith('loc-1', 'workspace-1');
       expect(result).toBe(detail);
     });
   });
@@ -88,14 +90,14 @@ describe('LocationsController', () => {
   // ── create ────────────────────────────────────────────────────────────────
 
   describe('POST /locations (create)', () => {
-    it('delegates to LocationsService.create with the body', async () => {
+    it('delegates to LocationsService.create with the body and caller workspace', async () => {
       const body = { name: 'Garage' };
       const created = makeLocation();
       serviceMock.create.mockResolvedValue(created);
 
-      const result = await controller.create(body);
+      const result = await controller.create(body, WORKSPACE);
 
-      expect(serviceMock.create).toHaveBeenCalledWith(body);
+      expect(serviceMock.create).toHaveBeenCalledWith(body, 'workspace-1');
       expect(result).toBe(created);
     });
 
@@ -104,9 +106,9 @@ describe('LocationsController', () => {
       const created = makeLocation({ id: 'loc-2', name: 'Shelf', path: 'garage.shelf' });
       serviceMock.create.mockResolvedValue(created);
 
-      const result = await controller.create(body);
+      const result = await controller.create(body, WORKSPACE);
 
-      expect(serviceMock.create).toHaveBeenCalledWith(body);
+      expect(serviceMock.create).toHaveBeenCalledWith(body, 'workspace-1');
       expect(result).toBe(created);
     });
   });
@@ -114,13 +116,13 @@ describe('LocationsController', () => {
   // ── rename ────────────────────────────────────────────────────────────────
 
   describe('PATCH /locations/:id (rename)', () => {
-    it('delegates to LocationsService.rename with id and new name', async () => {
+    it('delegates to LocationsService.rename with id, new name, and caller workspace', async () => {
       const updated = makeLocation({ name: 'Storage Room', path: 'storage-room' });
       serviceMock.rename.mockResolvedValue(updated);
 
-      const result = await controller.rename('loc-1', { name: 'Storage Room' });
+      const result = await controller.rename('loc-1', { name: 'Storage Room' }, WORKSPACE);
 
-      expect(serviceMock.rename).toHaveBeenCalledWith('loc-1', 'Storage Room');
+      expect(serviceMock.rename).toHaveBeenCalledWith('loc-1', 'Storage Room', 'workspace-1');
       expect(result).toBe(updated);
     });
   });
@@ -128,12 +130,12 @@ describe('LocationsController', () => {
   // ── remove ────────────────────────────────────────────────────────────────
 
   describe('DELETE /locations/:id (remove)', () => {
-    it('delegates to LocationsService.remove and returns void', async () => {
+    it('delegates to LocationsService.remove with the caller workspace and returns void', async () => {
       serviceMock.remove.mockResolvedValue(makeLocation());
 
-      await controller.remove('loc-1');
+      await controller.remove('loc-1', WORKSPACE);
 
-      expect(serviceMock.remove).toHaveBeenCalledWith('loc-1');
+      expect(serviceMock.remove).toHaveBeenCalledWith('loc-1', 'workspace-1');
     });
 
     it('HTTP status for remove is NO_CONTENT (204)', () => {
@@ -149,15 +151,23 @@ describe('LocationsController', () => {
   // ── move (EVT-30) ────────────────────────────────────────────────────────
 
   describe('POST /locations/:id/move (move)', () => {
-    it('delegates to LocationsService.moveContainer with id, toParentId, and the caller id', async () => {
+    it('delegates to LocationsService.moveContainer with id, toParentId, caller workspace, and the caller id', async () => {
       const moved = makeLocation({ id: 'box-1', kind: 'container', parentId: 'shelf-2' });
       serviceMock.moveContainer.mockResolvedValue(moved);
 
-      const result = await controller.move('box-1', { toParentId: 'shelf-2' }, {
-        id: 'user-1',
-      } as never);
+      const result = await controller.move(
+        'box-1',
+        { toParentId: 'shelf-2' },
+        { id: 'user-1' } as never,
+        WORKSPACE,
+      );
 
-      expect(serviceMock.moveContainer).toHaveBeenCalledWith('box-1', 'shelf-2', 'user-1');
+      expect(serviceMock.moveContainer).toHaveBeenCalledWith(
+        'box-1',
+        'shelf-2',
+        'workspace-1',
+        'user-1',
+      );
       expect(result).toBe(moved);
     });
 
@@ -165,32 +175,44 @@ describe('LocationsController', () => {
       const moved = makeLocation({ id: 'box-1', kind: 'container', parentId: null });
       serviceMock.moveContainer.mockResolvedValue(moved);
 
-      await controller.move('box-1', {}, { id: 'user-1' } as never);
+      await controller.move('box-1', {}, { id: 'user-1' } as never, WORKSPACE);
 
-      expect(serviceMock.moveContainer).toHaveBeenCalledWith('box-1', null, 'user-1');
+      expect(serviceMock.moveContainer).toHaveBeenCalledWith(
+        'box-1',
+        null,
+        'workspace-1',
+        'user-1',
+      );
     });
 
     it('passes undefined createdById when there is no authenticated user', async () => {
       serviceMock.moveContainer.mockResolvedValue(makeLocation());
 
-      await controller.move('box-1', { toParentId: 'shelf-2' }, null);
+      await controller.move('box-1', { toParentId: 'shelf-2' }, null, WORKSPACE);
 
-      expect(serviceMock.moveContainer).toHaveBeenCalledWith('box-1', 'shelf-2', undefined);
+      expect(serviceMock.moveContainer).toHaveBeenCalledWith(
+        'box-1',
+        'shelf-2',
+        'workspace-1',
+        undefined,
+      );
     });
   });
 
   // ── listMovements (EVT-30) ───────────────────────────────────────────────
 
   describe('GET /locations/:id/movements (listMovements)', () => {
-    it('delegates to StockMovementsService.listForContainer with id and query', async () => {
+    it('delegates to StockMovementsService.listForContainer with id, query, and caller workspace', async () => {
       const page = { data: [], page: 1, pageSize: 20, total: 0, totalPages: 1 };
       stockMovementsServiceMock.listForContainer.mockResolvedValue(page);
 
-      const result = await controller.listMovements('box-1', { page: 2 });
+      const result = await controller.listMovements('box-1', { page: 2 }, WORKSPACE);
 
-      expect(stockMovementsServiceMock.listForContainer).toHaveBeenCalledWith('box-1', {
-        page: 2,
-      });
+      expect(stockMovementsServiceMock.listForContainer).toHaveBeenCalledWith(
+        'box-1',
+        { page: 2 },
+        'workspace-1',
+      );
       expect(result).toBe(page);
     });
   });

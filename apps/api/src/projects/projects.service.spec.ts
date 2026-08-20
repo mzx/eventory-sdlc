@@ -7,6 +7,8 @@ import { ProjectsService } from './projects.service';
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
+const WORKSPACE_ID = 'workspace-1';
+
 function makeProject(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'project-1',
@@ -52,7 +54,7 @@ describe('ProjectsService', () => {
 
   const projectMock = {
     findMany: jest.fn(),
-    findUnique: jest.fn(),
+    findFirst: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
     delete: jest.fn(),
@@ -66,7 +68,7 @@ describe('ProjectsService', () => {
   };
 
   const itemMock = {
-    findUnique: jest.fn(),
+    findFirst: jest.fn(),
   };
 
   const stockMovementMock = {
@@ -111,6 +113,10 @@ describe('ProjectsService', () => {
     // Default: not already backflushed — most tests only care about this
     // when explicitly testing the idempotency guard.
     txStockMovementMock.count.mockResolvedValue(0);
+    // Default: `assertProjectExists` (EVT-41) resolves to a real project
+    // for every test that doesn't override it — most tests only care about
+    // the workspace-scoping check when explicitly testing it.
+    projectMock.findFirst.mockResolvedValue(makeProject());
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -126,13 +132,13 @@ describe('ProjectsService', () => {
   // ── list ──────────────────────────────────────────────────────────────────
 
   describe('list', () => {
-    it('returns projects annotated with lineCount from BOM line _count', async () => {
+    it('returns projects annotated with lineCount from BOM line _count, scoped to workspaceId', async () => {
       projectMock.findMany.mockResolvedValue([
         { ...makeProject(), _count: { bomLines: 3 } },
         { ...makeProject({ id: 'project-2' }), _count: { bomLines: 0 } },
       ]);
 
-      const result = await service.list({});
+      const result = await service.list({}, WORKSPACE_ID);
 
       expect(result).toHaveLength(2);
       expect(result[0]).toMatchObject({ id: 'project-1', lineCount: 3 });
@@ -141,22 +147,26 @@ describe('ProjectsService', () => {
       expect(result[0]).not.toHaveProperty('_count');
     });
 
-    it('filters by status when provided', async () => {
+    it('filters by status when provided, in addition to workspaceId', async () => {
       projectMock.findMany.mockResolvedValue([]);
 
-      await service.list({ status: 'in_progress' as never });
+      await service.list({ status: 'in_progress' as never }, WORKSPACE_ID);
 
       expect(projectMock.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { status: 'in_progress' } }),
+        expect.objectContaining({
+          where: { workspaceId: WORKSPACE_ID, status: 'in_progress' },
+        }),
       );
     });
 
-    it('applies no status filter when omitted', async () => {
+    it('applies no status filter when omitted, only workspaceId', async () => {
       projectMock.findMany.mockResolvedValue([]);
 
-      await service.list({});
+      await service.list({}, WORKSPACE_ID);
 
-      expect(projectMock.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+      expect(projectMock.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { workspaceId: WORKSPACE_ID } }),
+      );
     });
   });
 
@@ -174,9 +184,9 @@ describe('ProjectsService', () => {
           },
         ],
       };
-      projectMock.findUnique.mockResolvedValue(project);
+      projectMock.findFirst.mockResolvedValue(project);
 
-      const result = await service.findOne('project-1');
+      const result = await service.findOne('project-1', WORKSPACE_ID);
 
       expect(result.bomLines).toHaveLength(2);
       expect(result.bomLines[1].item).toEqual({
@@ -187,8 +197,20 @@ describe('ProjectsService', () => {
     });
 
     it('throws NotFoundException when project is missing', async () => {
-      projectMock.findUnique.mockResolvedValue(null);
-      await expect(service.findOne('missing')).rejects.toBeInstanceOf(NotFoundException);
+      projectMock.findFirst.mockResolvedValue(null);
+      await expect(service.findOne('missing', WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it("EVT-41: scopes the lookup to the caller's workspace", async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+      await expect(service.findOne('project-1', WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(projectMock.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'project-1', workspaceId: WORKSPACE_ID } }),
+      );
     });
 
     it('renames stockMovements to consumed (EVT-28 AC 5: project detail shows the consumed record)', async () => {
@@ -202,13 +224,13 @@ describe('ProjectsService', () => {
         createdAt: new Date('2026-01-02'),
         item: { id: 'item-1', name: 'Cordless drill', qrCode: 'qr-1' },
       };
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [],
         stockMovements: [buildMovement],
       });
 
-      const result = await service.findOne('project-1');
+      const result = await service.findOne('project-1', WORKSPACE_ID);
 
       expect(result.consumed).toEqual([buildMovement]);
       expect(result).not.toHaveProperty('stockMovements');
@@ -218,14 +240,17 @@ describe('ProjectsService', () => {
   // ── create ───────────────────────────────────────────────────────────────
 
   describe('create', () => {
-    it('creates a project with the given fields', async () => {
+    it('creates a project with the given fields, stamped with workspaceId', async () => {
       const created = makeProject();
       projectMock.create.mockResolvedValue(created);
 
-      const result = await service.create({ name: 'Garage workbench' });
+      const result = await service.create({ name: 'Garage workbench' }, WORKSPACE_ID);
 
       expect(projectMock.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({ name: 'Garage workbench' }),
+        data: expect.objectContaining({
+          name: 'Garage workbench',
+          workspaceId: WORKSPACE_ID,
+        }),
       });
       expect(result).toBe(created);
     });
@@ -233,11 +258,14 @@ describe('ProjectsService', () => {
     it('converts startedAt/completedAt ISO strings to Date objects', async () => {
       projectMock.create.mockResolvedValue(makeProject());
 
-      await service.create({
-        name: 'Garage workbench',
-        startedAt: '2026-02-01T00:00:00.000Z',
-        completedAt: '2026-03-01T00:00:00.000Z',
-      });
+      await service.create(
+        {
+          name: 'Garage workbench',
+          startedAt: '2026-02-01T00:00:00.000Z',
+          completedAt: '2026-03-01T00:00:00.000Z',
+        },
+        WORKSPACE_ID,
+      );
 
       const call = projectMock.create.mock.calls[0][0];
       expect(call.data.startedAt).toBeInstanceOf(Date);
@@ -249,11 +277,15 @@ describe('ProjectsService', () => {
 
   describe('update', () => {
     it('updates scalar fields on an existing project', async () => {
-      projectMock.findUnique.mockResolvedValue(makeProject());
+      projectMock.findFirst.mockResolvedValue(makeProject());
       const updated = makeProject({ status: 'in_progress' });
       projectMock.update.mockResolvedValue(updated);
 
-      const result = await service.update('project-1', { status: 'in_progress' as never });
+      const result = await service.update(
+        'project-1',
+        { status: 'in_progress' as never },
+        WORKSPACE_ID,
+      );
 
       expect(projectMock.update).toHaveBeenCalledWith({
         where: { id: 'project-1' },
@@ -263,12 +295,23 @@ describe('ProjectsService', () => {
     });
 
     it('throws NotFoundException when the project does not exist', async () => {
-      projectMock.findUnique.mockResolvedValue(null);
+      projectMock.findFirst.mockResolvedValue(null);
 
-      await expect(service.update('missing', { name: 'x' })).rejects.toBeInstanceOf(
+      await expect(service.update('missing', { name: 'x' }, WORKSPACE_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
       expect(projectMock.update).not.toHaveBeenCalled();
+    });
+
+    it('EVT-41: 404s (not distinguished from unknown) when the project belongs to a different workspace', async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+
+      await expect(service.update('project-1', { name: 'x' }, WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(projectMock.findFirst).toHaveBeenCalledWith({
+        where: { id: 'project-1', workspaceId: WORKSPACE_ID },
+      });
     });
   });
 
@@ -276,41 +319,58 @@ describe('ProjectsService', () => {
 
   describe('remove', () => {
     it('deletes the project (BOM lines cascade via schema onDelete: Cascade)', async () => {
+      projectMock.findFirst.mockResolvedValue(makeProject());
       projectMock.delete.mockResolvedValue(makeProject());
 
-      await service.remove('project-1');
+      await service.remove('project-1', WORKSPACE_ID);
 
       expect(projectMock.delete).toHaveBeenCalledWith({ where: { id: 'project-1' } });
     });
 
-    it('throws NotFoundException when the project does not exist (P2025)', async () => {
+    it('throws NotFoundException when the project does not exist (workspace-scoped pre-check)', async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+
+      await expect(service.remove('missing', WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(projectMock.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the delete itself hits P2025 (defensive)', async () => {
+      projectMock.findFirst.mockResolvedValue(makeProject());
       projectMock.delete.mockRejectedValue(makeP2025Error());
 
-      await expect(service.remove('missing')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.remove('project-1', WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     it('re-throws non-P2025 Prisma errors unchanged', async () => {
+      projectMock.findFirst.mockResolvedValue(makeProject());
       const otherErr = new Prisma.PrismaClientKnownRequestError('boom', {
         code: 'P2003',
         clientVersion: '5.22.0',
       });
       projectMock.delete.mockRejectedValue(otherErr);
 
-      await expect(service.remove('project-1')).rejects.toBe(otherErr);
+      await expect(service.remove('project-1', WORKSPACE_ID)).rejects.toBe(otherErr);
     });
   });
 
   // ── addBomLine — from itemId (name copied) ──────────────────────────────
 
   describe('addBomLine — from itemId', () => {
-    it('copies the name from the linked item', async () => {
-      projectMock.findUnique.mockResolvedValue(makeProject());
-      itemMock.findUnique.mockResolvedValue({ id: 'item-1', name: 'Cordless drill' });
+    it('copies the name from the linked item, item scoped to workspaceId', async () => {
+      projectMock.findFirst.mockResolvedValue(makeProject());
+      itemMock.findFirst.mockResolvedValue({ id: 'item-1', name: 'Cordless drill' });
       const created = makeBomLine({ itemId: 'item-1', name: 'Cordless drill' });
       bomLineMock.create.mockResolvedValue(created);
 
-      const result = await service.addBomLine('project-1', { itemId: 'item-1' });
+      const result = await service.addBomLine('project-1', { itemId: 'item-1' }, WORKSPACE_ID);
 
+      expect(itemMock.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'item-1', workspaceId: WORKSPACE_ID } }),
+      );
       expect(bomLineMock.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           projectId: 'project-1',
@@ -323,11 +383,11 @@ describe('ProjectsService', () => {
     });
 
     it('ignores any `name` in the body when itemId is provided (copies the item name instead)', async () => {
-      projectMock.findUnique.mockResolvedValue(makeProject());
-      itemMock.findUnique.mockResolvedValue({ id: 'item-1', name: 'Cordless drill' });
+      projectMock.findFirst.mockResolvedValue(makeProject());
+      itemMock.findFirst.mockResolvedValue({ id: 'item-1', name: 'Cordless drill' });
       bomLineMock.create.mockResolvedValue(makeBomLine());
 
-      await service.addBomLine('project-1', { itemId: 'item-1', name: 'Wrong name' });
+      await service.addBomLine('project-1', { itemId: 'item-1', name: 'Wrong name' }, WORKSPACE_ID);
 
       expect(bomLineMock.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ name: 'Cordless drill' }) }),
@@ -335,20 +395,35 @@ describe('ProjectsService', () => {
     });
 
     it('throws NotFoundException when the linked item does not exist', async () => {
-      projectMock.findUnique.mockResolvedValue(makeProject());
-      itemMock.findUnique.mockResolvedValue(null);
+      projectMock.findFirst.mockResolvedValue(makeProject());
+      itemMock.findFirst.mockResolvedValue(null);
 
       await expect(
-        service.addBomLine('project-1', { itemId: 'missing-item' }),
+        service.addBomLine('project-1', { itemId: 'missing-item' }, WORKSPACE_ID),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(bomLineMock.create).not.toHaveBeenCalled();
     });
 
-    it('throws NotFoundException when the project does not exist', async () => {
-      projectMock.findUnique.mockResolvedValue(null);
+    // EVT-41 AC 3: a foreign-workspace item must be rejected, indistinguishable
+    // from an unknown one.
+    it('EVT-41 AC 3: throws NotFoundException (not distinguished from unknown) when the linked item belongs to a different workspace', async () => {
+      projectMock.findFirst.mockResolvedValue(makeProject());
+      itemMock.findFirst.mockResolvedValue(null); // the workspace-scoped findFirst finds nothing
 
       await expect(
-        service.addBomLine('missing-project', { itemId: 'item-1' }),
+        service.addBomLine('project-1', { itemId: 'foreign-item' }, WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(itemMock.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'foreign-item', workspaceId: WORKSPACE_ID } }),
+      );
+      expect(bomLineMock.create).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the project does not exist', async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.addBomLine('missing-project', { itemId: 'item-1' }, WORKSPACE_ID),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
@@ -357,24 +432,30 @@ describe('ProjectsService', () => {
 
   describe('addBomLine — free text', () => {
     it('creates a line with itemId null when only name is provided', async () => {
-      projectMock.findUnique.mockResolvedValue(makeProject());
+      projectMock.findFirst.mockResolvedValue(makeProject());
       const created = makeBomLine({ name: '2x4 lumber', itemId: null });
       bomLineMock.create.mockResolvedValue(created);
 
-      const result = await service.addBomLine('project-1', { name: '2x4 lumber', quantity: 4 });
+      const result = await service.addBomLine(
+        'project-1',
+        { name: '2x4 lumber', quantity: 4 },
+        WORKSPACE_ID,
+      );
 
       expect(bomLineMock.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ projectId: 'project-1', itemId: null, name: '2x4 lumber' }),
         include: expect.anything(),
       });
-      expect(itemMock.findUnique).not.toHaveBeenCalled();
+      expect(itemMock.findFirst).not.toHaveBeenCalled();
       expect(result).toBe(created);
     });
 
     it('throws BadRequestException when neither itemId nor name is provided', async () => {
-      projectMock.findUnique.mockResolvedValue(makeProject());
+      projectMock.findFirst.mockResolvedValue(makeProject());
 
-      await expect(service.addBomLine('project-1', {})).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.addBomLine('project-1', {}, WORKSPACE_ID)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
       expect(bomLineMock.create).not.toHaveBeenCalled();
     });
   });
@@ -387,10 +468,12 @@ describe('ProjectsService', () => {
       const updated = makeBomLine({ quantity: 6, unit: 'pcs' });
       bomLineMock.update.mockResolvedValue(updated);
 
-      const result = await service.updateBomLine('project-1', 'line-1', {
-        quantity: 6,
-        unit: 'pcs',
-      });
+      const result = await service.updateBomLine(
+        'project-1',
+        'line-1',
+        { quantity: 6, unit: 'pcs' },
+        WORKSPACE_ID,
+      );
 
       expect(bomLineMock.update).toHaveBeenCalledWith({
         where: { id: 'line-1' },
@@ -400,15 +483,18 @@ describe('ProjectsService', () => {
       expect(result).toBe(updated);
     });
 
-    it('re-copies the name when itemId is provided', async () => {
+    it('re-copies the name when itemId is provided, item scoped to workspaceId', async () => {
       bomLineMock.findUnique.mockResolvedValue(makeBomLine());
-      itemMock.findUnique.mockResolvedValue({ id: 'item-2', name: 'Torque wrench' });
+      itemMock.findFirst.mockResolvedValue({ id: 'item-2', name: 'Torque wrench' });
       bomLineMock.update.mockResolvedValue(
         makeBomLine({ itemId: 'item-2', name: 'Torque wrench' }),
       );
 
-      await service.updateBomLine('project-1', 'line-1', { itemId: 'item-2' });
+      await service.updateBomLine('project-1', 'line-1', { itemId: 'item-2' }, WORKSPACE_ID);
 
+      expect(itemMock.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'item-2', workspaceId: WORKSPACE_ID } }),
+      );
       expect(bomLineMock.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ itemId: 'item-2', name: 'Torque wrench' }),
@@ -416,11 +502,31 @@ describe('ProjectsService', () => {
       );
     });
 
+    // EVT-41 AC 3.
+    it('EVT-41 AC 3: throws NotFoundException when re-linking to an item in a different workspace', async () => {
+      bomLineMock.findUnique.mockResolvedValue(makeBomLine());
+      itemMock.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.updateBomLine('project-1', 'line-1', { itemId: 'foreign-item' }, WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(bomLineMock.update).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the project does not exist', async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.updateBomLine('missing-project', 'line-1', { quantity: 2 }, WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(bomLineMock.findUnique).not.toHaveBeenCalled();
+    });
+
     it('throws NotFoundException when the line does not exist', async () => {
       bomLineMock.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.updateBomLine('project-1', 'missing-line', { quantity: 2 }),
+        service.updateBomLine('project-1', 'missing-line', { quantity: 2 }, WORKSPACE_ID),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -428,7 +534,7 @@ describe('ProjectsService', () => {
       bomLineMock.findUnique.mockResolvedValue(makeBomLine({ projectId: 'other-project' }));
 
       await expect(
-        service.updateBomLine('project-1', 'line-1', { quantity: 2 }),
+        service.updateBomLine('project-1', 'line-1', { quantity: 2 }, WORKSPACE_ID),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -436,7 +542,7 @@ describe('ProjectsService', () => {
       bomLineMock.findUnique.mockResolvedValue(makeBomLine());
       bomLineMock.update.mockResolvedValue(makeBomLine({ picked: true }));
 
-      await service.updateBomLine('project-1', 'line-1', { picked: true });
+      await service.updateBomLine('project-1', 'line-1', { picked: true }, WORKSPACE_ID);
 
       expect(bomLineMock.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ picked: true }) }),
@@ -451,26 +557,35 @@ describe('ProjectsService', () => {
       bomLineMock.findUnique.mockResolvedValue(makeBomLine());
       bomLineMock.delete.mockResolvedValue(makeBomLine());
 
-      await service.removeBomLine('project-1', 'line-1');
+      await service.removeBomLine('project-1', 'line-1', WORKSPACE_ID);
 
       expect(bomLineMock.delete).toHaveBeenCalledWith({ where: { id: 'line-1' } });
+    });
+
+    it('throws NotFoundException when the project does not exist', async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.removeBomLine('missing-project', 'line-1', WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(bomLineMock.findUnique).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException when the line does not exist', async () => {
       bomLineMock.findUnique.mockResolvedValue(null);
 
-      await expect(service.removeBomLine('project-1', 'missing-line')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.removeBomLine('project-1', 'missing-line', WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
       expect(bomLineMock.delete).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException when the line belongs to a different project', async () => {
       bomLineMock.findUnique.mockResolvedValue(makeBomLine({ projectId: 'other-project' }));
 
-      await expect(service.removeBomLine('project-1', 'line-1')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.removeBomLine('project-1', 'line-1', WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
       expect(bomLineMock.delete).not.toHaveBeenCalled();
     });
   });
@@ -479,7 +594,7 @@ describe('ProjectsService', () => {
 
   describe('availability', () => {
     it('returns ok/short/untracked per line and a correct clearToBuild summary (AC 1)', async () => {
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -501,7 +616,7 @@ describe('ProjectsService', () => {
         ],
       });
 
-      const result = await service.availability('project-1');
+      const result = await service.availability('project-1', WORKSPACE_ID);
 
       expect(result.projectId).toBe('project-1');
       expect(result.asOf).toEqual(expect.any(String));
@@ -539,7 +654,7 @@ describe('ProjectsService', () => {
       // "ok" against the same raw onHand=3 (bug); aggregated demand is
       // 2 + 3 = 5 > 3, so the later line (createdAt-asc order) must be
       // marked short and clearToBuild must flip to false.
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -553,7 +668,7 @@ describe('ProjectsService', () => {
         ],
       });
 
-      const result = await service.availability('project-1');
+      const result = await service.availability('project-1', WORKSPACE_ID);
 
       expect(result.counts).toEqual({ ok: 1, short: 1, untracked: 0 });
       expect(result.clearToBuild).toBe(false);
@@ -566,7 +681,7 @@ describe('ProjectsService', () => {
     it('marks both same-item lines ok when their combined demand fits on-hand (AC 1)', async () => {
       // Same shared item across two lines, but combined demand (2 + 3 = 5)
       // fits within on-hand (5): both lines should read ok.
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -580,7 +695,7 @@ describe('ProjectsService', () => {
         ],
       });
 
-      const result = await service.availability('project-1');
+      const result = await service.availability('project-1', WORKSPACE_ID);
 
       expect(result.counts).toEqual({ ok: 2, short: 0, untracked: 0 });
       expect(result.clearToBuild).toBe(true);
@@ -591,7 +706,7 @@ describe('ProjectsService', () => {
     });
 
     it('is clear to build when every tracked line is ok, regardless of untracked lines (AC 1/2)', async () => {
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -602,14 +717,14 @@ describe('ProjectsService', () => {
         ],
       });
 
-      const result = await service.availability('project-1');
+      const result = await service.availability('project-1', WORKSPACE_ID);
 
       expect(result.counts).toEqual({ ok: 1, short: 0, untracked: 1 });
       expect(result.clearToBuild).toBe(true);
     });
 
     it("includes each line's persisted picked state (AC 3)", async () => {
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -619,14 +734,16 @@ describe('ProjectsService', () => {
         ],
       });
 
-      const result = await service.availability('project-1');
+      const result = await service.availability('project-1', WORKSPACE_ID);
 
       expect(result.lines[0]).toMatchObject({ picked: true });
     });
 
     it('throws NotFoundException when the project does not exist', async () => {
-      projectMock.findUnique.mockResolvedValue(null);
-      await expect(service.availability('missing')).rejects.toBeInstanceOf(NotFoundException);
+      projectMock.findFirst.mockResolvedValue(null);
+      await expect(service.availability('missing', WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 
@@ -641,9 +758,9 @@ describe('ProjectsService', () => {
         ...makeProject(),
         bomLines: [{ ...makeBomLine({ itemId: null, name: 'Cordless drill' }), item: null }],
       };
-      projectMock.findUnique.mockResolvedValue(project);
+      projectMock.findFirst.mockResolvedValue(project);
 
-      const result = await service.findOne('project-1');
+      const result = await service.findOne('project-1', WORKSPACE_ID);
 
       expect(result.bomLines[0]).toMatchObject({
         itemId: null,
@@ -657,7 +774,7 @@ describe('ProjectsService', () => {
 
   describe('previewBackflush', () => {
     it('lists item-linked lines with on-hand + suggested consume quantity, shortage flagged, free-text skipped', async () => {
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -669,7 +786,7 @@ describe('ProjectsService', () => {
       });
       stockMovementMock.count.mockResolvedValue(0);
 
-      const result = await service.previewBackflush('project-1');
+      const result = await service.previewBackflush('project-1', WORKSPACE_ID);
 
       expect(result.alreadyBackflushed).toBe(false);
       expect(result.lines).toEqual([
@@ -694,7 +811,7 @@ describe('ProjectsService', () => {
     });
 
     it('suggests min(quantity, onHand) with no shortage when stock covers the line', async () => {
-      projectMock.findUnique.mockResolvedValue({
+      projectMock.findFirst.mockResolvedValue({
         ...makeProject(),
         bomLines: [
           {
@@ -705,16 +822,16 @@ describe('ProjectsService', () => {
       });
       stockMovementMock.count.mockResolvedValue(0);
 
-      const result = await service.previewBackflush('project-1');
+      const result = await service.previewBackflush('project-1', WORKSPACE_ID);
 
       expect(result.lines[0]).toMatchObject({ suggestedConsumeQuantity: 2, shortage: false });
     });
 
     it('flags alreadyBackflushed when the project already has recorded build movements (AC 6)', async () => {
-      projectMock.findUnique.mockResolvedValue({ ...makeProject(), bomLines: [] });
+      projectMock.findFirst.mockResolvedValue({ ...makeProject(), bomLines: [] });
       stockMovementMock.count.mockResolvedValue(2);
 
-      const result = await service.previewBackflush('project-1');
+      const result = await service.previewBackflush('project-1', WORKSPACE_ID);
 
       expect(result.alreadyBackflushed).toBe(true);
       expect(stockMovementMock.count).toHaveBeenCalledWith({
@@ -723,8 +840,10 @@ describe('ProjectsService', () => {
     });
 
     it('throws NotFoundException when the project does not exist', async () => {
-      projectMock.findUnique.mockResolvedValue(null);
-      await expect(service.previewBackflush('missing')).rejects.toBeInstanceOf(NotFoundException);
+      projectMock.findFirst.mockResolvedValue(null);
+      await expect(service.previewBackflush('missing', WORKSPACE_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 
@@ -736,7 +855,7 @@ describe('ProjectsService', () => {
         overrides.length > 0
           ? overrides
           : [makeBomLine({ id: 'line-1', itemId: 'item-1', quantity: 3 })];
-      projectMock.findUnique.mockResolvedValue({ ...makeProject(), bomLines });
+      projectMock.findFirst.mockResolvedValue({ ...makeProject(), bomLines });
       return bomLines;
     }
 
@@ -762,12 +881,16 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [
-          { lineId: 'line-1', consumeQuantity: 3 },
-          { lineId: 'line-2', consumeQuantity: 1 }, // free-text — ignored, no write (AC 3)
-        ],
-      });
+      const result = await service.backflush(
+        'project-1',
+        {
+          lines: [
+            { lineId: 'line-1', consumeQuantity: 3 },
+            { lineId: 'line-2', consumeQuantity: 1 }, // free-text — ignored, no write (AC 3)
+          ],
+        },
+        WORKSPACE_ID,
+      );
 
       expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledTimes(1);
       expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledWith(
@@ -790,6 +913,18 @@ describe('ProjectsService', () => {
       expect(result.project.status).toBe('completed');
     });
 
+    it("EVT-41: scopes the initial project lookup to the caller's workspace", async () => {
+      projectMock.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.backflush('project-1', { lines: [] }, WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(projectMock.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'project-1', workspaceId: WORKSPACE_ID } }),
+      );
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    });
+
     it('review round 2, finding 2: the idempotency guard count runs INSIDE the transaction, after $transaction opens', async () => {
       withBomLines();
       stubFullConsumption();
@@ -799,7 +934,11 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      await service.backflush('project-1', { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] });
+      await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] },
+        WORKSPACE_ID,
+      );
 
       expect(prismaMock.$transaction).toHaveBeenCalled();
       expect(txStockMovementMock.count).toHaveBeenCalledWith({
@@ -822,6 +961,7 @@ describe('ProjectsService', () => {
       await service.backflush(
         'project-1',
         { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] },
+        WORKSPACE_ID,
         'user-1',
       );
 
@@ -843,9 +983,11 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [{ lineId: 'line-1', consumeQuantity: 5 }],
-      });
+      const result = await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 5 }] },
+        WORKSPACE_ID,
+      );
 
       expect(result.consumed[0]).toMatchObject({
         requestedQuantity: 5,
@@ -863,9 +1005,11 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [{ lineId: 'line-1', consumeQuantity: 3 }],
-      });
+      const result = await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 3 }] },
+        WORKSPACE_ID,
+      );
 
       expect(result.consumed).toEqual([]);
       expect(txProjectMock.update).toHaveBeenCalled(); // project still completes
@@ -879,9 +1023,11 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [{ lineId: 'line-1', consumeQuantity: 0 }],
-      });
+      const result = await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 0 }] },
+        WORKSPACE_ID,
+      );
 
       expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
       expect(result.consumed).toEqual([]);
@@ -897,7 +1043,11 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      await service.backflush('project-1', { lines: [{ lineId: 'line-1', consumeQuantity: 10 }] });
+      await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 10 }] },
+        WORKSPACE_ID,
+      );
 
       expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalledWith(
         expect.anything(),
@@ -914,13 +1064,17 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [
-          { lineId: 'line-1', consumeQuantity: 1 },
-          { lineId: 'line-1', consumeQuantity: 5 },
-          { lineId: 'line-1', consumeQuantity: 2 }, // last wins
-        ],
-      });
+      const result = await service.backflush(
+        'project-1',
+        {
+          lines: [
+            { lineId: 'line-1', consumeQuantity: 1 },
+            { lineId: 'line-1', consumeQuantity: 5 },
+            { lineId: 'line-1', consumeQuantity: 2 }, // last wins
+          ],
+        },
+        WORKSPACE_ID,
+      );
 
       // Exactly one write, for the last entry's quantity — not 3 writes /
       // not 8 (1+5+2) worth of consumption.
@@ -940,9 +1094,11 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [{ lineId: 'line-1', consumeQuantity: 4 }],
-      });
+      const result = await service.backflush(
+        'project-1',
+        { lines: [{ lineId: 'line-1', consumeQuantity: 4 }] },
+        WORKSPACE_ID,
+      );
 
       expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
       expect(result.consumed).toEqual([]);
@@ -967,12 +1123,16 @@ describe('ProjectsService', () => {
         .mockRejectedValueOnce(new Error('write failed'));
 
       await expect(
-        service.backflush('project-1', {
-          lines: [
-            { lineId: 'line-1', consumeQuantity: 1 },
-            { lineId: 'line-2', consumeQuantity: 1 },
-          ],
-        }),
+        service.backflush(
+          'project-1',
+          {
+            lines: [
+              { lineId: 'line-1', consumeQuantity: 1 },
+              { lineId: 'line-2', consumeQuantity: 1 },
+            ],
+          },
+          WORKSPACE_ID,
+        ),
       ).rejects.toThrow('write failed');
 
       expect(txProjectMock.update).not.toHaveBeenCalled();
@@ -983,7 +1143,11 @@ describe('ProjectsService', () => {
       txStockMovementMock.count.mockResolvedValue(1);
 
       await expect(
-        service.backflush('project-1', { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] }),
+        service.backflush(
+          'project-1',
+          { lines: [{ lineId: 'line-1', consumeQuantity: 1 }] },
+          WORKSPACE_ID,
+        ),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(stockMovementsServiceMock.recordConsumption).not.toHaveBeenCalled();
       // The project status must never be written when the guard rejects.
@@ -1000,10 +1164,14 @@ describe('ProjectsService', () => {
         stockMovements: [],
       });
 
-      const result = await service.backflush('project-1', {
-        lines: [{ lineId: 'line-1', consumeQuantity: 3 }],
-        confirmAgain: true,
-      });
+      const result = await service.backflush(
+        'project-1',
+        {
+          lines: [{ lineId: 'line-1', consumeQuantity: 3 }],
+          confirmAgain: true,
+        },
+        WORKSPACE_ID,
+      );
 
       expect(stockMovementsServiceMock.recordConsumption).toHaveBeenCalled();
       expect(result.consumed).toHaveLength(1);
@@ -1013,17 +1181,21 @@ describe('ProjectsService', () => {
       withBomLines();
 
       await expect(
-        service.backflush('project-1', { lines: [{ lineId: 'missing-line', consumeQuantity: 1 }] }),
+        service.backflush(
+          'project-1',
+          { lines: [{ lineId: 'missing-line', consumeQuantity: 1 }] },
+          WORKSPACE_ID,
+        ),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
     });
 
     it('throws NotFoundException when the project does not exist', async () => {
-      projectMock.findUnique.mockResolvedValue(null);
+      projectMock.findFirst.mockResolvedValue(null);
 
-      await expect(service.backflush('missing', { lines: [] })).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.backflush('missing', { lines: [] }, WORKSPACE_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

@@ -73,7 +73,7 @@ function makePrismaMock() {
   const tx = makeTxMock();
   const mock = {
     ...tx,
-    location: { findUnique: jest.fn() },
+    location: { findUnique: jest.fn(), findFirst: jest.fn() },
     stockMovement: { ...tx.stockMovement, count: jest.fn(), findMany: jest.fn() },
     $transaction: jest.fn(),
   };
@@ -421,6 +421,30 @@ describe('StockMovementsService', () => {
         expect(rawArgs).toContain(ITEM_ID);
       });
 
+      // EVT-41 AC 4: the raw INSERT predates the EVT-39 workspaceId column
+      // on ShoppingListEntry and, left unset, silently falls back to the
+      // schema's Default Workspace literal for every item — regression
+      // guard proving the ITEM's own workspaceId (derived above, never
+      // caller input) is what actually gets stamped.
+      it("EVT-41: stamps the opened low-stock entry with the ITEM's own workspaceId, not the caller's", async () => {
+        tx.item.findUnique.mockResolvedValue({
+          quantity: 5,
+          minQuantity: 5,
+          workspaceId: WORKSPACE_ID,
+        });
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+        tx.item.update.mockResolvedValue(makeItemRow({ quantity: 5, minQuantity: 5 }));
+
+        await service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          delta: -2,
+        });
+
+        const rawArgs = tx.$executeRaw.mock.calls[0];
+        expect(rawArgs).toContain(WORKSPACE_ID);
+      });
+
       it('opens a low-stock entry when the resulting quantity drops BELOW minQuantity', async () => {
         tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -5 }));
         tx.item.update.mockResolvedValue(makeItemRow({ quantity: 1, minQuantity: 5 }));
@@ -697,6 +721,25 @@ describe('StockMovementsService', () => {
         expect(rawArgs).toContain(ITEM_ID);
       });
 
+      it("EVT-41: stamps the opened low-stock entry with the ITEM's own workspaceId", async () => {
+        tx.item.updateMany.mockResolvedValue({ count: 1 });
+        tx.item.findUnique.mockResolvedValue({
+          quantity: 4,
+          minQuantity: 5,
+          workspaceId: WORKSPACE_ID,
+        });
+        tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -2 }));
+
+        await service.recordConsumption(asClient(tx) as never, {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          requestedQuantity: 2,
+        });
+
+        const rawArgs = tx.$executeRaw.mock.calls[0];
+        expect(rawArgs).toContain(WORKSPACE_ID);
+      });
+
       it('is idempotent when a low-stock entry is already open (the raw INSERT is ON CONFLICT DO NOTHING)', async () => {
         tx.item.updateMany.mockResolvedValue({ count: 1 });
         tx.item.findUnique.mockResolvedValue({ quantity: 4, minQuantity: 5 });
@@ -969,17 +1012,31 @@ describe('StockMovementsService', () => {
 
   describe('listForContainer', () => {
     it('404s when the location does not exist', async () => {
-      prismaMock.location.findUnique.mockResolvedValue(null);
-      await expect(service.listForContainer(CONTAINER_ID, {})).rejects.toThrow(NotFoundException);
+      prismaMock.location.findFirst.mockResolvedValue(null);
+      await expect(service.listForContainer(CONTAINER_ID, {}, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('404s when the location exists but is an "area", not a "container"', async () => {
-      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow({ kind: 'area' }));
-      await expect(service.listForContainer(CONTAINER_ID, {})).rejects.toThrow(NotFoundException);
+      prismaMock.location.findFirst.mockResolvedValue(makeLocationRow({ kind: 'area' }));
+      await expect(service.listForContainer(CONTAINER_ID, {}, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it("EVT-41: scopes the existence check to the caller's workspace", async () => {
+      prismaMock.location.findFirst.mockResolvedValue(null);
+      await expect(service.listForContainer(CONTAINER_ID, {}, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prismaMock.location.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: CONTAINER_ID, workspaceId: WORKSPACE_ID } }),
+      );
     });
 
     it('returns newest-first, paginated container-move history, filtered by containerId', async () => {
-      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
+      prismaMock.location.findFirst.mockResolvedValue(makeLocationRow());
       prismaMock.stockMovement.count.mockResolvedValue(2);
       const rows = [
         makeMovementRow({ id: 'mv-2', itemId: null, containerId: CONTAINER_ID }),
@@ -987,7 +1044,7 @@ describe('StockMovementsService', () => {
       ];
       prismaMock.stockMovement.findMany.mockResolvedValue(rows);
 
-      const result = await service.listForContainer(CONTAINER_ID, {});
+      const result = await service.listForContainer(CONTAINER_ID, {}, WORKSPACE_ID);
 
       expect(prismaMock.stockMovement.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1001,11 +1058,15 @@ describe('StockMovementsService', () => {
     });
 
     it('applies page/pageSize to skip/take', async () => {
-      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
+      prismaMock.location.findFirst.mockResolvedValue(makeLocationRow());
       prismaMock.stockMovement.count.mockResolvedValue(50);
       prismaMock.stockMovement.findMany.mockResolvedValue([]);
 
-      const result = await service.listForContainer(CONTAINER_ID, { page: 2, pageSize: 10 });
+      const result = await service.listForContainer(
+        CONTAINER_ID,
+        { page: 2, pageSize: 10 },
+        WORKSPACE_ID,
+      );
 
       expect(prismaMock.stockMovement.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ skip: 10, take: 10 }),
@@ -1015,11 +1076,11 @@ describe('StockMovementsService', () => {
     });
 
     it('returns an empty page (not an error) when the container has no moves yet', async () => {
-      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
+      prismaMock.location.findFirst.mockResolvedValue(makeLocationRow());
       prismaMock.stockMovement.count.mockResolvedValue(0);
       prismaMock.stockMovement.findMany.mockResolvedValue([]);
 
-      const result = await service.listForContainer(CONTAINER_ID, {});
+      const result = await service.listForContainer(CONTAINER_ID, {}, WORKSPACE_ID);
 
       expect(result).toEqual({ data: [], page: 1, pageSize: 20, total: 0, totalPages: 1 });
     });

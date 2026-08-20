@@ -193,9 +193,12 @@ export class StockMovementsService {
       // that leaves the item's on-hand `quantity` at or below its
       // `minQuantity` opens a `low-stock` shopping-list entry. `minQuantity`
       // is `null` by default (no replenishment tracking), so this is a
-      // no-op for the vast majority of items/movements.
+      // no-op for the vast majority of items/movements. `owningItem.workspaceId`
+      // (EVT-41) is passed through so the opened entry is stamped with the
+      // ITEM's own workspace — see `openLowStockEntry`'s doc comment for why
+      // this can't be left to the column default.
       if (item.minQuantity != null && item.quantity <= item.minQuantity) {
-        await openLowStockEntry(tx, input.itemId);
+        await openLowStockEntry(tx, input.itemId, owningItem.workspaceId);
       }
 
       return { movement, item: item as Prisma.ItemGetPayload<{ include: Include }> };
@@ -291,7 +294,7 @@ export class StockMovementsService {
         });
 
         if (updated.minQuantity != null && updated.quantity <= updated.minQuantity) {
-          await openLowStockEntry(tx, input.itemId);
+          await openLowStockEntry(tx, input.itemId, updated.workspaceId);
         }
 
         return { movement, consumedQuantity: attempt };
@@ -413,12 +416,13 @@ export class StockMovementsService {
   /**
    * Paginated movement history for one container location, newest first —
    * only the container's own re-parent events (`containerId` = this
-   * location), never a per-item entry. 404 when the location doesn't exist
-   * or is not a `container` (an `area` has no move history of its own).
+   * location), never a per-item entry. 404 when the location doesn't exist,
+   * is not a `container`, or belongs to a different workspace (EVT-41) —
+   * same "don't confirm existence" posture as `listForItem`.
    */
-  async listForContainer(containerId: string, query: ListMovementsQueryDto) {
-    const location = await this.prisma.location.findUnique({
-      where: { id: containerId },
+  async listForContainer(containerId: string, query: ListMovementsQueryDto, workspaceId: string) {
+    const location = await this.prisma.location.findFirst({
+      where: { id: containerId, workspaceId },
       select: { id: true, kind: true },
     });
     if (!location || location.kind !== 'container') {
@@ -477,11 +481,24 @@ function isPrismaService(client: PrismaClientOrTx): client is PrismaService {
  * low-stock entry can never block or fail the movement it's a side effect of
  * (EVT-26 risk: "duplicate-entry races when several movements dip below min
  * in quick succession").
+ *
+ * `workspaceId` (EVT-41) is REQUIRED and stamped explicitly on the inserted
+ * row — this raw INSERT predates the EVT-39 `workspaceId` column and, left
+ * unset, would silently fall back to the schema's Default Workspace literal
+ * for every item regardless of which REAL workspace it belongs to. Both call
+ * sites (`recordMovement`, `recordConsumption`) derive it from the same
+ * already-read `Item.workspaceId`, never from caller input — same rationale
+ * as the `StockMovement.workspaceId` derivation those methods already do
+ * (EVT-40 round-2 review, security finding 6).
  */
-async function openLowStockEntry(tx: PrismaClientOrTx, itemId: string): Promise<void> {
+async function openLowStockEntry(
+  tx: PrismaClientOrTx,
+  itemId: string,
+  workspaceId: string,
+): Promise<void> {
   await tx.$executeRaw`
-    INSERT INTO "ShoppingListEntry" (id, "itemId", status, source, "createdAt")
-    VALUES (${randomUUID()}::uuid, ${itemId}::uuid, 'open', 'low-stock', now())
+    INSERT INTO "ShoppingListEntry" (id, "itemId", status, source, "workspaceId", "createdAt")
+    VALUES (${randomUUID()}::uuid, ${itemId}::uuid, 'open', 'low-stock', ${workspaceId}::uuid, now())
     ON CONFLICT ("itemId") WHERE status = 'open' DO NOTHING
   `;
 }
