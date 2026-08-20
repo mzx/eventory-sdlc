@@ -43,7 +43,16 @@ services:
       # operators MUST rotate it (`ALTER ROLE eventory_rls PASSWORD ...`)
       # and set EVENTORY_RLS_PASSWORD in `.env.prod` to match before any
       # real deployment; see docs/operations/tenancy-rls.md.
-      APP_DATABASE_URL: postgresql://eventory_rls:${EVENTORY_RLS_PASSWORD:-eventory_rls_change_me}@db:5432/${POSTGRES_DB:-eventory}?schema=public
+      #
+      # `:?`, not `:-` (round-2 review, MAJOR finding 4): compose's `${VAR:-x}`
+      # falls back to `x` when VAR is EITHER unset OR set-but-empty — and
+      # `.env.prod.example` ships `EVENTORY_RLS_PASSWORD=` (empty, by the
+      # same convention as `POSTGRES_PASSWORD` above), so a straight
+      # `cp .env.prod.example .env.prod` deploy would have silently fallen
+      # back to the placeholder password published in the committed
+      # migration, matching the `:?` guard already used for
+      # POSTGRES_PASSWORD/PUBLIC_BASE_URL/WEB_BASE/JWT_SECRET two lines up.
+      APP_DATABASE_URL: postgresql://eventory_rls:${EVENTORY_RLS_PASSWORD:?EVENTORY_RLS_PASSWORD must be set — see .env.prod.example}@db:5432/${POSTGRES_DB:-eventory}?schema=public
       PORT: ${PORT:-3001}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL must be set}
       WEB_BASE: ${WEB_BASE:?WEB_BASE must be set}

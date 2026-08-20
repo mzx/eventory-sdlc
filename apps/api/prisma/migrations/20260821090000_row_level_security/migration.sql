@@ -45,14 +45,45 @@
 -- endpoint exposes direct unscoped access to either.
 --
 -- `app.rls_bypass_read`: a second, narrowly-scoped session flag, read-only
--- (it appears ONLY in each policy's `USING` clause, never `WITH CHECK`) —
--- lets `ItemsService.findByQr` resolve a physical QR code across ALL
--- workspaces (by design: `qrCode` stays globally unique so a printed label
--- always scans, see the schema's `qrCode` doc comment) while the caller is
--- then re-authorized against the RESOLVED resource's own workspace
--- (`isMemberOfWorkspace`) before anything is returned. It can never be used
--- to smuggle a cross-tenant WRITE — `WITH CHECK` never honors it, so an
--- INSERT/UPDATE always still requires an exact `app.workspace_id` match.
+-- by design — lets `ItemsService.findByQr` / `QrService.assertTokenExists`
+-- resolve a physical QR code across ALL workspaces (by design: `qrCode`
+-- stays globally unique so a printed label always scans, see the schema's
+-- `qrCode` doc comment) while the caller is then re-authorized against the
+-- RESOLVED resource's own workspace (`isMemberOfWorkspace`) before anything
+-- is returned.
+--
+-- Round-2 review (MAJOR, finding 2): a single `CREATE POLICY ... FOR ALL`
+-- (this migration's original shape) applies its ONE `USING` clause to
+-- SELECT, the pre-image read of UPDATE, AND DELETE — DELETE has no
+-- `WITH CHECK` at all, Postgres only ever checks `USING` for it. That meant
+-- the bypass flag, despite being documented as "read-only", actually let a
+-- caller who controlled it (1) DELETE any workspace's rows (`USING` alone
+-- gates DELETE) and (2) rewrite a victim row's OWN `workspaceId` to the
+-- caller's session value via `UPDATE ... SET "workspaceId" = <mine> WHERE
+-- id = <victim>` — the bypass flag let `USING` (pre-image) pass for the
+-- victim row, and the write's new `workspaceId` value satisfied `WITH
+-- CHECK` on its own, with no bypass needed there at all. Both are
+-- cross-tenant WRITES smuggled through a flag that was supposed to only
+-- ever widen a read.
+--
+-- Fixed by splitting into FOUR per-command policies below, instead of one
+-- `FOR ALL` policy — `USING`/`WITH CHECK` apply per Postgres's own command
+-- table (https://www.postgresql.org/docs/current/sql-createpolicy.html):
+--   - `FOR SELECT USING (... OR bypass)` — the bypass flag ONLY ever
+--     widens this one.
+--   - `FOR INSERT WITH CHECK (...)` — no bypass; exact `app.workspace_id`
+--     match required, same as before.
+--   - `FOR UPDATE USING (...) WITH CHECK (...)` — no bypass on EITHER
+--     clause: a caller can only see (pre-image) and write (post-image) rows
+--     in their OWN ambient workspace. Closes the workspaceId-rewrite theft
+--     above.
+--   - `FOR DELETE USING (...)` — no bypass: a caller can only delete rows
+--     in their OWN ambient workspace. Closes the bypass-DELETE hole above.
+-- See `test/rls-isolation.e2e-spec.ts`'s AC4 tests (the DELETE case and the
+-- workspaceId-rewrite UPDATE case, both attempted adversarially WITH the
+-- bypass flag set) for the proof these are now blocked, and AC1/AC2/AC3 for
+-- proof ordinary SELECT/INSERT/UPDATE/DELETE still work correctly without
+-- the flag.
 
 -- ---------------------------------------------------------------------------
 -- 1. The unprivileged runtime role.
@@ -91,6 +122,15 @@ GRANT USAGE ON SCHEMA public TO eventory_rls;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO eventory_rls;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO eventory_rls;
 
+-- Round-2 review (SHOULD FIX, finding 7): the blanket `ALL TABLES` grant
+-- above also reaches Prisma's own internal `_prisma_migrations` ledger —
+-- `eventory_rls` (the runtime role) has no legitimate reason to read or
+-- write migration history, only the owner/superuser role running
+-- migrations does. Revoking here (idempotent — safe to run even if a
+-- future migration re-runs this file's logic) narrows the runtime role's
+-- blast radius without affecting any application behavior.
+REVOKE ALL ON "_prisma_migrations" FROM eventory_rls;
+
 -- Future tables/sequences created by whichever role runs migrations (the
 -- owner — `current_user` at migration time, whatever it's named) also get
 -- granted to `eventory_rls` automatically, so a forgotten grant on a future
@@ -128,14 +168,56 @@ BEGIN
     -- `eventory_rls` isn't the owner anyway (see step 1), so this only
     -- matters if the owner role is ever (mis)used for runtime traffic.
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+
+    -- SELECT — the ONLY command the read-only bypass flag ever widens.
     EXECUTE format(
       $policy$
-        CREATE POLICY workspace_isolation ON %I
+        CREATE POLICY workspace_isolation_select ON %I
+          FOR SELECT
           USING (
             "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
             OR current_setting('app.rls_bypass_read', true) = 'true'
           )
+      $policy$,
+      t
+    );
+
+    -- INSERT — exact ambient-workspace match only, never the bypass flag.
+    EXECUTE format(
+      $policy$
+        CREATE POLICY workspace_isolation_insert ON %I
+          FOR INSERT
           WITH CHECK (
+            "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
+          )
+      $policy$,
+      t
+    );
+
+    -- UPDATE — exact ambient-workspace match on BOTH the pre-image (USING)
+    -- and post-image (WITH CHECK); no bypass on either clause, closing the
+    -- workspaceId-rewrite cross-tenant-theft finding (see doc comment above).
+    EXECUTE format(
+      $policy$
+        CREATE POLICY workspace_isolation_update ON %I
+          FOR UPDATE
+          USING (
+            "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
+          )
+          WITH CHECK (
+            "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
+          )
+      $policy$,
+      t
+    );
+
+    -- DELETE — exact ambient-workspace match only; no bypass (DELETE has no
+    -- WITH CHECK at all in Postgres, so USING is the ONLY gate for it).
+    EXECUTE format(
+      $policy$
+        CREATE POLICY workspace_isolation_delete ON %I
+          FOR DELETE
+          USING (
             "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
           )
       $policy$,

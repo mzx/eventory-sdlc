@@ -1,5 +1,5 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { Observable, Subscription } from 'rxjs';
 import { RequestWithWorkspace, workspaceDbContext } from './workspace-context';
 
 /**
@@ -36,17 +36,38 @@ import { RequestWithWorkspace, workspaceDbContext } from './workspace-context';
  * — closed the race; see `test/rls-isolation.e2e-spec.ts`'s AC3
  * interleaved-request test, which reproduces the exact concurrency shape
  * that caught this.
+ *
+ * Round-2 review, SHOULD FIX finding 10 (two independent fixes):
+ * 1. `context.getType() === 'http'` guard — this interceptor is registered
+ *    globally (`APP_INTERCEPTOR`), so it runs for every execution context
+ *    Nest supports, not just HTTP. `switchToHttp().getRequest()` on a
+ *    non-HTTP context (this app has none today, but a future WebSocket
+ *    gateway or microservice handler would) returns an object with no
+ *    `workspace` property, silently proceeding with `workspaceId: undefined`
+ *    rather than failing loudly — cheap to guard explicitly now rather than
+ *    rely on every future context type happening to degrade safely.
+ * 2. The inner `next.handle().subscribe(subscriber)` `Subscription` is now
+ *    returned from the `Observable` constructor's callback as its teardown
+ *    function, so an upstream unsubscribe (e.g. a client that disconnects
+ *    mid-request) actually propagates down into `next.handle()`'s own
+ *    subscription instead of leaking it.
  */
 @Injectable()
 export class WorkspaceDbContextInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    if (context.getType() !== 'http') {
+      return next.handle();
+    }
+
     const request = context.switchToHttp().getRequest<RequestWithWorkspace>();
     const workspaceId = request.workspace?.id;
 
     return new Observable((subscriber) => {
+      let subscription: Subscription | undefined;
       workspaceDbContext.run({ workspaceId }, () => {
-        next.handle().subscribe(subscriber);
+        subscription = next.handle().subscribe(subscriber);
       });
+      return () => subscription?.unsubscribe();
     });
   }
 }

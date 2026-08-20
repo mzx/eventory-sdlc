@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { RLS_WORKSPACE_SETTING, workspaceDbContext } from '../workspace/workspace-context';
 
@@ -6,13 +6,30 @@ import { RLS_WORKSPACE_SETTING, workspaceDbContext } from '../workspace/workspac
 type ModelOperation = (...args: unknown[]) => unknown;
 
 /**
+ * Module-scoped (not an instance field) so it's usable BEFORE `super()` is
+ * called inside `PrismaService`'s constructor (the `APP_DATABASE_URL`
+ * fallback warning below, round-2 review finding 6, needs to fire before
+ * the `PrismaClient` base constructor even runs) — a derived class
+ * constructor cannot reference `this` (and therefore no instance field)
+ * until `super()` has been invoked.
+ */
+const logger = new Logger('PrismaService');
+
+/**
  * The Prisma Client property names (lowerCamelCase model names) the EVT-44
  * `PrismaService` Proxy auto-wraps for standalone (non-`$transaction`)
  * calls — see that Proxy's doc comment inside the constructor for why this
  * is an explicit allowlist. Mirrors EXACTLY the table list the EVT-44
  * migration puts `ENABLE`/`FORCE ROW LEVEL SECURITY` + a policy on.
+ *
+ * Exported (round-2 review, finding 8) so the RLS e2e self-maintenance
+ * check (`test/rls-isolation.e2e-spec.ts`) can cross-reference this list
+ * against `information_schema` (every table with its own `workspaceId`
+ * column) and `pg_policies` (every table that actually has a policy) — a
+ * future workspace-scoped table can't silently ship without ALL THREE
+ * staying in sync.
  */
-const RLS_SCOPED_MODELS = new Set([
+export const RLS_SCOPED_MODELS = new Set([
   'item',
   'location',
   'category',
@@ -107,9 +124,34 @@ const RLS_SCOPED_MODELS = new Set([
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   constructor() {
+    const appDatabaseUrl = process.env.APP_DATABASE_URL;
+    if (!appDatabaseUrl) {
+      // Falling back to DATABASE_URL means the runtime connection is the
+      // migration OWNER role (a superuser in this project's docker-compose
+      // setups) — RLS becomes a structural no-op for every query on this
+      // connection, silently, since a superuser always bypasses `FORCE ROW
+      // LEVEL SECURITY` (round-2 review, finding 6). This is INTENTIONAL for
+      // the many `*.e2e-spec.ts` files that don't exercise RLS at all (see
+      // this class's own doc comment), so it can't be a hard error
+      // unconditionally — but it must never be silent, and it must never
+      // happen in production.
+      const message =
+        'PrismaService: APP_DATABASE_URL is not set — falling back to DATABASE_URL ' +
+        '(the migration OWNER role). Postgres row-level security (EVT-44) becomes a ' +
+        'structural no-op for this connection: a superuser/owner role bypasses ' +
+        'FORCE ROW LEVEL SECURITY entirely, regardless of app.workspace_id. See ' +
+        'apps/api/.env.example and docs/operations/tenancy-rls.md.';
+      if (process.env.NODE_ENV === 'production') {
+        // Fail hard rather than silently running with zero RLS containment
+        // in the one environment where that matters most.
+        throw new Error(`${message} Refusing to start with NODE_ENV=production.`);
+      }
+      logger.warn(message);
+    }
+
     super({
       datasources: {
-        db: { url: process.env.APP_DATABASE_URL ?? process.env.DATABASE_URL },
+        db: { url: appDatabaseUrl ?? process.env.DATABASE_URL },
       },
     });
 

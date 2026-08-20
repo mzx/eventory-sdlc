@@ -89,6 +89,38 @@ exactly the set of tables the application ALREADY scopes ambiently via
   required FK to an RLS-protected parent (`Item`/`Project`). No endpoint
   exposes direct, unscoped access to either.
 
+**What this means for a direct-DB or SQLi-class attacker (round-2 review,
+SHOULD FIX finding 7 — stated explicitly, not just implied):**
+
+- `User`, `Workspace`, `WorkspaceMember`, and `WorkspaceInvite` have **NO**
+  RLS containment layer at all. A direct-database attacker (a leaked
+  connection string, a SQL-injection primitive that reaches raw SQL, etc.)
+  can read or write ANY row in these four tables — including
+  self-granting a `WorkspaceMember` row for any `Workspace`/`User` pair, or
+  minting/redeeming an arbitrary `WorkspaceInvite`. RLS's containment
+  guarantee for THIS task only covers the eight domain tables listed above;
+  the membership/identity tables remain app-scoping's responsibility alone
+  (see "Scope" above for why RLS can't cleanly cover them without a
+  chicken-and-egg problem at every membership-resolution call site).
+- RLS does **not** constrain foreign-key **referential** checks. A FK
+  constraint (e.g. `Item.locationId -> Location.id`) is validated by
+  Postgres against the referenced row's raw existence, not filtered through
+  the referencING role's RLS policy — so RLS by itself cannot stop a
+  cross-workspace FK reference from being written. That's still
+  APPLICATION-scoping's job (`ItemsService.assertLocationInWorkspace` /
+  `assertCategoryInWorkspace` / `assertPhotosInWorkspace` and their
+  equivalents elsewhere), same as before this task — RLS is a backstop for
+  workspace ISOLATION of a table's own rows, not a substitute for validating
+  cross-table references belong to the same tenant.
+- Child tables with no `workspaceId` of their own (`ItemTag`, `BomLine`)
+  rely ENTIRELY on their required parent FK (`Item`/`Project`) being
+  RLS-protected — they have no independent containment; a bug that let a
+  caller write an `ItemTag`/`BomLine` row pointing at a foreign-workspace
+  parent id would only be caught by that FK's referential integrity (does
+  the parent row exist at all, from the writer's OWN RLS-filtered view) or
+  by application-level scoping, not by a policy on the child table itself
+  (it has none).
+
 ## The read-only cross-tenant bypass (`app.rls_bypass_read`)
 
 One legitimate feature is deliberately cross-tenant by design:
@@ -100,27 +132,51 @@ resource's own workspace (`isMemberOfWorkspace`).
 
 Rather than routing this through a second, privileged Postgres role, the
 EVT-44 migration adds a second, narrowly-scoped session flag,
-`app.rls_bypass_read`, that appears **only** in each policy's `USING`
-clause:
+`app.rls_bypass_read` — and (round-2 review, MAJOR finding 2) **four
+separate per-command policies** per table, not one `FOR ALL` policy, so the
+flag can only ever widen `SELECT`:
 
 ```sql
-CREATE POLICY workspace_isolation ON "Item"
+CREATE POLICY workspace_isolation_select ON "Item"
+  FOR SELECT
   USING (
     "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
     OR current_setting('app.rls_bypass_read', true) = 'true'
-  )
-  WITH CHECK (
-    "workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid
   );
+
+CREATE POLICY workspace_isolation_insert ON "Item"
+  FOR INSERT
+  WITH CHECK ("workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid);
+
+CREATE POLICY workspace_isolation_update ON "Item"
+  FOR UPDATE
+  USING ("workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid)
+  WITH CHECK ("workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid);
+
+CREATE POLICY workspace_isolation_delete ON "Item"
+  FOR DELETE
+  USING ("workspaceId" = NULLIF(current_setting('app.workspace_id', true), '')::uuid);
 ```
 
-`WITH CHECK` never honors the flag, so it can only ever widen a **read** —
-an INSERT/UPDATE always still requires an exact `app.workspace_id` match,
-even if a caller somehow controlled both session settings. See
-`ItemsService.findByQr`'s doc comment for the exact transaction shape, and
-`test/rls-isolation.e2e-spec.ts`'s AC4 tests for both the "still resolves
-correctly" proof and the "can never become a write" proof (a raw `UPDATE`
-attempted with the bypass flag set is rejected by Postgres itself).
+**Why not one `FOR ALL` policy with a single `USING`/`WITH CHECK` pair (the
+original shape of this migration)?** Postgres applies a `FOR ALL` policy's
+ONE `USING` clause to SELECT, the pre-image read of UPDATE, **and** DELETE —
+DELETE has no `WITH CHECK` at all, `USING` is its only gate. That meant the
+"read-only" bypass flag actually let a caller who controlled it (1) `DELETE`
+any workspace's rows, and (2) `UPDATE ... SET "workspaceId" = <mine> WHERE
+id = <victim>` — the bypass let `USING` pass for the victim row, and the
+write's own new `workspaceId` value satisfied `WITH CHECK` without needing
+the bypass there at all. Splitting into four per-command policies closes
+both: `WITH CHECK` never honors the flag on ANY command, and UPDATE/DELETE's
+`USING` clauses don't either — an INSERT/UPDATE/DELETE always requires an
+exact `app.workspace_id` match, even if a caller somehow controlled both
+session settings. See `ItemsService.findByQr`'s and `QrService`'s doc
+comments for the exact transaction shape, and
+`test/rls-isolation.e2e-spec.ts`'s AC4 tests for the "still resolves
+correctly" proof plus THREE "can never become a write" proofs (a raw
+`UPDATE` that changes an unrelated column, a `DELETE`, and the
+`workspaceId`-rewrite theft attempt — all attempted with the bypass flag
+set, all rejected by Postgres itself).
 
 ## Admin/migration paths that legitimately cross workspaces
 

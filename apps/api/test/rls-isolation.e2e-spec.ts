@@ -40,9 +40,11 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import { Client } from 'pg';
+import supertest from 'supertest';
+import { AiService } from '../src/ai/ai.service';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
-import { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaService, RLS_SCOPED_MODELS } from '../src/prisma/prisma.service';
 import { workspaceDbContext } from '../src/workspace/workspace-context';
 import { AuthedHttp } from './e2e-auth-helper';
 import { seedTwoWorkspaces, TwoWorkspaceFixture } from './two-workspace-harness';
@@ -78,6 +80,13 @@ describe('Postgres RLS backstop (e2e, EVT-44)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let fixture: TwoWorkspaceFixture;
+  // AC5 — `AiService` is overridden with a mock (same pattern as
+  // `search-by-photo.e2e-spec.ts`) so the photo-search raw-SQL path can be
+  // exercised deterministically, without a real (billed) vision call and
+  // without depending on whether an API key happens to be configured in
+  // this environment (a stub analysis yields zero search terms, which would
+  // never reach the raw-SQL matching query at all).
+  const analyzePhotoMock = jest.fn();
 
   // `jest.e2e.config.js` runs every `*.e2e-spec.ts` file SEQUENTIALLY in the
   // SAME worker process (`maxWorkers: 1`) — `process.env` is a plain global
@@ -95,7 +104,10 @@ describe('Postgres RLS backstop (e2e, EVT-44)', () => {
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(AiService)
+      .useValue({ analyzePhoto: analyzePhotoMock })
+      .compile();
 
     app = moduleFixture.createNestApplication<NestExpressApplication>();
     // Mirrors src/main.ts's bootstrap() exactly.
@@ -116,6 +128,10 @@ describe('Postgres RLS backstop (e2e, EVT-44)', () => {
   afterAll(async () => {
     await app.close();
     process.env.APP_DATABASE_URL = previousAppDatabaseUrl;
+  });
+
+  beforeEach(() => {
+    analyzePhotoMock.mockReset();
   });
 
   // =========================================================================
@@ -280,7 +296,7 @@ describe('Postgres RLS backstop (e2e, EVT-44)', () => {
       await fixture.workspaceB.owner.get(`/api/items/by-qr/${item.qrCode}`).expect(404);
     });
 
-    it('the read-only app.rls_bypass_read flag can NEVER be used to write into another workspace — WITH CHECK ignores it', async () => {
+    it('the read-only app.rls_bypass_read flag can NEVER be used to write into another workspace — matches zero rows under the per-command UPDATE policy', async () => {
       const item = await createItem(fixture.workspaceA.owner, 'AC4 write-guard item');
 
       const client = new Client({ connectionString: RLS_DB_URL });
@@ -294,10 +310,22 @@ describe('Postgres RLS backstop (e2e, EVT-44)', () => {
         await client.query("SELECT set_config('app.workspace_id', $1, true)", [
           fixture.workspaceB.id,
         ]);
-        await expect(
-          client.query('UPDATE "Item" SET name = $1 WHERE id = $2', ['hijacked', item.id]),
-        ).rejects.toThrow(/row-level security/i);
-        await client.query('ROLLBACK');
+        // Round-2 review, finding 2: under the OLD single `FOR ALL` policy,
+        // the bypass flag let USING's pre-image check pass for this row
+        // (workspace A), so the UPDATE actually reached WITH CHECK, which
+        // then rejected the post-image (still workspace A, not matching the
+        // ambient B setting) with a thrown "row-level security" error.
+        // Under the per-command UPDATE policy (no bypass on USING at all),
+        // the row is invisible to this UPDATE from the START — Postgres
+        // treats that exactly like a WHERE clause that matched nothing: NO
+        // error, just zero rows affected. Equally safe (the write is still
+        // fully blocked), just a different Postgres-level mechanism.
+        const result = await client.query('UPDATE "Item" SET name = $1 WHERE id = $2', [
+          'hijacked',
+          item.id,
+        ]);
+        expect(result.rowCount).toBe(0);
+        await client.query('COMMIT');
       } finally {
         await client.end();
       }
@@ -305,6 +333,300 @@ describe('Postgres RLS backstop (e2e, EVT-44)', () => {
       // Confirm the row was genuinely untouched.
       const stillOwned = await fixture.workspaceA.owner.get(`/api/items/${item.id}`).expect(200);
       expect(stillOwned.body.name).toBe('AC4 write-guard item');
+    });
+
+    it('WITH CHECK independently rejects a workspaceId-changing write even when the pre-image IS visible (bypass never widens WITH CHECK, on ANY command)', async () => {
+      const item = await createItem(
+        fixture.workspaceA.owner,
+        'AC4 with-check independent-guard item',
+      );
+
+      const client = new Client({ connectionString: RLS_DB_URL });
+      await client.connect();
+      try {
+        await client.query('BEGIN');
+        // Bypass flag set (irrelevant to WITH CHECK either way) AND the
+        // ambient workspace correctly matches the item's OWN workspace, so
+        // USING's pre-image check passes on its own merits — no bypass
+        // needed to reach WITH CHECK at all here.
+        await client.query("SELECT set_config('app.rls_bypass_read', 'true', true)");
+        await client.query("SELECT set_config('app.workspace_id', $1, true)", [
+          fixture.workspaceA.id,
+        ]);
+        // The write itself tries to reassign the row to workspace B — the
+        // post-image no longer matches the ambient (A) setting, so WITH
+        // CHECK rejects it outright, regardless of the bypass flag.
+        await expect(
+          client.query('UPDATE "Item" SET "workspaceId" = $1 WHERE id = $2', [
+            fixture.workspaceB.id,
+            item.id,
+          ]),
+        ).rejects.toThrow(/row-level security/i);
+        await client.query('ROLLBACK');
+      } finally {
+        await client.end();
+      }
+
+      const stillOwnedByA = await fixture.workspaceA.owner.get(`/api/items/${item.id}`).expect(200);
+      expect(stillOwnedByA.body.id).toBe(item.id);
+    });
+
+    // -----------------------------------------------------------------------
+    // Round-2 review, MAJOR finding 2 — the original single `FOR ALL`
+    // policy applied its ONE `USING` clause (which honors the bypass flag)
+    // to the pre-image of UPDATE and to DELETE, neither of which has a
+    // `WITH CHECK` gate at all. The two tests below reproduce BOTH concrete
+    // exploits the review called out, adversarially (bypass flag set AND
+    // ambient workspace set to the ATTACKER's own workspace), and prove
+    // Postgres now rejects/no-ops both after the per-command policy split.
+    // -----------------------------------------------------------------------
+
+    it("finding 2: the bypass flag can NEVER be used to steal another workspace's row via a workspaceId rewrite — UPDATE matches zero rows", async () => {
+      const item = await createItem(fixture.workspaceA.owner, 'AC4 theft-guard item');
+
+      const client = new Client({ connectionString: RLS_DB_URL });
+      await client.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.rls_bypass_read', 'true', true)");
+        // Ambient workspace set to B (the attacker's own workspace) — under
+        // the OLD `FOR ALL` policy, the bypass flag let USING's pre-image
+        // check pass for A's row, and the post-image (workspaceId := B,
+        // matching the ambient setting) trivially satisfied WITH CHECK —
+        // the row would be silently reassigned from A to B.
+        await client.query("SELECT set_config('app.workspace_id', $1, true)", [
+          fixture.workspaceB.id,
+        ]);
+        const result = await client.query('UPDATE "Item" SET "workspaceId" = $1 WHERE id = $2', [
+          fixture.workspaceB.id,
+          item.id,
+        ]);
+        // No error thrown (UPDATE's USING clause behaves like a WHERE
+        // filter, not a hard failure) — but crucially, zero rows matched:
+        // the per-command UPDATE policy's USING clause no longer honors the
+        // bypass flag, so workspace A's row is simply invisible to this
+        // UPDATE at all.
+        expect(result.rowCount).toBe(0);
+        await client.query('COMMIT');
+      } finally {
+        await client.end();
+      }
+
+      // The row still belongs to workspace A — never stolen into B.
+      const stillOwnedByA = await fixture.workspaceA.owner.get(`/api/items/${item.id}`).expect(200);
+      expect(stillOwnedByA.body.name).toBe('AC4 theft-guard item');
+      await fixture.workspaceB.owner.get(`/api/items/${item.id}`).expect(404);
+    });
+
+    it("finding 2: the bypass flag can NEVER be used to delete another workspace's row — DELETE matches zero rows", async () => {
+      const item = await createItem(fixture.workspaceA.owner, 'AC4 delete-guard item');
+
+      const client = new Client({ connectionString: RLS_DB_URL });
+      await client.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.rls_bypass_read', 'true', true)");
+        // Ambient workspace set to the WRONG (B) workspace — under the OLD
+        // `FOR ALL` policy, DELETE's only gate is USING, which honored the
+        // bypass flag, so this DELETE would have succeeded against A's row.
+        await client.query("SELECT set_config('app.workspace_id', $1, true)", [
+          fixture.workspaceB.id,
+        ]);
+        const result = await client.query('DELETE FROM "Item" WHERE id = $1', [item.id]);
+        expect(result.rowCount).toBe(0);
+        await client.query('COMMIT');
+      } finally {
+        await client.end();
+      }
+
+      // The row was never deleted.
+      const stillThere = await fixture.workspaceA.owner.get(`/api/items/${item.id}`).expect(200);
+      expect(stillThere.body.id).toBe(item.id);
+    });
+
+    it("sanity: an ORDINARY delete in the caller's OWN workspace (no bypass involved) still works through the app layer under the split policies", async () => {
+      const item = await createItem(fixture.workspaceA.owner, 'AC4 legitimate delete item');
+
+      await fixture.workspaceA.owner.delete(`/api/items/${item.id}`).expect(204);
+      await fixture.workspaceA.owner.get(`/api/items/${item.id}`).expect(404);
+    });
+  });
+
+  // =========================================================================
+  // AC5 — round-2 review, CRITICAL finding 1: `ItemsService`'s raw `$queryRaw`
+  // calls (text search + photo-search matching) must be scoped through the
+  // managed `$transaction`, not left unwrapped — otherwise the RLS Proxy
+  // (which only wraps MODEL delegates) never applies `set_config`, and every
+  // row is silently filtered out under the restricted role, regardless of
+  // the query's own `WHERE "workspaceId" = ...` clause.
+  // =========================================================================
+
+  describe('AC5: raw-SQL search paths are RLS-scoped, not silently empty under the restricted role', () => {
+    it("GET /api/items?search= returns the matching row in the caller's OWN workspace", async () => {
+      const item = await createItem(fixture.workspaceA.owner, 'AC5 Cordless Drill Deluxe');
+      await createItem(fixture.workspaceB.owner, 'AC5 unrelated widget');
+
+      const res = await fixture.workspaceA.owner
+        .get('/api/items?search=Cordless%20Drill')
+        .expect(200);
+
+      expect(res.body.map((i: { id: string }) => i.id)).toContain(item.id);
+    });
+
+    it('GET /api/items?search= never leaks a match from a DIFFERENT workspace', async () => {
+      await createItem(fixture.workspaceA.owner, 'AC5 shared-name widget');
+      const itemB = await createItem(fixture.workspaceB.owner, 'AC5 shared-name widget');
+
+      const res = await fixture.workspaceB.owner.get('/api/items?search=shared-name').expect(200);
+
+      expect(res.body.map((i: { id: string }) => i.id)).toEqual([itemB.id]);
+    });
+
+    it("POST /api/items/search-by-photo returns the matching row in the caller's OWN workspace", async () => {
+      const item = await fixture.workspaceA.owner
+        .post('/api/items')
+        .send({ name: 'AC5 Photo-Matched Gizmo', tags: ['gizmo'] })
+        .expect(201);
+      await createItem(fixture.workspaceB.owner, 'AC5 unrelated in B');
+
+      analyzePhotoMock.mockResolvedValue({
+        suggested_name: 'Gizmo',
+        description: '',
+        tags: ['gizmo'],
+        color: null,
+        quantity: null,
+        unit: null,
+        properties: {},
+        search_keywords: [],
+      });
+
+      const res = await fixture.workspaceA.owner
+        .post('/api/items/search-by-photo')
+        .attach('file', Buffer.from('fake-image-bytes'), {
+          filename: 'photo.jpg',
+          contentType: 'image/jpeg',
+        })
+        .expect(200);
+
+      expect(res.body.matches.map((m: { id: string }) => m.id)).toContain(item.body.id);
+    });
+  });
+
+  // =========================================================================
+  // AC6 — round-2 review, MAJOR finding 3: the `@Public()` QR route
+  // (`GET /api/qr/:token`) has no ambient workspace at all —
+  // `QrService.assertTokenExists` must apply the same read-only
+  // `app.rls_bypass_read` pattern `ItemsService.findByQr` uses, or every
+  // valid printed sticker 404s under the restricted role.
+  // =========================================================================
+
+  describe('AC6: the public QR PNG render route resolves correctly with NO ambient workspace at all', () => {
+    it('GET /api/qr/:token (no auth cookie at all) renders a PNG for an existing item token', async () => {
+      const item = await createItem(fixture.workspaceA.owner, 'AC6 QR public item');
+
+      const res = await supertest(app.getHttpServer()).get(`/api/qr/${item.qrCode}`).expect(200);
+
+      expect(res.headers['content-type']).toBe('image/png');
+    });
+
+    it('GET /api/qr/:token (no auth cookie at all) renders a PNG for an existing LOCATION token', async () => {
+      const locRes = await fixture.workspaceA.owner
+        .post('/api/locations')
+        .send({ name: 'AC6 QR public location' })
+        .expect(201);
+
+      const res = await supertest(app.getHttpServer())
+        .get(`/api/qr/${locRes.body.qrCode}`)
+        .expect(200);
+
+      expect(res.headers['content-type']).toBe('image/png');
+    });
+
+    it('GET /api/qr/:token still 404s for an unknown token, with no ambient workspace at all', async () => {
+      await supertest(app.getHttpServer()).get('/api/qr/no-such-token-anywhere').expect(404);
+    });
+  });
+
+  // =========================================================================
+  // AC7 (self-maintenance, round-2 review finding 8) — every table with its
+  // own `workspaceId` column (minus the documented WorkspaceMember/
+  // WorkspaceInvite exclusions) must have RLS policies AND be listed in
+  // `PrismaService`'s `RLS_SCOPED_MODELS` — a future workspace-scoped table
+  // can't silently ship without all three staying in sync. Also asserts each
+  // scoped table carries the 4 per-command policies from the finding-2 fix,
+  // not a single `FOR ALL` policy.
+  // =========================================================================
+
+  describe('AC7 (self-maintenance): workspaceId columns, pg_policies, and RLS_SCOPED_MODELS stay in sync', () => {
+    /**
+     * Deliberately excluded from RLS — membership/identity RESOLUTION
+     * tables, not workspace-scoped domain data (see
+     * docs/operations/tenancy-rls.md's "Scope" section for the full
+     * rationale: every access to them is an explicit, non-ambient lookup by
+     * design, often for a workspace OTHER than the caller's ambient one).
+     */
+    const DOCUMENTED_UNSCOPED_TABLES = new Set(['WorkspaceMember', 'WorkspaceInvite']);
+
+    function toModelPropertyName(tableName: string): string {
+      return tableName.charAt(0).toLowerCase() + tableName.slice(1);
+    }
+
+    it('every workspaceId-bearing table (minus documented exclusions) has RLS policies and is in RLS_SCOPED_MODELS — and nothing extra is', async () => {
+      const client = new Client({ connectionString: OWNER_DB_URL });
+      await client.connect();
+      try {
+        const { rows: columnRows } = await client.query<{ table_name: string }>(
+          `SELECT table_name FROM information_schema.columns
+           WHERE table_schema = 'public' AND column_name = 'workspaceId'
+           ORDER BY table_name`,
+        );
+        const tablesWithWorkspaceId = columnRows.map((r) => r.table_name);
+
+        const { rows: policyRows } = await client.query<{ tablename: string }>(
+          `SELECT DISTINCT tablename FROM pg_policies WHERE schemaname = 'public' ORDER BY tablename`,
+        );
+        const tablesWithPolicies = new Set(policyRows.map((r) => r.tablename));
+
+        const expectedScopedTables = tablesWithWorkspaceId.filter(
+          (t) => !DOCUMENTED_UNSCOPED_TABLES.has(t),
+        );
+        // Guards against a vacuously-true assertion loop below if the
+        // information_schema query itself regressed to returning nothing.
+        expect(expectedScopedTables.length).toBeGreaterThan(0);
+
+        for (const table of expectedScopedTables) {
+          expect(tablesWithPolicies.has(table)).toBe(true);
+          expect(RLS_SCOPED_MODELS.has(toModelPropertyName(table))).toBe(true);
+        }
+
+        // Reverse direction: nothing in RLS_SCOPED_MODELS is stale (points
+        // at a table with no workspaceId column, or no actual policy).
+        for (const modelName of RLS_SCOPED_MODELS) {
+          const tableName = modelName.charAt(0).toUpperCase() + modelName.slice(1);
+          expect(tablesWithWorkspaceId).toContain(tableName);
+          expect(tablesWithPolicies.has(tableName)).toBe(true);
+        }
+
+        // The documented exclusions must genuinely have NO policy — an
+        // accidental "helpful" policy there would fight
+        // WorkspaceContextGuard's own cross-tenant membership resolution.
+        for (const excluded of DOCUMENTED_UNSCOPED_TABLES) {
+          expect(tablesWithPolicies.has(excluded)).toBe(false);
+        }
+
+        // Round-2 review finding 2 — each scoped table must carry FOUR
+        // per-command policies (SELECT/INSERT/UPDATE/DELETE), not one
+        // `FOR ALL` policy.
+        for (const table of expectedScopedTables) {
+          const { rows: cmdRows } = await client.query<{ cmd: string }>(
+            `SELECT cmd FROM pg_policies WHERE schemaname = 'public' AND tablename = $1 ORDER BY cmd`,
+            [table],
+          );
+          expect(cmdRows.map((r) => r.cmd)).toEqual(['DELETE', 'INSERT', 'SELECT', 'UPDATE']);
+        }
+      } finally {
+        await client.end();
+      }
     });
   });
 });
