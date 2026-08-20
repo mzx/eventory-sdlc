@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { defaultWorkspaceTagWhere } from '../workspace/default-workspace';
 
 export interface TagWithCount {
   id: string;
@@ -33,10 +34,17 @@ export class TagsService {
   /**
    * Upsert a single tag by name. Returns the existing record if already present.
    * Called by ItemsService (EVT-3) when creating/updating an item's tag list.
+   *
+   * `Tag.name` uniqueness was re-scoped to `@@unique([workspaceId, name])`
+   * by EVT-39, so the lookup needs an explicit `workspaceId` to form the
+   * compound key — see `defaultWorkspaceTagWhere`'s doc comment. `create`
+   * itself doesn't need `workspaceId` spelled out — the column's schema
+   * default fills it — but including it keeps the row the upsert reads and
+   * the row it writes unambiguously the same one.
    */
   async upsertByName(name: string): Promise<{ id: string; name: string; color: string | null }> {
     return this.prisma.tag.upsert({
-      where: { name },
+      where: await defaultWorkspaceTagWhere(this.prisma, name),
       update: {},
       create: { name },
     });

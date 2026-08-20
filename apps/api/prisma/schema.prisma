@@ -28,6 +28,38 @@
 // "how many are actually left?" prompt riding a consume via
 // `ItemsService.consume`) always stamps `lastVerifiedAt`, and records an
 // `adjust` movement only when the counted quantity differs from book.
+// Workspace schema foundation (EVT-39): multi-tenancy row-scoping, phase 1
+// of the tenancy ladder (operator decision 2026-08-20 — shared-DB row
+// scoping with memberships; Postgres RLS is a later hardening task, EVT-44).
+// This task is schema-only — no per-request tenant context or authorization
+// yet (that's EVT-40+) — so a non-null `workspaceId` FK is added to every
+// domain table (Item, Location, Category, Tag, Project, StockMovement,
+// ShoppingListEntry, Photo — `BomLine` deliberately does NOT get its own
+// column; it inherits scope transitively via its required `Project`
+// relation) and every column defaults to the single `Workspace` row created
+// by the EVT-39 migration, at the fixed literal id
+// `00000000-0000-0000-0000-000000000001`. That literal is intentionally
+// duplicated (not imported — Prisma's schema DSL can't reference TS) in:
+//   - every `workspaceId` field's `@default(...)` below (so existing
+//     `.create()` calls with no explicit `workspaceId` keep compiling AND
+//     behaving unchanged — Prisma treats a defaulted field as optional in
+//     the generated `*CreateInput` types)
+//   - the migration's `INSERT INTO "Workspace"` statement
+//   - `DEFAULT_WORKSPACE_ID` in `src/workspace/default-workspace.ts`, the
+//     single module-level cached-lookup constant used by call sites (e.g.
+//     `TagsService.upsertByName`) that need the id explicitly rather than
+//     relying on the column default — e.g. a composite-unique `where`
+//     clause, which needs `workspaceId` even when creating.
+// If this literal is ever changed, all three must be updated together.
+//
+// Re-scoped uniqueness: `Tag.name`, `Location.path`, and `Category.path`
+// move from a bare `@unique` to `@@unique([workspaceId, <col>])` — two
+// workspaces may now reuse the same tag name / location path. `qrCode` on
+// Item/Location stays GLOBALLY unique on purpose: QR tokens live on printed
+// physical labels and scan resolution stays global — authorization comes in
+// EVT-40, not this task. `ShoppingListEntry`'s partial "one open entry per
+// item" unique index is already item-scoped (items can't span workspaces)
+// and is untouched.
 
 generator client {
   provider = "prisma-client-js"
@@ -54,6 +86,58 @@ enum UserRole {
   admin
 }
 
+/// Workspace-scoped role (EVT-39, distinct from the global `UserRole`
+/// above). `owner` — full control incl. membership management; backfilled
+/// from every pre-existing `UserRole.admin`. `member` — full read/write on
+/// workspace domain data; backfilled from every pre-existing `UserRole.user`.
+/// `viewer` — read-only (operator decision 2026-08-20); no pre-existing user
+/// backfills to this role, it's only reachable via a future workspace-invite
+/// flow (EVT-42+).
+enum WorkspaceRole {
+  owner
+  member
+  viewer
+}
+
+/// Row-scoping tenancy boundary (EVT-39). For now there is exactly one row
+/// — the "Default Workspace" created by the EVT-39 migration — and every
+/// pre-existing (and, until EVT-40 lands, every newly created) row across
+/// the domain tables backfills/defaults to it. See the schema-header note
+/// for the fixed literal id this row is created with.
+model Workspace {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now())
+
+  members             WorkspaceMember[]
+  items               Item[]
+  locations           Location[]
+  categories          Category[]
+  tags                Tag[]
+  projects            Project[]
+  stockMovements      StockMovement[]
+  shoppingListEntries ShoppingListEntry[]
+  photos              Photo[]
+}
+
+/// Explicit Workspace<->User membership (EVT-39) — `@@unique([workspaceId,
+/// userId])` mirrors `ItemTag`'s composite-key join pattern. Cascades on
+/// either side: a membership cannot outlive the workspace or the user it
+/// links.
+model WorkspaceMember {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole
+  createdAt   DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation("WorkspaceMemberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
 /// A household member authenticated via Google OAuth.
 model User {
   id           String     @id @default(uuid()) @db.Uuid
@@ -78,12 +162,15 @@ model User {
   approvedBy    User?  @relation("UserApprovals", fields: [approvedById], references: [id], onDelete: SetNull)
   approvedUsers User[] @relation("UserApprovals")
 
-  createdItems   Item[]          @relation("ItemCreatedBy")
-  uploadedPhotos Photo[]         @relation("PhotoUploadedBy")
+  createdItems         Item[]            @relation("ItemCreatedBy")
+  uploadedPhotos       Photo[]           @relation("PhotoUploadedBy")
   // Stock movements this user triggered (EVT-25). Nullable on StockMovement,
   // same rationale as Item.createdById — a deleted user's past movements
   // keep `null` rather than vanishing (onDelete: SetNull).
-  stockMovements StockMovement[] @relation("StockMovementCreatedBy")
+  stockMovements       StockMovement[]   @relation("StockMovementCreatedBy")
+  // Workspace memberships (EVT-39) — cascades on user delete, see
+  // WorkspaceMember's doc comment.
+  workspaceMemberships WorkspaceMember[] @relation("WorkspaceMemberships")
 
   @@index([status])
 }
@@ -105,68 +192,87 @@ enum LocationKind {
 /// parent/child relation and by a materialized `path` (e.g.
 /// "garage.west-wall.cabinet-3") for fast prefix lookups.
 model Location {
-  id       String       @id @default(uuid()) @db.Uuid
-  name     String
-  path     String       @unique
-  parentId String?      @db.Uuid
-  notes    String?
-  qrCode   String       @unique @default(uuid())
-  kind     LocationKind @default(area)
+  id          String       @id @default(uuid()) @db.Uuid
+  name        String
+  path        String
+  parentId    String?      @db.Uuid
+  notes       String?
+  qrCode      String       @unique @default(uuid())
+  kind        LocationKind @default(area)
+  /// Tenancy boundary (EVT-39) — see schema-header note. `path` uniqueness
+  /// is re-scoped to per-workspace below; `qrCode` above stays global.
+  workspaceId String       @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
 
-  parent   Location?  @relation("LocationHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
-  children Location[] @relation("LocationHierarchy")
-  items    Item[]
+  parent    Location?  @relation("LocationHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Location[] @relation("LocationHierarchy")
+  items     Item[]
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
   // Stock movements that departed from / arrived at this location (EVT-25).
   // Two named relations since a single move row references both sides.
-  movementsFrom StockMovement[] @relation("StockMovementFromLocation")
-  movementsTo   StockMovement[] @relation("StockMovementToLocation")
+  movementsFrom      StockMovement[] @relation("StockMovementFromLocation")
+  movementsTo        StockMovement[] @relation("StockMovementToLocation")
   // Itemless "container moved" ledger entries where this location IS the
   // container that moved (EVT-30) — distinct from movementsFrom/movementsTo
   // above, which record locations an ITEM moved between.
   containerMovements StockMovement[] @relation("StockMovementContainer")
 
+  @@unique([workspaceId, path])
   @@index([parentId])
   @@index([path])
   @@index([kind])
+  @@index([workspaceId])
 }
 
 /// Classification tree, same shape as Location minus the QR code (categories
 /// are not physically labelled).
 model Category {
-  id       String  @id @default(uuid()) @db.Uuid
-  name     String
-  path     String  @unique
-  parentId String? @db.Uuid
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String
+  path        String
+  parentId    String? @db.Uuid
+  /// Tenancy boundary (EVT-39) — see schema-header note. `path` uniqueness
+  /// is re-scoped to per-workspace below.
+  workspaceId String  @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
 
-  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
-  children Category[] @relation("CategoryHierarchy")
-  items    Item[]
+  parent    Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Category[] @relation("CategoryHierarchy")
+  items     Item[]
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
+  @@unique([workspaceId, path])
   @@index([parentId])
   @@index([path])
+  @@index([workspaceId])
 }
 
 /// Free-form label, many-to-many with Item via the explicit ItemTag join.
 model Tag {
-  id    String  @id @default(uuid()) @db.Uuid
-  name  String  @unique
-  color String?
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String
+  color       String?
+  /// Tenancy boundary (EVT-39) — see schema-header note. `name` uniqueness
+  /// is re-scoped to per-workspace below.
+  workspaceId String  @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
 
-  items ItemTag[]
+  items     ItemTag[]
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
 }
 
 /// A single inventory item.
 model Item {
-  id             String   @id @default(uuid()) @db.Uuid
-  name           String
-  description    String?
-  quantity       Int      @default(1)
+  id                String    @id @default(uuid()) @db.Uuid
+  name              String
+  description       String?
+  quantity          Int       @default(1)
   /// Replenishment threshold (EVT-26). `null` = no replenishment tracking for
   /// this item. When a movement leaves `quantity <= minQuantity`, an open
   /// `low-stock` ShoppingListEntry is created (idempotent — see
   /// StockMovementsService.recordMovement).
-  minQuantity    Int?
+  minQuantity       Int?
   /// Count cadence (EVT-27). `null` = this item is not on a count schedule —
   /// it never appears on the verification queue regardless of how stale
   /// `lastVerifiedAt` is. When set, the item is "due" once `lastVerifiedAt +
@@ -176,37 +282,41 @@ model Item {
   /// count (`ItemsService.count`) or the opportunistic "how many are
   /// actually left?" prompt (`ItemsService.consume`). `null` = never
   /// verified; treated as due `countIntervalDays` days after `createdAt`.
-  lastVerifiedAt DateTime?
-  unit           String?
+  lastVerifiedAt    DateTime?
+  unit              String?
   /// Notion-style free-form attributes (e.g. { "voltage": "12V", "brand": "Bosch" }).
-  properties     Json     @default("{}")
-  qrCode         String   @unique @default(uuid())
-  locationId     String?  @db.Uuid
-  categoryId     String?  @db.Uuid
-  primaryPhotoId String?  @db.Uuid
+  properties        Json      @default("{}")
+  qrCode            String    @unique @default(uuid())
+  locationId        String?   @db.Uuid
+  categoryId        String?   @db.Uuid
+  primaryPhotoId    String?   @db.Uuid
   /// Who created this item (EVT-14). Nullable — items predating auth, or
   /// items whose creator was later deleted, keep `null` (SetNull).
-  createdById    String?  @db.Uuid
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdById       String?   @db.Uuid
+  /// Tenancy boundary (EVT-39) — see schema-header note. `qrCode` above
+  /// stays global on purpose (physical QR labels resolve globally).
+  workspaceId       String    @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  location     Location?       @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  category     Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  location            Location?           @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  category            Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   // Named relation to disambiguate from the reverse Photo.item relation below,
   // since Item and Photo reference each other (primary photo vs. photo's owning item).
-  primaryPhoto Photo?          @relation("ItemPrimaryPhoto", fields: [primaryPhotoId], references: [id], onDelete: SetNull)
-  photos       Photo[]         @relation("ItemPhotos")
-  tags         ItemTag[]
-  createdBy    User?           @relation("ItemCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  primaryPhoto        Photo?              @relation("ItemPrimaryPhoto", fields: [primaryPhotoId], references: [id], onDelete: SetNull)
+  photos              Photo[]             @relation("ItemPhotos")
+  tags                ItemTag[]
+  createdBy           User?               @relation("ItemCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workspace           Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   // Reverse side of BomLine.item (EVT-16). Deleting an item does NOT delete
   // the BOM line — see BomLine.itemId (onDelete: SetNull) — the line keeps
   // its denormalized `name`.
-  bomLines     BomLine[]
+  bomLines            BomLine[]
   // Full movement ledger for this item (EVT-25), newest-first via
   // StockMovementsService.listForItem. Cascades on item delete — itemId is
   // required (not nullable) on StockMovement, so history cannot outlive the
   // item it describes.
-  movements    StockMovement[]
+  movements           StockMovement[]
   // Shopping-list entries for this item (EVT-26) — at most one `open` at a
   // time (see the partial unique index note above the imports). Cascades on
   // item delete, same rationale as `movements`.
@@ -216,6 +326,7 @@ model Item {
   @@index([categoryId])
   @@index([name])
   @@index([createdById])
+  @@index([workspaceId])
 }
 
 /// Explicit Item<->Tag join table (composite PK, cascade on either side).
@@ -245,15 +356,21 @@ model Photo {
   /// Who uploaded this photo (EVT-14). Nullable, same rationale as
   /// `Item.createdById`.
   uploadedById String?  @db.Uuid
+  /// Tenancy boundary (EVT-39) — see schema-header note. Photos get their
+  /// own `workspaceId` (rather than inheriting via `itemId`, which is
+  /// nullable) because storage authorization (EVT-40) scopes on it directly.
+  workspaceId  String   @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  item            Item?  @relation("ItemPhotos", fields: [itemId], references: [id], onDelete: Cascade)
-  primaryForItems Item[] @relation("ItemPrimaryPhoto")
-  uploadedBy      User?  @relation("PhotoUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  item            Item?     @relation("ItemPhotos", fields: [itemId], references: [id], onDelete: Cascade)
+  primaryForItems Item[]    @relation("ItemPrimaryPhoto")
+  uploadedBy      User?     @relation("PhotoUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
   @@index([itemId])
   @@index([uploadedById])
+  @@index([workspaceId])
 }
 
 /// A workshop project (EVT-16). Bill-of-materials lines are owned via
@@ -273,10 +390,15 @@ model Project {
   notes       String?
   startedAt   DateTime?
   completedAt DateTime?
+  /// Tenancy boundary (EVT-39) — see schema-header note. `BomLine`
+  /// deliberately does NOT get its own `workspaceId`; it inherits scope
+  /// transitively via this required relation.
+  workspaceId String        @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
   bomLines       BomLine[]
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   // Stock movements linked to this project (EVT-25) — e.g. a future BOM
   // backflush (EVT-28) recording `consume` movements against it. Unused by
   // this task's endpoints but the FK exists so that work doesn't need its
@@ -284,6 +406,7 @@ model Project {
   stockMovements StockMovement[]
 
   @@index([status])
+  @@index([workspaceId])
 }
 
 /// A single bill-of-materials line on a Project. May optionally link back to
@@ -343,14 +466,14 @@ enum StockMovementKind {
 }
 
 model StockMovement {
-  id     String            @id @default(uuid()) @db.Uuid
+  id             String            @id @default(uuid()) @db.Uuid
   /// Nullable (EVT-30) — set for every item-quantity/location movement
   /// (`add`/`consume`/`adjust`, and an item-level `move`); null for a
   /// container re-parent movement, which sets `containerId` instead. Exactly
   /// one of `itemId`/`containerId` is populated per row — enforced in
   /// `StockMovementsService`, not by a DB constraint (Prisma has no
   /// cross-column CHECK support here).
-  itemId String? @db.Uuid
+  itemId         String?           @db.Uuid
   /// Set only for a container re-parent movement (EVT-30,
   /// `LocationsService.moveContainer`) — the container `Location` that moved.
   /// Null for every item-level movement.
@@ -377,6 +500,8 @@ model StockMovement {
   /// Who triggered this movement. Nullable — same rationale as
   /// `Item.createdById` (predates auth, or the user was later deleted).
   createdById    String?           @db.Uuid
+  /// Tenancy boundary (EVT-39) — see schema-header note.
+  workspaceId    String            @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
   createdAt      DateTime          @default(now())
 
   item         Item?     @relation(fields: [itemId], references: [id], onDelete: Cascade)
@@ -392,6 +517,7 @@ model StockMovement {
   toLocation   Location? @relation("StockMovementToLocation", fields: [toLocationId], references: [id], onDelete: SetNull)
   project      Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   createdBy    User?     @relation("StockMovementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
   // Primary read patterns: GET /api/items/:id/movements and
   // GET /api/locations/:id/movements, both newest first.
@@ -400,6 +526,7 @@ model StockMovement {
   @@index([fromLocationId])
   @@index([toLocationId])
   @@index([projectId])
+  @@index([workspaceId])
 }
 
 /// A shopping-list / replenishment entry (EVT-26) — the personal e-kanban.
@@ -424,17 +551,23 @@ enum ShoppingListEntrySource {
 /// both the auto-trigger and the manual "Running low" button idempotent
 /// under concurrent/racing writes (EVT-26 risk).
 model ShoppingListEntry {
-  id         String                  @id @default(uuid()) @db.Uuid
-  itemId     String                  @db.Uuid
-  status     ShoppingListEntryStatus @default(open)
-  source     ShoppingListEntrySource
-  createdAt  DateTime                @default(now())
-  resolvedAt DateTime?
+  id          String                  @id @default(uuid()) @db.Uuid
+  itemId      String                  @db.Uuid
+  status      ShoppingListEntryStatus @default(open)
+  source      ShoppingListEntrySource
+  /// Tenancy boundary (EVT-39) — see schema-header note. The existing
+  /// partial "one open entry per item" unique index stays item-scoped
+  /// (items can't span workspaces) and is untouched by this task.
+  workspaceId String                  @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
+  createdAt   DateTime                @default(now())
+  resolvedAt  DateTime?
 
-  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item      Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
   // Query pattern: GET /api/shopping-list (open entries, oldest first) and
   // the per-item idempotency check both filter/sort on these.
   @@index([itemId])
   @@index([status, createdAt])
+  @@index([workspaceId])
 }

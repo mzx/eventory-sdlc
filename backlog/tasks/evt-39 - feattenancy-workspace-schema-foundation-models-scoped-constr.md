@@ -1,10 +1,10 @@
 ---
 id: EVT-39
 title: 'feat(tenancy): workspace schema foundation — models, scoped constraints, default-workspace backfill'
-status: To Do
+status: In Progress
 priority: high
 created_date: '2026-08-19 23:32'
-updated_date: '2026-08-19 23:32'
+updated_date: '2026-08-19 23:42'
 assignee: []
 labels:
   - tenancy

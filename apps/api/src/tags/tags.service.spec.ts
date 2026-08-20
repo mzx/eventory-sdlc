@@ -1,17 +1,28 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { TagsService } from './tags.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  DEFAULT_WORKSPACE_ID,
+  __resetDefaultWorkspaceCacheForTests,
+} from '../workspace/default-workspace';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Minimal PrismaService double with just the tag model mocked. */
+/**
+ * Minimal PrismaService double with the tag model mocked plus `workspace`
+ * (EVT-39) — `upsertByName` resolves the Default Workspace's id before
+ * building its compound `where`, see `default-workspace.ts`.
+ */
 function makePrismaMock() {
   return {
     tag: {
       findMany: jest.fn(),
       upsert: jest.fn(),
+    },
+    workspace: {
+      findUniqueOrThrow: jest.fn().mockResolvedValue({ id: DEFAULT_WORKSPACE_ID }),
     },
   };
 }
@@ -25,6 +36,10 @@ describe('TagsService', () => {
   let prismaMock: ReturnType<typeof makePrismaMock>;
 
   beforeEach(async () => {
+    // The default-workspace lookup caches its result at module scope
+    // (EVT-39) — reset it so each test starts from the same "not yet
+    // resolved" state and genuinely exercises `workspace.findUniqueOrThrow`.
+    __resetDefaultWorkspaceCacheForTests();
     prismaMock = makePrismaMock();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -110,7 +125,7 @@ describe('TagsService', () => {
       const result = await service.upsertByName('cordless');
 
       expect(prismaMock.tag.upsert).toHaveBeenCalledWith({
-        where: { name: 'cordless' },
+        where: { workspaceId_name: { workspaceId: DEFAULT_WORKSPACE_ID, name: 'cordless' } },
         update: {},
         create: { name: 'cordless' },
       });
@@ -123,6 +138,20 @@ describe('TagsService', () => {
 
       const result = await service.upsertByName('drill');
       expect(result).toEqual(existing);
+    });
+
+    it('resolves the default workspace id once and caches it across calls (EVT-39)', async () => {
+      prismaMock.tag.upsert
+        .mockResolvedValueOnce({ id: 'id-1', name: 'a', color: null })
+        .mockResolvedValueOnce({ id: 'id-2', name: 'b', color: null });
+
+      await service.upsertByName('a');
+      await service.upsertByName('b');
+
+      // Two upserts, but only a single `workspace.findUniqueOrThrow` round-trip
+      // — the module-level cache serves the second call.
+      expect(prismaMock.tag.upsert).toHaveBeenCalledTimes(2);
+      expect(prismaMock.workspace.findUniqueOrThrow).toHaveBeenCalledTimes(1);
     });
   });
 
