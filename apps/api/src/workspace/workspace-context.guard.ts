@@ -51,9 +51,10 @@ const NO_WORKSPACE_MESSAGE = 'No workspace access';
  * This closes a material gap the pre-fix version had: `request.workspace =
  * null; return true` let the request continue into the handler regardless,
  * so any controller module whose author forgot to declare
- * `@CurrentWorkspace()` on every route (as of this task, `LocationsController`,
- * `CategoriesController`, `ProjectsController`, `ShoppingListController` —
- * EVT-41's scope, not yet landed) was silently reachable, full stop, by a
+ * `@CurrentWorkspace()` on every route (at the time this guard was written,
+ * `LocationsController`, `CategoriesController`, `ProjectsController`,
+ * `ShoppingListController` hadn't yet gained their own tenant-scoping —
+ * that landed with EVT-41) was silently reachable, full stop, by a
  * zero-membership caller — including a throwaway Google account with no
  * allowlisting required, once EVT-42 made JwtAuthGuard stop blocking on
  * `status`. Failing closed at THIS guard, rather than relying on every

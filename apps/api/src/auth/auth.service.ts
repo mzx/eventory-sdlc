@@ -1,8 +1,9 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { User, UserRole, UserStatus } from '@prisma/client';
+import { InviteStatus, Prisma, User, UserRole, UserStatus } from '@prisma/client';
 import type { CookieOptions } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
+import { hashInviteToken } from '../workspace/workspaces.service';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,85 @@ export function parseAdminAllowlist(raw: string | undefined): Set<string> {
   );
 }
 
+/** Parsed form of `EVENTORY_ALLOWED_SIGNINS` — see {@link parseAllowedSignins}. */
+export interface AllowedSignins {
+  emails: Set<string>;
+  domains: Set<string>;
+}
+
+/**
+ * Parses `EVENTORY_ALLOWED_SIGNINS` (EVT-45) — the sign-in allowlist that
+ * closes open self-registration for a public deployment. Comma-separated
+ * entries, each either a bare email (`alice@example.com`, exact match) or a
+ * `@domain.com` entry (matches ANY address at that exact domain — no
+ * subdomain wildcarding). Case-insensitive, trims whitespace, ignores empty
+ * entries — same conventions as `parseAdminAllowlist`.
+ *
+ * This is a DIFFERENT allowlist from `EVENTORY_ADMIN_EMAILS`
+ * (`parseAdminAllowlist`): that one controls INSTANCE-ADMIN promotion for
+ * accounts that are already permitted to sign in; this one controls whether
+ * a NEW Google account may create a `User` row at all. See
+ * `upsertFromGoogleProfile`'s doc comment for how the two interact.
+ */
+export function parseAllowedSignins(raw: string | undefined): AllowedSignins {
+  const emails = new Set<string>();
+  const domains = new Set<string>();
+  if (!raw) {
+    return { emails, domains };
+  }
+  for (const rawEntry of raw.split(',')) {
+    const entry = rawEntry.trim().toLowerCase();
+    if (entry.length === 0) {
+      continue;
+    }
+    if (entry.startsWith('@')) {
+      const domain = entry.slice(1);
+      if (domain.length > 0) {
+        domains.add(domain);
+      }
+    } else {
+      emails.add(entry);
+    }
+  }
+  return { emails, domains };
+}
+
+/** `true` once at least one email or domain entry has been configured. */
+export function isAllowlistConfigured(allowlist: AllowedSignins): boolean {
+  return allowlist.emails.size > 0 || allowlist.domains.size > 0;
+}
+
+/** Whether `email` matches an exact entry, or its domain matches a `@domain` entry. */
+export function isEmailAllowed(email: string, allowlist: AllowedSignins): boolean {
+  const lower = email.toLowerCase();
+  if (allowlist.emails.has(lower)) {
+    return true;
+  }
+  const atIndex = lower.lastIndexOf('@');
+  if (atIndex === -1) {
+    return false;
+  }
+  return allowlist.domains.has(lower.slice(atIndex + 1));
+}
+
+/**
+ * Thrown by `upsertFromGoogleProfile` (EVT-45) when a BRAND-NEW sign-in
+ * fails the `EVENTORY_ALLOWED_SIGNINS` gate: not on the allowlist, not
+ * `EVENTORY_ADMIN_EMAILS`-allowlisted, no valid unclaimed invite token
+ * presented, and not the zero-user bootstrap case. Deliberately NOT a
+ * NestJS `HttpException` — `AuthController.googleCallback` catches this
+ * specifically to render a dedicated "invite-only" page instead of a
+ * generic JSON error body, and to guarantee no session cookie is ever set
+ * for the refused attempt. No `User` row is created for a refusal (see this
+ * gate's implementation below) — nothing to roll back.
+ */
+export class SignInNotAllowedError extends Error {
+  constructor(email: string) {
+    super(`Sign-in refused: ${email} is not on this instance's allowlist`);
+    this.name = 'SignInNotAllowedError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -181,13 +261,50 @@ export class AuthService {
    *   create or join one. `JwtAuthGuard` now blocks ONLY `rejected` (an
    *   explicit instance-admin ban); see its doc comment.
    * - Every sign-in (new or returning) stamps `lastLoginAt`.
+   * - EVT-45 sign-in allowlist — closes open self-registration for a public
+   *   deployment. Applies ONLY to a BRAND-NEW sign-in (no existing row
+   *   matched by `googleId` OR `email`); an already-registered account can
+   *   always sign back in regardless of the allowlist's current contents —
+   *   this gates NEW registrations, not existing accounts (tightening the
+   *   allowlist after the fact never retroactively locks anyone out). A new
+   *   sign-in is permitted when ANY of:
+   *     1. `EVENTORY_ALLOWED_SIGNINS` (see `parseAllowedSignins`) is unset/
+   *        empty — open registration, the pre-EVT-45 default. The operator
+   *        gets a prominent startup warning about this (`main.ts`), but
+   *        nothing at request time refuses the sign-in.
+   *     2. the instance has zero OAuth users yet (`isFirstOAuthUser` below)
+   *        — the fresh-deploy bootstrap path must never be gate-able by an
+   *        env var an operator forgot to set before their own first sign-in
+   *        (EVT-20 lesson).
+   *     3. the email is `EVENTORY_ADMIN_EMAILS`-allowlisted — an operator who
+   *        configured that var clearly intends that account to have full
+   *        access; requiring it ALSO be duplicated into
+   *        `EVENTORY_ALLOWED_SIGNINS` is an easy way to lock out the actual
+   *        operator (same EVT-20-style footgun this task is closing for
+   *        `EVENTORY_ALLOWED_SIGNINS` itself).
+   *     4. the email or its `@domain` matches `EVENTORY_ALLOWED_SIGNINS`.
+   *     5. `inviteToken` resolves to a currently-pending, unexpired
+   *        `WorkspaceInvite` — "the invite IS the authorization": a household
+   *        member who was sent an invite link must be able to complete their
+   *        FIRST Google sign-in even though they're not pre-allowlisted.
+   *        This does NOT redeem the invite (that still only happens via
+   *        `InvitesService.redeem`, called separately once the invitee is
+   *        authenticated) — it's purely an existence/validity check, so a
+   *        rejected sign-in never leaves a partially-consumed invite behind.
+   *   Refused otherwise: throws `SignInNotAllowedError`, and — deliberately —
+   *   does NOT persist a `User` row for the refusal (documented choice, see
+   *   that error's doc comment: no audit row is needed here because the
+   *   caller never had a session to begin with, unlike `rejected`, which is
+   *   an explicit admin action against an EXISTING account).
    */
   async upsertFromGoogleProfile(
     profile: GoogleProfile,
     env: NodeJS.ProcessEnv = process.env,
+    inviteToken?: string,
   ): Promise<User> {
     const adminAllowlist = parseAdminAllowlist(env.EVENTORY_ADMIN_EMAILS);
     const isAllowlistedAdmin = adminAllowlist.has(profile.email.toLowerCase());
+    const signinAllowlist = parseAllowedSignins(env.EVENTORY_ALLOWED_SIGNINS);
 
     const byGoogleId = await this.prisma.user.findUnique({
       where: { googleId: profile.googleId },
@@ -249,6 +366,14 @@ export class AuthService {
       const isFirstOAuthUser = (await tx.user.count({ where: { googleId: { not: null } } })) === 0;
       const promote = isFirstOAuthUser || isAllowlistedAdmin;
 
+      if (!isFirstOAuthUser && !isAllowlistedAdmin && isAllowlistConfigured(signinAllowlist)) {
+        const emailAllowed = isEmailAllowed(profile.email, signinAllowlist);
+        const invited = emailAllowed ? false : await this.hasValidPendingInvite(tx, inviteToken);
+        if (!emailAllowed && !invited) {
+          throw new SignInNotAllowedError(profile.email);
+        }
+      }
+
       return tx.user.create({
         data: {
           googleId: profile.googleId,
@@ -271,6 +396,28 @@ export class AuthService {
       });
     });
     return created;
+  }
+
+  /**
+   * `true` iff `rawToken` resolves to a `WorkspaceInvite` that is currently
+   * `pending` and not yet expired (EVT-45). A read-only existence/validity
+   * check — never mutates the invite, never redeems it. Reuses
+   * `WorkspacesService`'s hashing scheme (`hashInviteToken`) so a raw token
+   * value never needs to leave that module's control to be looked up here.
+   */
+  private async hasValidPendingInvite(
+    tx: Prisma.TransactionClient,
+    rawToken: string | undefined,
+  ): Promise<boolean> {
+    if (!rawToken) {
+      return false;
+    }
+    const invite = await tx.workspaceInvite.findUnique({
+      where: { tokenHash: hashInviteToken(rawToken) },
+    });
+    return Boolean(
+      invite && invite.status === InviteStatus.pending && invite.expiresAt > new Date(),
+    );
   }
 
   /** Signs a JWT carrying the minimal claims `JwtAuthGuard` needs. */

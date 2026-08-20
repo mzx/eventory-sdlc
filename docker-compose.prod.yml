@@ -45,6 +45,12 @@ services:
       GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       EVENTORY_ANTHROPIC_KEY: ${EVENTORY_ANTHROPIC_KEY:-}
+      # Sign-in allowlist (EVT-45) — MUST be plumbed through here, not just
+      # documented in .env.prod.example, or it silently does nothing on a
+      # real deploy (the EVT-20 lesson this task explicitly calls out).
+      # Defaults to empty (open self-registration + a startup warning) —
+      # see .env.prod.example for why this is the one operators should set.
+      EVENTORY_ALLOWED_SIGNINS: ${EVENTORY_ALLOWED_SIGNINS:-}
     volumes:
       - eventory-photo-storage:/workspace/apps/api/storage
     depends_on:

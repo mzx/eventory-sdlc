@@ -1,8 +1,9 @@
+import { ExecutionContext } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { UserRole, UserStatus } from '@prisma/client';
 import type { Request, Response } from 'express';
-import { AuthController } from './auth.controller';
-import { AUTH_COOKIE_NAME, AuthService } from './auth.service';
+import { AuthController, GoogleSignInGuard } from './auth.controller';
+import { AUTH_COOKIE_NAME, AuthService, SignInNotAllowedError } from './auth.service';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,7 +28,7 @@ function makeUser(overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 function makeResMock(): jest.Mocked<
-  Pick<Response, 'cookie' | 'redirect' | 'clearCookie' | 'status' | 'json'>
+  Pick<Response, 'cookie' | 'redirect' | 'clearCookie' | 'status' | 'json' | 'type' | 'send'>
 > {
   const res = {
     cookie: jest.fn(),
@@ -35,8 +36,11 @@ function makeResMock(): jest.Mocked<
     clearCookie: jest.fn(),
     status: jest.fn(),
     json: jest.fn(),
+    type: jest.fn(),
+    send: jest.fn(),
   } as never;
   (res as { status: jest.Mock }).status.mockReturnValue(res);
+  (res as { type: jest.Mock }).type.mockReturnValue(res);
   return res;
 }
 
@@ -81,11 +85,16 @@ describe('AuthController', () => {
       const res = makeResMock();
       const req = {
         user: { googleId: 'google-1', email: 'alice@example.com', name: 'Alice', picture: null },
+        query: {},
       } as unknown as Request;
 
       await controller.googleCallback(req, res as unknown as Response);
 
-      expect(authService.upsertFromGoogleProfile).toHaveBeenCalledWith(req.user);
+      expect(authService.upsertFromGoogleProfile).toHaveBeenCalledWith(
+        req.user,
+        undefined,
+        undefined,
+      );
       expect(res.cookie).toHaveBeenCalledWith(
         AUTH_COOKIE_NAME,
         'signed-jwt',
@@ -99,7 +108,7 @@ describe('AuthController', () => {
       authService.upsertFromGoogleProfile.mockResolvedValue(user);
       authService.signToken.mockReturnValue('signed-jwt');
       const res = makeResMock();
-      const req = { user: {} } as unknown as Request;
+      const req = { user: {}, query: {} } as unknown as Request;
 
       await controller.googleCallback(req, res as unknown as Response);
 
@@ -111,11 +120,60 @@ describe('AuthController', () => {
       authService.upsertFromGoogleProfile.mockResolvedValue(user);
       authService.signToken.mockReturnValue('signed-jwt');
       const res = makeResMock();
-      const req = { user: {} } as unknown as Request;
+      const req = { user: {}, query: {} } as unknown as Request;
 
       await controller.googleCallback(req, res as unknown as Response);
 
       expect(res.redirect).toHaveBeenCalledWith('https://web.example.com/rejected');
+    });
+
+    // =========================================================================
+    // EVT-45: SignInNotAllowedError -> invite-only page, no cookie, no redirect
+    // =========================================================================
+
+    it("EVT-45: forwards `?state=<token>` (the invite token, per GoogleSignInGuard) as upsertFromGoogleProfile's inviteToken arg", async () => {
+      const user = makeUser({ status: UserStatus.approved });
+      authService.upsertFromGoogleProfile.mockResolvedValue(user);
+      authService.signToken.mockReturnValue('signed-jwt');
+      const res = makeResMock();
+      const req = { user: {}, query: { state: 'raw-invite-token' } } as unknown as Request;
+
+      await controller.googleCallback(req, res as unknown as Response);
+
+      expect(authService.upsertFromGoogleProfile).toHaveBeenCalledWith(
+        req.user,
+        undefined,
+        'raw-invite-token',
+      );
+    });
+
+    it('EVT-45: a SignInNotAllowedError renders the invite-only page (403, no cookie, no redirect)', async () => {
+      authService.upsertFromGoogleProfile.mockRejectedValue(
+        new SignInNotAllowedError('stranger@example.com'),
+      );
+      const res = makeResMock();
+      const req = { user: {}, query: {} } as unknown as Request;
+
+      await controller.googleCallback(req, res as unknown as Response);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.type).toHaveBeenCalledWith('html');
+      expect(res.send).toHaveBeenCalledWith(expect.stringContaining('invite-only'));
+      expect(res.cookie).not.toHaveBeenCalled();
+      expect(res.redirect).not.toHaveBeenCalled();
+    });
+
+    it('EVT-45: re-throws any OTHER error unchanged (not swallowed as invite-only)', async () => {
+      const boom = new Error('database is on fire');
+      authService.upsertFromGoogleProfile.mockRejectedValue(boom);
+      const res = makeResMock();
+      const req = { user: {}, query: {} } as unknown as Request;
+
+      await expect(controller.googleCallback(req, res as unknown as Response)).rejects.toThrow(
+        boom,
+      );
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.cookie).not.toHaveBeenCalled();
     });
   });
 
@@ -166,5 +224,45 @@ describe('AuthController', () => {
       expect(res.clearCookie).toHaveBeenCalledWith(AUTH_COOKIE_NAME, { path: '/' });
       expect(res.redirect).toHaveBeenCalledWith('https://web.example.com');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GoogleSignInGuard (EVT-45) — forwards ?invite= as the OAuth `state` param
+// ---------------------------------------------------------------------------
+
+function makeExecutionContext(query: Record<string, unknown>): ExecutionContext {
+  return {
+    switchToHttp: () => ({
+      getRequest: () => ({ query }) as unknown as Request,
+    }),
+  } as unknown as ExecutionContext;
+}
+
+describe('GoogleSignInGuard', () => {
+  let guard: GoogleSignInGuard;
+
+  beforeEach(() => {
+    guard = new GoogleSignInGuard();
+  });
+
+  it('forwards a non-empty ?invite= query param as { state: <token> }', () => {
+    const context = makeExecutionContext({ invite: 'raw-invite-token' });
+    expect(guard.getAuthenticateOptions(context)).toEqual({ state: 'raw-invite-token' });
+  });
+
+  it('returns undefined (no state) when ?invite= is absent', () => {
+    const context = makeExecutionContext({});
+    expect(guard.getAuthenticateOptions(context)).toBeUndefined();
+  });
+
+  it('returns undefined when ?invite= is empty', () => {
+    const context = makeExecutionContext({ invite: '' });
+    expect(guard.getAuthenticateOptions(context)).toBeUndefined();
+  });
+
+  it('returns undefined when ?invite= is somehow non-string (e.g. repeated query param)', () => {
+    const context = makeExecutionContext({ invite: ['a', 'b'] });
+    expect(guard.getAuthenticateOptions(context)).toBeUndefined();
   });
 });

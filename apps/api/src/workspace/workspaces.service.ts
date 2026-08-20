@@ -76,8 +76,15 @@ function toMemberSummary(member: {
   };
 }
 
-/** SHA-256 of a raw invite token — see `WorkspaceInvite.tokenHash`'s schema doc comment. */
-function hashInviteToken(rawToken: string): string {
+/**
+ * SHA-256 of a raw invite token — see `WorkspaceInvite.tokenHash`'s schema
+ * doc comment. Exported (EVT-45) so `AuthService.upsertFromGoogleProfile`
+ * can look up a `WorkspaceInvite` by its raw token — presented via the OAuth
+ * `state` param — without duplicating the hashing scheme or redeeming the
+ * invite itself (redemption still only happens through `InvitesService.redeem`,
+ * called separately, after sign-in, by the authenticated invitee).
+ */
+export function hashInviteToken(rawToken: string): string {
   return createHash('sha256').update(rawToken).digest('hex');
 }
 
@@ -420,20 +427,39 @@ export class InvitesService {
     }));
   }
 
-  /** Revokes a pending invite, permanently blocking redemption. Owner-only. */
+  /**
+   * Revokes a pending invite, permanently blocking redemption. Owner-only.
+   *
+   * The actual state transition is a conditional `updateMany` scoped on
+   * `status: pending` (not an unconditional `update` gated by an earlier
+   * `findUnique` read) — a raced `InvitesService.redeem` that claims the
+   * SAME invite between this method's existence check and its write must
+   * not have its `redeemed` status clobbered back to `revoked` (EVT-42
+   * clearance review / EVT-45): the pre-fix version read `status: pending`,
+   * then unconditionally wrote `revoked` by id alone, so a concurrent
+   * redemption that committed `redeemed` in between was silently
+   * overwritten — an audit record that says "revoked" for an invite that
+   * was actually successfully used. Throwing 409 here instead (whenever the
+   * conditional write matches zero rows, whatever the reason) leaves
+   * whatever the redemption committed untouched.
+   */
   async revoke(workspaceId: string, inviteId: string, actorId: string): Promise<void> {
     await this.workspaces.requireOwner(workspaceId, actorId);
+    // Existence/ownership check only — NOT the authority for the state
+    // transition below, which re-validates `status: pending` atomically.
     const invite = await this.prisma.workspaceInvite.findUnique({ where: { id: inviteId } });
     if (!invite || invite.workspaceId !== workspaceId) {
       throw new NotFoundException('Invite not found');
     }
-    if (invite.status !== InviteStatus.pending) {
-      throw new ConflictException('Invite is not pending');
-    }
-    await this.prisma.workspaceInvite.update({
-      where: { id: inviteId },
+    const claim = await this.prisma.workspaceInvite.updateMany({
+      where: { id: inviteId, workspaceId, status: InviteStatus.pending },
       data: { status: InviteStatus.revoked },
     });
+    if (claim.count === 0) {
+      throw new ConflictException(
+        'Invite has already been redeemed, revoked, or expired — nothing to revoke',
+      );
+    }
   }
 
   /**
@@ -444,6 +470,15 @@ export class InvitesService {
    * the conditional `updateMany` inside the transaction (not by a
    * check-then-act read beforehand), so two concurrent redemptions of the
    * same token can never both succeed.
+   *
+   * The returned `role` is the upserted membership row's ACTUAL role, read
+   * back from the `upsert`'s result — NOT `invite.role` (EVT-42 clearance
+   * review / EVT-45 fix). For a brand-new membership these are the same
+   * value (the `create` branch stamps `invite.role`), but for an EXISTING
+   * member redeeming an invite for a role other than their own, the
+   * `update: {}` branch leaves their real role untouched — the response
+   * must reflect that, not silently claim the invite's role was granted
+   * when it wasn't.
    *
    * 404 for an unknown token (never redeemable, no such credential ever
    * existed from the caller's point of view); 409 once the token is known
@@ -465,13 +500,13 @@ export class InvitesService {
         throw new ConflictException('Invite has already been used, revoked, or expired');
       }
 
-      await tx.workspaceMember.upsert({
+      const membership = await tx.workspaceMember.upsert({
         where: { workspaceId_userId: { workspaceId: invite.workspaceId, userId: actorId } },
         update: {},
         create: { workspaceId: invite.workspaceId, userId: actorId, role: invite.role },
       });
 
-      return { workspaceId: invite.workspaceId, role: invite.role };
+      return { workspaceId: invite.workspaceId, role: membership.role };
     });
   }
 }

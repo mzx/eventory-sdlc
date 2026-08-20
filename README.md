@@ -259,6 +259,44 @@ admin action required. There is, as of this task, **no web UI** for "create a wo
 redeem an invite" yet — a browser user with zero memberships lands in the app shell with
 403s on every request and no visible next step; that UI is explicitly EVT-43's scope.
 
+### Sign-in allowlist — close open registration before a public deploy (EVT-45)
+
+By default, ANY verified Google account can sign in, self-create a workspace, and reach
+billed Anthropic vision endpoints (`POST /api/photos/upload?analyze=true`,
+`POST /api/items/search-by-photo`) plus on-disk photo storage — open self-registration, fine
+for local/LAN dev, but **not something a public-internet deployment should ship with**. The
+API logs a prominent startup warning whenever this is the case.
+
+Set `EVENTORY_ALLOWED_SIGNINS` (see `apps/api/.env.example` / `.env.prod.example`) — a
+comma-separated list of exact emails and/or `@domain.com` entries — to close it:
+
+```bash
+EVENTORY_ALLOWED_SIGNINS=you@example.com,partner@example.com,@your-family-domain.com
+```
+
+A NEW Google account that isn't on this list is refused at the OAuth callback with an
+"invite-only" page — no `User` row is created, no session cookie is set. This gate applies
+ONLY to brand-new sign-ins; tightening or changing the list never retroactively locks out an
+account that has already signed in before. Three things always get through regardless of the
+list's contents:
+
+- the zero-user bootstrap sign-in (a genuinely fresh deployment's very first sign-in — the
+  EVT-20 lesson: this can never be the thing an operator forgot to configure before their own
+  first login);
+- an `EVENTORY_ADMIN_EMAILS` match (configuring that var already signals operator intent —
+  requiring the SAME email be duplicated into `EVENTORY_ALLOWED_SIGNINS` is exactly the kind
+  of footgun this task exists to close, not repeat);
+- anyone presenting a valid, still-pending, unexpired invite token (`POST
+  /api/workspaces/:id/invites`) via `GET /api/auth/google?invite=<rawToken>` — the invite IS
+  the authorization for a household member who was never pre-allowlisted. The token travels
+  through the OAuth `state` parameter (stateless passthrough, no server-side session
+  required) and is validated but NOT redeemed at sign-in time; the invitee still separately
+  calls `POST /api/invites/redeem` once authenticated, same as always.
+
+`docker-compose.prod.yml` plumbs this env var through to the `api` service — remember to set
+it in your `.env.prod`, not just `.env.prod.example` (an unplumbed env var silently does
+nothing, the same EVT-20 lesson this whole section is built around).
+
 ## Production backups (EVT-33)
 
 Nightly, off-VM, tested restore procedure — see
