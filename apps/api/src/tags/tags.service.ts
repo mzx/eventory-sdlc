@@ -14,11 +14,25 @@ export class TagsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * All tags ordered by item count desc, then name asc.
+   * All tags in `workspaceId`, ordered by item count desc, then name asc.
    * Used by GET /api/tags for autocomplete / filter UI.
+   *
+   * EVT-40 round-2 review, security finding 1: this was unscoped — `Tag`
+   * rows are workspace-owned (`@@unique([workspaceId, name])`, and
+   * `upsertByName`/`upsertMany` above stamp the caller's REAL active
+   * workspace since this task landed, not always the Default Workspace —
+   * so a global `findMany()` here would leak every other workspace's tag
+   * names + per-tag item counts to any authenticated caller. `_count.items`
+   * needs no extra scoping beyond the `Tag` row itself: an `ItemTag` join
+   * only ever exists between a `Tag` and an `Item` created in the SAME
+   * workspace (every write path that creates one goes through
+   * `TagsService.upsertMany`, always called with the item's own
+   * `workspaceId` — see `ItemsService.create`/`.update`), so a tag can never
+   * carry a cross-workspace item count in the first place.
    */
-  async findAll(): Promise<TagWithCount[]> {
+  async findAll(workspaceId: string): Promise<TagWithCount[]> {
     const tags = await this.prisma.tag.findMany({
+      where: { workspaceId },
       include: { _count: { select: { items: true } } },
       orderBy: [{ items: { _count: 'desc' } }, { name: 'asc' }],
     });

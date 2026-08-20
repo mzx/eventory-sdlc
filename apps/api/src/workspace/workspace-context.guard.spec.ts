@@ -152,6 +152,21 @@ describe('WorkspaceContextGuard', () => {
       expect(prismaMock.workspaceMember.findUnique).not.toHaveBeenCalled();
     });
 
+    // EVT-40 round-2 review, security suggestion 7 — never reflect
+    // caller-supplied input (the raw header value) back into an error message.
+    it('the 403 message never echoes the caller-supplied header value back', async () => {
+      const suspiciousHeader = '<script>alert(1)</script>-not-a-uuid';
+      const { context, reflector } = makeContext({
+        user: { id: USER_ID, status: UserStatus.approved },
+        headers: { [WORKSPACE_HEADER]: suspiciousHeader },
+      });
+      guard = new WorkspaceContextGuard(reflector as unknown as Reflector, prismaMock as never);
+
+      await expect(guard.canActivate(context)).rejects.toThrow(
+        'Not a member of the requested workspace',
+      );
+    });
+
     it('uses the first value when the header is sent multiple times', async () => {
       const { context, request, reflector } = makeContext({
         user: { id: USER_ID, status: UserStatus.approved },

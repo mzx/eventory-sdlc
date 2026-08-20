@@ -11,6 +11,8 @@
  *          non-member header -> 403
  *   AC2 — items: GET/PATCH/DELETE/consume/count/movements, foreign -> 404,
  *          own -> correct; list() never leaks a foreign item
+ *   (round-2 review finding 1) — GET /api/tags, pulled into this task's
+ *          scope after review: unscoped before the fix, now proven scoped
  *   AC3 — photo metadata (GET /api/photos/:id) AND raw file serving
  *          (GET /storage/:filename), foreign -> 404, own -> 200
  *   AC4 — QR scan-landing (GET /api/items/by-qr/:qr): a member of the
@@ -230,6 +232,57 @@ describe('Tenant isolation matrix (e2e, EVT-40)', () => {
 
       await fixture.workspaceB.owner.get(`/api/items/${id}/movements`).expect(404);
       await fixture.workspaceA.owner.get(`/api/items/${id}/movements`).expect(200);
+    });
+  });
+
+  // =========================================================================
+  // Tags isolation (EVT-40 round-2 review, security finding 1) —
+  // GET /api/tags was completely unscoped before this fix; a tag name
+  // created via an item's `tags` field in one workspace must never appear
+  // in another workspace's GET /api/tags response.
+  // =========================================================================
+
+  describe('Tags isolation (round-2 review finding 1)', () => {
+    it('GET /api/tags — a tag created in workspace A is invisible to workspace B, visible to workspace A', async () => {
+      const tagName = `iso-tag-${Date.now()}`;
+      await fixture.workspaceA.owner
+        .post('/api/items')
+        .send({ name: 'Tagged item', tags: [tagName] })
+        .expect(201);
+
+      const foreignTags = await fixture.workspaceB.owner.get('/api/tags').expect(200);
+      expect((foreignTags.body as { name: string }[]).some((t) => t.name === tagName)).toBe(false);
+
+      const ownTags = await fixture.workspaceA.owner.get('/api/tags').expect(200);
+      expect((ownTags.body as { name: string }[]).some((t) => t.name === tagName)).toBe(true);
+    });
+
+    it('the SAME tag name may exist independently in both workspaces without colliding', async () => {
+      const tagName = `iso-shared-name-${Date.now()}`;
+      await fixture.workspaceA.owner
+        .post('/api/items')
+        .send({ name: 'Workspace A item', tags: [tagName] })
+        .expect(201);
+      await fixture.workspaceB.owner
+        .post('/api/items')
+        .send({ name: 'Workspace B item', tags: [tagName] })
+        .expect(201);
+
+      const aTags = (await fixture.workspaceA.owner.get('/api/tags').expect(200)).body as {
+        name: string;
+        itemCount: number;
+      }[];
+      const bTags = (await fixture.workspaceB.owner.get('/api/tags').expect(200)).body as {
+        name: string;
+        itemCount: number;
+      }[];
+
+      expect(aTags.find((t) => t.name === tagName)?.itemCount).toBe(1);
+      expect(bTags.find((t) => t.name === tagName)?.itemCount).toBe(1);
+    });
+
+    it('a viewer can read GET /api/tags (200) — it is a read, not a write', async () => {
+      await fixture.workspaceA.viewer.get('/api/tags').expect(200);
     });
   });
 

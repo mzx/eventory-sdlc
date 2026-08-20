@@ -1,7 +1,10 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { User, UserRole, UserStatus, WorkspaceRole } from '@prisma/client';
+import { User, UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { ensureDefaultWorkspaceMembership } from '../workspace/default-workspace';
+import {
+  defaultWorkspaceRoleForUserRole,
+  ensureDefaultWorkspaceMembership,
+} from '../workspace/default-workspace';
 import { UpdateUserRoleDto } from './update-user-role.dto';
 import { UpdateUserStatusDto } from './update-user-status.dto';
 
@@ -52,7 +55,7 @@ export class UsersService {
       await ensureDefaultWorkspaceMembership(
         this.prisma,
         id,
-        target.role === UserRole.admin ? WorkspaceRole.owner : WorkspaceRole.member,
+        defaultWorkspaceRoleForUserRole(target.role),
       );
     }
 

@@ -844,7 +844,6 @@ describe('ItemsService', () => {
           delta: 1,
           toLocationId: LOC_ID,
           note: 'Initial intake',
-          workspaceId: WORKSPACE_ID,
         }),
         expect.anything(),
       );
@@ -1030,7 +1029,6 @@ describe('ItemsService', () => {
           kind: 'add',
           delta: 25,
           toLocationId: LOC_ID,
-          workspaceId: WORKSPACE_ID,
         }),
         expect.anything(),
       );
@@ -1599,7 +1597,6 @@ describe('ItemsService', () => {
           delta: 2,
           toLocationId: LOC_ID,
           createdById: 'user-1',
-          workspaceId: WORKSPACE_ID,
         }),
       );
       expect(result.bookQuantity).toBe(3);
@@ -1702,7 +1699,6 @@ describe('ItemsService', () => {
           kind: 'consume',
           requestedQuantity: 3,
           createdById: 'user-1',
-          workspaceId: WORKSPACE_ID,
         }),
       );
     });

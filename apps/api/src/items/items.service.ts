@@ -403,7 +403,6 @@ export class ItemsService {
           toLocationId: item.locationId,
           createdById,
           note: 'Initial intake',
-          workspaceId,
         },
         ITEM_DETAIL_INCLUDE,
       );
@@ -448,7 +447,6 @@ export class ItemsService {
         toLocationId: item.locationId,
         createdById,
         note: 'Received via barcode scan',
-        workspaceId,
       },
       ITEM_DETAIL_INCLUDE,
     );
@@ -573,7 +571,6 @@ export class ItemsService {
             delta: quantity! - current.quantity,
             createdById,
             note: 'Manual quantity edit',
-            workspaceId,
           },
           ITEM_DETAIL_INCLUDE,
         ));
@@ -589,7 +586,6 @@ export class ItemsService {
             fromLocationId: current.locationId,
             toLocationId: locationId,
             createdById,
-            workspaceId,
           },
           ITEM_DETAIL_INCLUDE,
         ));
@@ -680,7 +676,6 @@ export class ItemsService {
           toLocationId: current.locationId,
           createdById,
           note: 'Verification count',
-          workspaceId,
         });
       }
 
@@ -747,7 +742,6 @@ export class ItemsService {
         requestedQuantity,
         createdById,
         note: 'Consumed',
-        workspaceId,
       });
       if (!result) {
         throw new ConflictException(`Item ${id} has nothing on hand to consume`);

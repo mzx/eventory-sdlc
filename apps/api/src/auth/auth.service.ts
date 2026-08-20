@@ -1,9 +1,12 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { User, UserRole, UserStatus, WorkspaceRole } from '@prisma/client';
+import { User, UserRole, UserStatus } from '@prisma/client';
 import type { CookieOptions } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
-import { ensureDefaultWorkspaceMembership } from '../workspace/default-workspace';
+import {
+  defaultWorkspaceRoleForUserRole,
+  ensureDefaultWorkspaceMembership,
+} from '../workspace/default-workspace';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -200,11 +203,18 @@ export class AuthService {
           }),
         },
       });
-      if (needsPromotion) {
-        // EVT-40: promotion to admin+approved must also grant Default
-        // Workspace access — see ensureDefaultWorkspaceMembership's doc
-        // comment.
-        await ensureDefaultWorkspaceMembership(this.prisma, updated.id, WorkspaceRole.owner);
+      if (updated.status === UserStatus.approved) {
+        // EVT-40, round-2 review finding 8: called on EVERY login for an
+        // already-approved user, not just a fresh promotion — idempotent
+        // (ensureDefaultWorkspaceMembership upserts), so this self-heals a
+        // user who is approved but somehow still membership-less (e.g. a
+        // transient failure right after a prior promotion committed) rather
+        // than leaving them stuck until an operator intervenes.
+        await ensureDefaultWorkspaceMembership(
+          this.prisma,
+          updated.id,
+          defaultWorkspaceRoleForUserRole(updated.role),
+        );
       }
       return updated;
     }
@@ -237,9 +247,13 @@ export class AuthService {
           }),
         },
       });
-      if (needsPromotion) {
-        // EVT-40: see the byGoogleId branch above.
-        await ensureDefaultWorkspaceMembership(this.prisma, updated.id, WorkspaceRole.owner);
+      if (updated.status === UserStatus.approved) {
+        // EVT-40: see the byGoogleId branch above (self-healing, every login).
+        await ensureDefaultWorkspaceMembership(
+          this.prisma,
+          updated.id,
+          defaultWorkspaceRoleForUserRole(updated.role),
+        );
       }
       return updated;
     }
@@ -267,7 +281,11 @@ export class AuthService {
       // EVT-40: the bootstrap admin (first-ever sign-in) or an
       // EVENTORY_ADMIN_EMAILS-allowlisted new sign-in — see the byGoogleId
       // branch above.
-      await ensureDefaultWorkspaceMembership(this.prisma, created.id, WorkspaceRole.owner);
+      await ensureDefaultWorkspaceMembership(
+        this.prisma,
+        created.id,
+        defaultWorkspaceRoleForUserRole(created.role),
+      );
     }
     return created;
   }

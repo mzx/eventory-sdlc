@@ -250,6 +250,43 @@ describe('AuthService', () => {
       expect(result).toEqual(updated);
     });
 
+    // ---------------------------------------------------------------------
+    // EVT-40 round-2 review, finding 8 — self-healing membership grant: an
+    // already-approved returning user gets the (idempotent) membership
+    // upsert on EVERY login, not just at the moment they're promoted, so a
+    // transient failure right after a prior promotion doesn't strand them
+    // approved-but-membership-less with no retry path.
+    // ---------------------------------------------------------------------
+
+    it('EVT-40: self-heals membership for an already-approved returning user, even with no promotion this login', async () => {
+      const existing = makeUser({ role: UserRole.user, status: UserStatus.approved });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+      const updated = { ...existing, lastLoginAt: new Date() };
+      prisma.user.update.mockResolvedValue(updated);
+
+      await service.upsertFromGoogleProfile(makeProfile());
+
+      expect(prisma.workspaceMember.upsert).toHaveBeenCalledWith({
+        where: { workspaceId_userId: { workspaceId: DEFAULT_WORKSPACE_ID, userId: updated.id } },
+        update: {},
+        create: {
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          userId: updated.id,
+          role: WorkspaceRole.member,
+        },
+      });
+    });
+
+    it('EVT-40: does NOT grant workspace membership on a login that leaves the user still pending', async () => {
+      const existing = makeUser({ role: UserRole.user, status: UserStatus.pending });
+      prisma.user.findUnique.mockResolvedValueOnce(existing);
+      prisma.user.update.mockResolvedValue({ ...existing, lastLoginAt: new Date() });
+
+      await service.upsertFromGoogleProfile(makeProfile());
+
+      expect(prisma.workspaceMember.upsert).not.toHaveBeenCalled();
+    });
+
     it('binds googleId to an existing row matched by email ONLY when that row has no googleId yet', async () => {
       const existing = makeUser({ googleId: null as unknown as string });
       prisma.user.findUnique

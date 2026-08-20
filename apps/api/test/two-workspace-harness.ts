@@ -89,15 +89,27 @@ async function seedWorkspace(
   };
 }
 
-/** Seeds two fully independent workspaces (A and B), each with owner/member/viewer members. */
+/**
+ * Seeds two fully independent workspaces (A and B), each with
+ * owner/member/viewer members.
+ *
+ * Deliberately SEQUENTIAL (not `Promise.all`) — round-2 review, test
+ * finding 4: `pnpm test:e2e` showed intermittent extra failures on this
+ * branch (not reproduced on `main`) with symptoms consistent with
+ * connection/socket-level noise. Firing two full workspace-seeding chains
+ * concurrently against the same `PrismaService` connection pool + the same
+ * `app.getHttpServer()` instance during setup was the most plausible
+ * contributing factor found on inspection (every other e2e suite in this
+ * repo seeds its fixtures sequentially, not concurrently); this file was
+ * the one exception. Setup time cost is negligible (a handful of inserts)
+ * so there's no reason to prefer the concurrent shape here.
+ */
 export async function seedTwoWorkspaces(
   app: INestApplication,
   prisma: PrismaService,
   authService: AuthService,
 ): Promise<TwoWorkspaceFixture> {
-  const [workspaceA, workspaceB] = await Promise.all([
-    seedWorkspace(app, prisma, authService, 'Workspace-A'),
-    seedWorkspace(app, prisma, authService, 'Workspace-B'),
-  ]);
+  const workspaceA = await seedWorkspace(app, prisma, authService, 'Workspace-A');
+  const workspaceB = await seedWorkspace(app, prisma, authService, 'Workspace-B');
   return { workspaceA, workspaceB };
 }

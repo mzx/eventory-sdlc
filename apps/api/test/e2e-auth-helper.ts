@@ -25,7 +25,10 @@ import { UserRole, UserStatus, WorkspaceRole } from '@prisma/client';
 import supertest from 'supertest';
 import { AUTH_COOKIE_NAME, AuthService } from '../src/auth/auth.service';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { DEFAULT_WORKSPACE_ID } from '../src/workspace/default-workspace';
+import {
+  DEFAULT_WORKSPACE_ID,
+  defaultWorkspaceRoleForUserRole,
+} from '../src/workspace/default-workspace';
 
 export interface AuthedHttp {
   get(url: string): supertest.Test;
@@ -35,11 +38,6 @@ export interface AuthedHttp {
 }
 
 let counter = 0;
-
-/** Mirrors the EVT-39 migration's backfill role mapping. */
-function defaultWorkspaceRoleFor(role: UserRole): WorkspaceRole {
-  return role === UserRole.admin ? WorkspaceRole.owner : WorkspaceRole.member;
-}
 
 /**
  * Creates an approved User and a supertest wrapper authenticated as them.
@@ -81,7 +79,7 @@ export async function createAuthedHttp(
       data: {
         workspaceId,
         userId: user.id,
-        role: overrides.workspaceRole ?? defaultWorkspaceRoleFor(role),
+        role: overrides.workspaceRole ?? defaultWorkspaceRoleForUserRole(role),
       },
     });
   }

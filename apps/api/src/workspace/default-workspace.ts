@@ -14,15 +14,13 @@
  * see the schema-header note in `prisma/schema.prisma` for the full
  * rationale (three places the literal below must stay in sync).
  *
- * The handful of call sites that DO need this module are the ones whose
- * `where` clause used to target a now-composite unique key (e.g.
- * `TagsService.upsertByName` used to do `where: { name }`; `Tag.name` is now
- * `@@unique([workspaceId, name])`, so the lookup needs an explicit
- * `workspaceId` to build the compound key) — those import
- * `getDefaultWorkspaceId` below rather than hand-rolling the literal.
+ * The handful of call sites that DO need this module are the ones that need
+ * the Default Workspace's id explicitly — e.g. `ensureDefaultWorkspaceMembership`
+ * below, granted on user approval/promotion since EVT-40's global
+ * `WorkspaceContextGuard` requires a resolvable membership.
  */
 
-import { Prisma, PrismaClient, WorkspaceRole } from '@prisma/client';
+import { PrismaClient, UserRole, WorkspaceRole } from '@prisma/client';
 
 /**
  * Fixed, well-known id of the single workspace the EVT-39 migration creates
@@ -63,13 +61,15 @@ export async function getDefaultWorkspaceId(prisma: WorkspaceLookupClient): Prom
   return cachedDefaultWorkspaceId;
 }
 
-/** Builds the compound `Tag` unique-where for the Default Workspace. */
-export async function defaultWorkspaceTagWhere(
-  prisma: WorkspaceLookupClient,
-  name: string,
-): Promise<Prisma.TagWhereUniqueInput> {
-  const workspaceId = await getDefaultWorkspaceId(prisma);
-  return { workspaceId_name: { workspaceId, name } };
+/**
+ * Maps a global `UserRole` to the `WorkspaceRole` a user should default to
+ * in the Default Workspace — mirrors the EVT-39 migration's backfill:
+ * `admin` -> `owner`, everyone else -> `member`. Shared by every call site
+ * that grants Default Workspace membership (`ensureDefaultWorkspaceMembership`
+ * callers in `AuthService` and `UsersService`).
+ */
+export function defaultWorkspaceRoleForUserRole(role: UserRole): WorkspaceRole {
+  return role === UserRole.admin ? WorkspaceRole.owner : WorkspaceRole.member;
 }
 
 /** Minimal shape {@link ensureDefaultWorkspaceMembership} needs from a Prisma client. */

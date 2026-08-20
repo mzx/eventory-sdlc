@@ -59,6 +59,19 @@ describe('StorageController (EVT-40)', () => {
     expect(resMock.sendFile).toHaveBeenCalledWith(expect.stringContaining('abc.png'));
   });
 
+  // EVT-40 round-2 review, security finding 5 — these bytes are
+  // authorization-dependent (scoped per workspace); a shared/intermediate
+  // cache must never serve one workspace's response to another's caller.
+  it('EVT-40: sets Cache-Control: private (not public) — these bytes are per-workspace, not shareable by an intermediate cache', async () => {
+    prismaMock.photo.findFirst.mockResolvedValue({ filename: 'abc.png', mimeType: 'image/png' });
+
+    await controller.serve('abc.png', CURRENT_WORKSPACE, resMock as never);
+
+    expect(resMock.set).toHaveBeenCalledWith(
+      expect.objectContaining({ 'Cache-Control': expect.stringMatching(/^private,/) }),
+    );
+  });
+
   it('EVT-40 AC 3: throws NotFoundException for a foreign-workspace or unknown filename, without sending a file', async () => {
     prismaMock.photo.findFirst.mockResolvedValue(null);
 

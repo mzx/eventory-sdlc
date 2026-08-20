@@ -47,8 +47,13 @@ export class StorageController {
     res.set({
       'Content-Type': photo.mimeType,
       // Uploaded files never change once written (EVT-6) — safe to cache
-      // indefinitely, same policy the previous static-asset serving used.
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      // indefinitely. `private` (not `public`, EVT-40 round-2 review,
+      // security finding 5) — these bytes are now authorization-dependent
+      // (scoped to the caller's workspace above), so a shared/intermediate
+      // cache (e.g. a CDN or corporate proxy) must never serve a response
+      // cached for one workspace's caller back to a different workspace's
+      // caller; only the requesting browser's own cache may keep it.
+      'Cache-Control': 'private, max-age=31536000, immutable',
       // Same defense as the previous `express.static` setup (main.ts):
       // prevents a browser from MIME-sniffing a user-supplied file into
       // something other than its declared content type.

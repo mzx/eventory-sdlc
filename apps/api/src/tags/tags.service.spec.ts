@@ -46,7 +46,7 @@ describe('TagsService', () => {
         { id: 'id-2', name: 'hand-tool', color: '#ff0000', _count: { items: 1 } },
       ]);
 
-      const result = await service.findAll();
+      const result = await service.findAll(WORKSPACE_ID);
 
       expect(result).toEqual([
         { id: 'id-1', name: 'power-tool', color: null, itemCount: 3 },
@@ -54,15 +54,35 @@ describe('TagsService', () => {
       ]);
     });
 
-    it('passes the correct orderBy to Prisma (count desc, then name asc)', async () => {
+    it('passes the correct where + orderBy to Prisma (scoped to workspaceId; count desc, then name asc)', async () => {
       prismaMock.tag.findMany.mockResolvedValue([]);
 
-      await service.findAll();
+      await service.findAll(WORKSPACE_ID);
 
       expect(prismaMock.tag.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
+          where: { workspaceId: WORKSPACE_ID },
           orderBy: [{ items: { _count: 'desc' } }, { name: 'asc' }],
         }),
+      );
+    });
+
+    // EVT-40 round-2 review, security finding 1 — GET /api/tags was
+    // unscoped; this is the regression test.
+    it('EVT-40: scopes the query to workspaceId — a different workspace gets a different where clause', async () => {
+      const OTHER_WORKSPACE_ID = '88888888-8888-8888-8888-888888888888';
+      prismaMock.tag.findMany.mockResolvedValue([]);
+
+      await service.findAll(WORKSPACE_ID);
+      await service.findAll(OTHER_WORKSPACE_ID);
+
+      expect(prismaMock.tag.findMany).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ where: { workspaceId: WORKSPACE_ID } }),
+      );
+      expect(prismaMock.tag.findMany).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ where: { workspaceId: OTHER_WORKSPACE_ID } }),
       );
     });
 
@@ -73,7 +93,7 @@ describe('TagsService', () => {
         { id: 'id-battery', name: 'battery', color: null, _count: { items: 1 } },
       ]);
 
-      const afterTagging = await service.findAll();
+      const afterTagging = await service.findAll(WORKSPACE_ID);
       expect(afterTagging[0]).toEqual({ id: 'id-drill', name: 'drill', color: null, itemCount: 2 });
       expect(afterTagging[1]).toEqual({
         id: 'id-battery',
@@ -88,14 +108,14 @@ describe('TagsService', () => {
         { id: 'id-drill', name: 'drill', color: null, _count: { items: 1 } },
       ]);
 
-      const afterUntagging = await service.findAll();
+      const afterUntagging = await service.findAll(WORKSPACE_ID);
       expect(afterUntagging[0].itemCount).toBe(1);
       expect(afterUntagging[1].itemCount).toBe(1);
     });
 
     it('returns an empty array when no tags exist', async () => {
       prismaMock.tag.findMany.mockResolvedValue([]);
-      expect(await service.findAll()).toEqual([]);
+      expect(await service.findAll(WORKSPACE_ID)).toEqual([]);
     });
   });
 
@@ -199,7 +219,7 @@ describe('TagsService', () => {
       // Step 2: subsequent findAll picks up the new tag (DB now has it)
       prismaMock.tag.findMany.mockResolvedValue([{ ...newTag, _count: { items: 1 } }]);
 
-      const tags = await service.findAll();
+      const tags = await service.findAll(WORKSPACE_ID);
       expect(tags).toContainEqual({ id: 'tag-new', name: 'multimeter', color: null, itemCount: 1 });
     });
   });

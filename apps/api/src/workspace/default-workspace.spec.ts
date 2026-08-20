@@ -1,19 +1,26 @@
+import { UserRole, WorkspaceRole } from '@prisma/client';
 import {
   DEFAULT_WORKSPACE_ID,
   __resetDefaultWorkspaceCacheForTests,
-  defaultWorkspaceTagWhere,
+  defaultWorkspaceRoleForUserRole,
+  ensureDefaultWorkspaceMembership,
   getDefaultWorkspaceId,
 } from './default-workspace';
+
+const USER_ID = '11111111-1111-1111-1111-111111111111';
 
 function makePrismaMock() {
   return {
     workspace: {
       findUniqueOrThrow: jest.fn().mockResolvedValue({ id: DEFAULT_WORKSPACE_ID }),
     },
+    workspaceMember: {
+      upsert: jest.fn(),
+    },
   };
 }
 
-describe('default-workspace (EVT-39)', () => {
+describe('default-workspace (EVT-39 / EVT-40)', () => {
   let prismaMock: ReturnType<typeof makePrismaMock>;
 
   beforeEach(() => {
@@ -53,13 +60,32 @@ describe('default-workspace (EVT-39)', () => {
     });
   });
 
-  describe('defaultWorkspaceTagWhere', () => {
-    it('builds the compound Tag unique-where scoped to the default workspace', async () => {
-      const where = await defaultWorkspaceTagWhere(prismaMock as never, 'cordless');
+  describe('defaultWorkspaceRoleForUserRole (EVT-40)', () => {
+    it('maps admin -> owner', () => {
+      expect(defaultWorkspaceRoleForUserRole(UserRole.admin)).toBe(WorkspaceRole.owner);
+    });
 
-      expect(where).toEqual({
-        workspaceId_name: { workspaceId: DEFAULT_WORKSPACE_ID, name: 'cordless' },
+    it('maps a plain user -> member', () => {
+      expect(defaultWorkspaceRoleForUserRole(UserRole.user)).toBe(WorkspaceRole.member);
+    });
+  });
+
+  describe('ensureDefaultWorkspaceMembership (EVT-40)', () => {
+    it('upserts a WorkspaceMember row scoped to the Default Workspace and the given role', async () => {
+      await ensureDefaultWorkspaceMembership(prismaMock as never, USER_ID, WorkspaceRole.owner);
+
+      expect(prismaMock.workspaceMember.upsert).toHaveBeenCalledWith({
+        where: { workspaceId_userId: { workspaceId: DEFAULT_WORKSPACE_ID, userId: USER_ID } },
+        update: {},
+        create: { workspaceId: DEFAULT_WORKSPACE_ID, userId: USER_ID, role: WorkspaceRole.owner },
       });
+    });
+
+    it('is idempotent — the upsert shape leaves an existing membership untouched (empty update)', async () => {
+      await ensureDefaultWorkspaceMembership(prismaMock as never, USER_ID, WorkspaceRole.member);
+
+      const call = prismaMock.workspaceMember.upsert.mock.calls[0][0];
+      expect(call.update).toEqual({});
     });
   });
 });

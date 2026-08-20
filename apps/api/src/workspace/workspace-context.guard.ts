@@ -10,6 +10,16 @@ import { RequestWithWorkspace, WORKSPACE_HEADER } from './workspace-context';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Constant 403 message (EVT-40 round-2 review, security suggestion 7) — the
+ * previous version interpolated the raw `X-Workspace-Id` header value back
+ * into the response body. Never reflect caller-supplied input into an error
+ * message; a fixed string carries the same information the caller needs
+ * ("you're not in the workspace you asked for") without echoing anything
+ * back.
+ */
+const NOT_A_MEMBER_MESSAGE = 'Not a member of the requested workspace';
+
+/**
  * Global guard (registered as `APP_GUARD` in `AppModule`, AFTER `JwtAuthGuard`
  * so `request.user` is already populated) — resolves the caller's active
  * `Workspace` and attaches `{ id, role }` to `request.workspace` (EVT-40).
@@ -73,14 +83,14 @@ export class WorkspaceContextGuard implements CanActivate {
 
     if (headerWorkspaceId) {
       if (!UUID_RE.test(headerWorkspaceId)) {
-        throw new ForbiddenException(`Not a member of workspace ${headerWorkspaceId}`);
+        throw new ForbiddenException(NOT_A_MEMBER_MESSAGE);
       }
       const membership = await this.prisma.workspaceMember.findUnique({
         where: { workspaceId_userId: { workspaceId: headerWorkspaceId, userId: user.id } },
         select: { workspaceId: true, role: true },
       });
       if (!membership) {
-        throw new ForbiddenException(`Not a member of workspace ${headerWorkspaceId}`);
+        throw new ForbiddenException(NOT_A_MEMBER_MESSAGE);
       }
       request.workspace = { id: membership.workspaceId, role: membership.role };
       return true;
