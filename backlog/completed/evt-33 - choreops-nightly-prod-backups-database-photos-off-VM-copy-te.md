@@ -1,10 +1,10 @@
 ---
 id: EVT-33
 title: 'chore(ops): nightly prod backups — database + photos, off-VM copy, tested restore'
-status: To Do
+status: Done
 priority: high
 created_date: '2026-08-13 16:56'
-updated_date: '2026-08-13 16:56'
+updated_date: '2026-08-20 00:36'
 assignee: []
 labels:
   - ops
@@ -70,10 +70,27 @@ procedure that has been executed once for real:
 ## Acceptance Criteria
 
 <!-- AC:BEGIN -->
-- [ ] Nightly job on the VM produces `pg_dump` (custom format) + photos archive with rotation (default 14 days), driven by cron or a systemd timer installed by a committed script
-- [ ] At least one off-VM copy mechanism is implemented and documented (fetch-to-Mac, object storage, or equivalent), with credentials/keys reused — none embedded in scripts
-- [ ] Restore runbook exists covering both "fresh VM" and "db corrupted, VM alive" paths with exact commands
-- [ ] A restore was actually executed once against a throwaway target and the runbook corrected from what was learned; evidence (commands + output summary) recorded in the PR
-- [ ] Backup failure is observable: success marker with timestamp, and the off-VM fetch warns when the newest backup is older than 2 days
-- [ ] Scripts pass the repo's verification gates (`pnpm verify` — the root test script picks up `scripts/*.test.mjs`; shell scripts get at least `bash -n` / shellcheck-clean noted in the PR)
+- [x] Nightly job on the VM produces `pg_dump` (custom format) + photos archive with rotation (default 14 days), driven by cron or a systemd timer installed by a committed script
+- [x] At least one off-VM copy mechanism is implemented and documented (fetch-to-Mac, object storage, or equivalent), with credentials/keys reused — none embedded in scripts
+- [x] Restore runbook exists covering both "fresh VM" and "db corrupted, VM alive" paths with exact commands
+- [x] A restore was actually executed once against a throwaway target and the runbook corrected from what was learned; evidence (commands + output summary) recorded in the PR
+- [x] Backup failure is observable: success marker with timestamp, and the off-VM fetch warns when the newest backup is older than 2 days
+- [x] Scripts pass the repo's verification gates (`pnpm verify` — the root test script picks up `scripts/*.test.mjs`; shell scripts get at least `bash -n` / shellcheck-clean noted in the PR)
 <!-- AC:END -->
+
+## Final Summary
+
+## Summary
+Nightly prod backups: on-VM cron producing `pg_dump` (custom format) + photo-volume tar with 14-day rotation and a timestamped success marker; pull-based off-VM fetch to the operator's Mac over existing SSH key auth with a stale-backup (>2 days) warning; restore runbook (`docs/operations/backups.md`) covering fresh-VM and db-corrupted paths — restore exercised for real against a throwaway target per AC.
+
+## Review history
+- Session: 2 rounds; iteration cap reached with 1 unresolved MAJOR — the restore/migration runbook copied into the photo volume while the live api could still write (write-skew data loss). Session correctly kept the PR draft (ready = unattended auto-merge of a flagged PR)
+- Operator-directed fix (4830729): api quiesced (`docker compose stop api`) before every copy/restore-into across all three flows, restart-with-health-verify after, nightly-tar read-tradeoff explicitly distinguished and unchanged. Focused re-review ✅ (1 cosmetic suggestion)
+
+## Verification
+- `pnpm verify` green at final head; restore evidence in PR
+- ⚠ INDEPENDENCE NOT ENFORCED (codex unavailable)
+
+## Follow-up / OPS SEQUENCING (critical)
+- **Before the first deploy that includes EVT-39's whole-table tenancy migration: run the backup once on the VM and verify artifacts + off-VM copy.** deploy.sh ships whole-HEAD and the migration runs on api start — the backup must exist first
+- Cosmetic: renumber Path A's pg_restore step in the runbook

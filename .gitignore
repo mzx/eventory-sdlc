@@ -28,6 +28,12 @@ apps/web/dev-dist/
 apps/api/storage/*
 !apps/api/storage/.gitkeep
 
+# Prod backup artifacts (EVT-33) — never risk a stray `git add -A` committing
+# a real Postgres dump or photo tar; the real backups live outside the repo
+# tree entirely (BACKUP_DIR default /var/backups/eventory), this is defense
+# in depth for anyone testing scripts/prod-backup.sh with a repo-local dir.
+backups/
+
 # Env
 .env
 .env.local
