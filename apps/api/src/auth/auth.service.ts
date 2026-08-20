@@ -3,6 +3,10 @@ import { JwtService } from '@nestjs/jwt';
 import { User, UserRole, UserStatus } from '@prisma/client';
 import type { CookieOptions } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  defaultWorkspaceRoleForUserRole,
+  ensureDefaultWorkspaceMembership,
+} from '../workspace/default-workspace';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -185,7 +189,7 @@ export class AuthService {
       const needsPromotion =
         isAllowlistedAdmin &&
         !(byGoogleId.role === UserRole.admin && byGoogleId.status === UserStatus.approved);
-      return this.prisma.user.update({
+      const updated = await this.prisma.user.update({
         where: { id: byGoogleId.id },
         data: {
           email: profile.email,
@@ -199,6 +203,23 @@ export class AuthService {
           }),
         },
       });
+      if (updated.status === UserStatus.approved) {
+        // EVT-40, round-2 review finding 8: called on EVERY login for an
+        // already-approved user, not just a fresh promotion — this
+        // self-heals a user who is approved but somehow has ZERO
+        // memberships anywhere (e.g. a transient failure right after a
+        // prior promotion committed) rather than leaving them stuck until
+        // an operator intervenes. `ensureDefaultWorkspaceMembership` is a
+        // no-op for a user who already belongs to ANY workspace (round-3
+        // review, security finding) — see its doc comment for why that gate
+        // is required once EVT-42 adds membership revocation.
+        await ensureDefaultWorkspaceMembership(
+          this.prisma,
+          updated.id,
+          defaultWorkspaceRoleForUserRole(updated.role),
+        );
+      }
+      return updated;
     }
 
     const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
@@ -215,7 +236,7 @@ export class AuthService {
       const needsPromotion =
         isAllowlistedAdmin &&
         !(byEmail.role === UserRole.admin && byEmail.status === UserStatus.approved);
-      return this.prisma.user.update({
+      const updated = await this.prisma.user.update({
         where: { id: byEmail.id },
         data: {
           googleId: profile.googleId,
@@ -229,9 +250,18 @@ export class AuthService {
           }),
         },
       });
+      if (updated.status === UserStatus.approved) {
+        // EVT-40: see the byGoogleId branch above (self-healing, every login).
+        await ensureDefaultWorkspaceMembership(
+          this.prisma,
+          updated.id,
+          defaultWorkspaceRoleForUserRole(updated.role),
+        );
+      }
+      return updated;
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       const isFirstOAuthUser = (await tx.user.count({ where: { googleId: { not: null } } })) === 0;
       const promote = isFirstOAuthUser || isAllowlistedAdmin;
 
@@ -250,6 +280,17 @@ export class AuthService {
         },
       });
     });
+    if (created.status === UserStatus.approved) {
+      // EVT-40: the bootstrap admin (first-ever sign-in) or an
+      // EVENTORY_ADMIN_EMAILS-allowlisted new sign-in — see the byGoogleId
+      // branch above.
+      await ensureDefaultWorkspaceMembership(
+        this.prisma,
+        created.id,
+        defaultWorkspaceRoleForUserRole(created.role),
+      );
+    }
+    return created;
   }
 
   /** Signs a JWT carrying the minimal claims `JwtAuthGuard` needs. */

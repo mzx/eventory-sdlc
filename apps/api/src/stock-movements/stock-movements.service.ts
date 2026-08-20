@@ -129,6 +129,17 @@ export class StockMovementsService {
    * `itemInclude`, when provided, is forwarded to the `Item` update so the
    * caller gets back the item shape it needs (e.g. `ITEM_DETAIL_INCLUDE`)
    * without a second round trip.
+   *
+   * The written `StockMovement.workspaceId` (EVT-40) is DERIVED from
+   * `itemId`'s own `Item.workspaceId` (one extra `select`), not trusted from
+   * caller input — round-2 review, security finding 6: an optional,
+   * caller-supplied field is too easy to silently omit (every call site
+   * outside this task's scope — `ProjectsService` backflush,
+   * `ShoppingListService` restock — would otherwise fall back to the
+   * Default Workspace regardless of the item's REAL workspace once a
+   * second workspace exists). Deriving it here means the movement's
+   * workspace can never be wrong OR omitted, for ANY caller, without that
+   * caller having to know anything about tenancy at all.
    */
   async recordMovement<Include extends Prisma.ItemInclude = Record<string, never>>(
     client: PrismaClientOrTx,
@@ -139,6 +150,14 @@ export class StockMovementsService {
     item: Prisma.ItemGetPayload<{ include: Include }>;
   }> {
     const run = async (tx: Prisma.TransactionClient | PrismaService) => {
+      const owningItem = await tx.item.findUnique({
+        where: { id: input.itemId },
+        select: { workspaceId: true },
+      });
+      if (!owningItem) {
+        throw new NotFoundException(`Item ${input.itemId} not found`);
+      }
+
       const movement = await tx.stockMovement.create({
         data: {
           itemId: input.itemId,
@@ -149,6 +168,7 @@ export class StockMovementsService {
           projectId: input.projectId ?? null,
           note: input.note ?? null,
           createdById: input.createdById ?? null,
+          workspaceId: owningItem.workspaceId,
         },
       });
 
@@ -240,6 +260,24 @@ export class StockMovementsService {
         data: { quantity: { decrement: attempt } },
       });
       if (result.count > 0) {
+        // EVT-26 (mirrors `recordMovement`): a consumption that leaves the
+        // item's on-hand `quantity` at or below `minQuantity` opens a
+        // `low-stock` shopping-list entry. The conditional `updateMany`
+        // above doesn't return the updated row, so it's re-read here —
+        // still inside this same transaction, so it reflects exactly the
+        // decrement just applied. Read BEFORE the movement write (EVT-40
+        // round-2 review, security finding 6) so `workspaceId` can be
+        // DERIVED from the item itself, rather than trusted from caller
+        // input — see `recordMovement`'s doc comment for the full
+        // rationale (same fix, same reasoning, applied here too).
+        const updated = await tx.item.findUnique({
+          where: { id: input.itemId },
+          select: { quantity: true, minQuantity: true, workspaceId: true },
+        });
+        if (!updated) {
+          throw new NotFoundException(`Item ${input.itemId} not found`);
+        }
+
         const movement = await tx.stockMovement.create({
           data: {
             itemId: input.itemId,
@@ -248,21 +286,11 @@ export class StockMovementsService {
             projectId: input.projectId ?? null,
             note: input.note ?? null,
             createdById: input.createdById ?? null,
+            workspaceId: updated.workspaceId,
           },
         });
 
-        // EVT-26 (mirrors `recordMovement` above): a consumption that
-        // leaves the item's on-hand `quantity` at or below `minQuantity`
-        // opens a `low-stock` shopping-list entry. Unlike `recordMovement`,
-        // the conditional `updateMany` above doesn't return the updated
-        // row, so the post-decrement quantity/minQuantity is re-read here —
-        // still inside this same transaction, so it reflects exactly the
-        // decrement just applied.
-        const updated = await tx.item.findUnique({
-          where: { id: input.itemId },
-          select: { quantity: true, minQuantity: true },
-        });
-        if (updated && updated.minQuantity != null && updated.quantity <= updated.minQuantity) {
+        if (updated.minQuantity != null && updated.quantity <= updated.minQuantity) {
           await openLowStockEntry(tx, input.itemId);
         }
 
@@ -296,13 +324,27 @@ export class StockMovementsService {
    * `LocationsService.moveContainer` always calls this from inside its own
    * transaction (the container's `Location.parentId`/`path` rewrite and this
    * audit row must land atomically together).
+   *
+   * `workspaceId` (EVT-40 round-2 review, security finding 6) is DERIVED
+   * from the container `Location` being moved (one extra select) — same
+   * "never trust caller input for this" rationale as `recordMovement`;
+   * re-parenting a container never changes ITS OWN workspace, so this is
+   * always correct regardless of who calls it.
    */
   async recordContainerMove(
     client: PrismaClientOrTx,
     input: RecordContainerMoveInput,
   ): Promise<StockMovement> {
-    const run = (tx: Prisma.TransactionClient | PrismaService) =>
-      tx.stockMovement.create({
+    const run = async (tx: Prisma.TransactionClient | PrismaService) => {
+      const container = await tx.location.findUnique({
+        where: { id: input.containerId },
+        select: { workspaceId: true },
+      });
+      if (!container) {
+        throw new NotFoundException(`Container ${input.containerId} not found`);
+      }
+
+      return tx.stockMovement.create({
         data: {
           itemId: null,
           containerId: input.containerId,
@@ -312,8 +354,10 @@ export class StockMovementsService {
           toLocationId: input.toLocationId ?? null,
           note: input.note ?? null,
           createdById: input.createdById ?? null,
+          workspaceId: container.workspaceId,
         },
       });
+    };
 
     if (isPrismaService(client)) {
       return client.$transaction((tx) => run(tx));
@@ -325,9 +369,16 @@ export class StockMovementsService {
   // listForItem — GET /api/items/:id/movements
   // -------------------------------------------------------------------------
 
-  /** Paginated movement history for one item, newest first. 404 when the item doesn't exist. */
-  async listForItem(itemId: string, query: ListMovementsQueryDto) {
-    const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { id: true } });
+  /**
+   * Paginated movement history for one item, newest first. 404 when the
+   * item doesn't exist OR belongs to a different workspace (EVT-40 AC 2) —
+   * same "don't confirm existence" posture as `ItemsService`.
+   */
+  async listForItem(itemId: string, query: ListMovementsQueryDto, workspaceId: string) {
+    const item = await this.prisma.item.findFirst({
+      where: { id: itemId, workspaceId },
+      select: { id: true },
+    });
     if (!item) {
       throw new NotFoundException(`Item ${itemId} not found`);
     }

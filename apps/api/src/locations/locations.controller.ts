@@ -32,15 +32,6 @@ export class LocationsController {
     return this.locationsService.findAll();
   }
 
-  /**
-   * GET /api/locations/by-qr/:qr — must be declared BEFORE :id so NestJS does
-   * not try to treat "by-qr" as a UUID.
-   */
-  @Get('by-qr/:qr')
-  findByQr(@Param('qr') qr: string) {
-    return this.locationsService.findByQr(qr);
-  }
-
   /** GET /api/locations/:id — detail with children, items, breadcrumb. */
   @Get(':id')
   findOne(@Param('id', ParseUUIDPipe) id: string) {

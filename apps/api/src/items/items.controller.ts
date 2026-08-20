@@ -13,6 +13,7 @@ import {
   Query,
   UploadedFile,
   UseFilters,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -22,6 +23,8 @@ import { uploadThrottlerConfig } from '../common/throttle.config';
 import { PayloadTooLargeFilter } from '../photos/photo-upload.helpers';
 import { ListMovementsQueryDto } from '../stock-movements/list-movements-query.dto';
 import { StockMovementsService } from '../stock-movements/stock-movements.service';
+import { CurrentWorkspace, WorkspaceContext } from '../workspace/workspace-context';
+import { WorkspaceWriteGuard } from '../workspace/workspace-write.guard';
 import { CreateItemDto } from './create-item.dto';
 import { ItemsService } from './items.service';
 import { ListItemsQueryDto } from './list-items-query.dto';
@@ -40,29 +43,35 @@ export class ItemsController {
   /**
    * GET /api/items?search=&tag=&locationId=
    *
-   * List items, newest first. All query params are optional filters:
+   * List items, newest first, scoped to the caller's active workspace
+   * (EVT-40). All query params are optional filters:
    * - `search` — ILIKE against name, description, and properties JSONB.
    * - `tag`    — items carrying a tag with this exact name.
    * - `locationId` — items in this location or any descendant (subtree).
    */
   @Get()
-  list(@Query() query: ListItemsQueryDto) {
-    return this.itemsService.list(query);
+  list(@Query() query: ListItemsQueryDto, @CurrentWorkspace() workspace: WorkspaceContext) {
+    return this.itemsService.list(query, workspace.id);
   }
 
   /**
    * GET /api/items/by-qr/:qr
    *
-   * Resolve a QR token to an item or a location.
-   * Returns `{ kind: "item", item }` or `{ kind: "location", location }`.
-   * 404 when the token matches neither table.
+   * Resolve a QR token to an item or a location. Returns `{ kind: "item",
+   * item }` or `{ kind: "location", location }`. 404 when the token matches
+   * neither table, OR when the caller is not a member of the resolved
+   * resource's workspace (EVT-40 AC 4 — QR scan-landing: token lookup stays
+   * global, but the resource is only ever returned to a member of ITS
+   * workspace; see `ItemsService.findByQr`'s doc comment). Deliberately does
+   * NOT use `@CurrentWorkspace()` — the caller's currently-selected
+   * workspace is irrelevant here.
    *
    * NOTE: This route MUST be declared before `/:id` so NestJS doesn't
    * treat "by-qr" as a UUID and route it to `findById`.
    */
   @Get('by-qr/:qr')
-  findByQr(@Param('qr') qr: string) {
-    return this.itemsService.findByQr(qr);
+  findByQr(@Param('qr') qr: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.itemsService.findByQr(qr, user.id);
   }
 
   /**
@@ -71,25 +80,29 @@ export class ItemsController {
    * "Today's count list" (EVT-27 AC 3): items on a count schedule
    * (`countIntervalDays` set) whose next count is past due, most-overdue
    * first, capped at 20. Items with no `countIntervalDays` never appear.
+   * Scoped to the caller's active workspace (EVT-40).
    *
    * NOTE: This route MUST be declared before `/:id` so NestJS doesn't
    * treat "verification-queue" as a UUID param and route it to `findById`
    * (same reasoning as `by-qr/:qr` above).
    */
   @Get('verification-queue')
-  listVerificationQueue() {
-    return this.itemsService.listVerificationQueue();
+  listVerificationQueue(@CurrentWorkspace() workspace: WorkspaceContext) {
+    return this.itemsService.listVerificationQueue(undefined, workspace.id);
   }
 
   /**
    * GET /api/items/:id
    *
-   * Full item detail: photos, tags, location, category.
-   * 404 when the item does not exist.
+   * Full item detail: photos, tags, location, category. 404 when the item
+   * does not exist OR belongs to a different workspace (EVT-40 AC 2).
    */
   @Get(':id')
-  findById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.itemsService.findById(id);
+  findById(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ) {
+    return this.itemsService.findById(id, workspace.id);
   }
 
   /**
@@ -98,11 +111,16 @@ export class ItemsController {
    * Paginated stock movement history for one item, newest first (EVT-25 AC
    * 5). Each row carries the movement `kind`, signed `delta`, from/to
    * location names (for `move`), the linked project summary when present,
-   * and `createdAt`. 404 when the item does not exist.
+   * and `createdAt`. 404 when the item does not exist OR belongs to a
+   * different workspace (EVT-40 AC 2).
    */
   @Get(':id/movements')
-  listMovements(@Param('id', ParseUUIDPipe) id: string, @Query() query: ListMovementsQueryDto) {
-    return this.stockMovementsService.listForItem(id, query);
+  listMovements(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListMovementsQueryDto,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ) {
+    return this.stockMovementsService.listForItem(id, query, workspace.id);
   }
 
   /**
@@ -112,16 +130,20 @@ export class ItemsController {
    * client) MUST ask "how many are there?" and submit BEFORE showing book
    * quantity; this endpoint reveals `bookQuantity`/`delta` only in its
    * response. Writes an `adjust` movement only when the count differs from
-   * book; always stamps `lastVerifiedAt`. 404 when the item does not exist.
+   * book; always stamps `lastVerifiedAt`. 404 when the item does not exist
+   * OR belongs to a different workspace (EVT-40 AC 2). Mutating — a
+   * `viewer` gets 403 (EVT-40 AC 5).
    */
   @Post(':id/count')
+  @UseGuards(WorkspaceWriteGuard)
   @HttpCode(HttpStatus.OK)
   count(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CountItemDto,
     @CurrentUser() user: AuthenticatedUser,
+    @CurrentWorkspace() workspace: WorkspaceContext,
   ) {
-    return this.itemsService.count(id, dto.quantity, user.id);
+    return this.itemsService.count(id, dto.quantity, user.id, workspace.id);
   }
 
   /**
@@ -131,16 +153,19 @@ export class ItemsController {
    * to on-hand). The response's `offerVerification` flag (EVT-27 AC 4)
    * tells the client whether the resulting on-hand qualifies for the
    * opportunistic "how many are actually left?" prompt. 404 when the item
-   * does not exist.
+   * does not exist OR belongs to a different workspace (EVT-40 AC 2).
+   * Mutating — a `viewer` gets 403 (EVT-40 AC 5).
    */
   @Post(':id/consume')
+  @UseGuards(WorkspaceWriteGuard)
   @HttpCode(HttpStatus.OK)
   consume(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ConsumeItemDto,
     @CurrentUser() user: AuthenticatedUser,
+    @CurrentWorkspace() workspace: WorkspaceContext,
   ) {
-    return this.itemsService.consume(id, dto.quantity, user.id);
+    return this.itemsService.consume(id, dto.quantity, user.id, workspace.id);
   }
 
   /**
@@ -148,10 +173,12 @@ export class ItemsController {
    *
    * Multipart photo upload (`file` field). Runs the EVT-7 Claude vision
    * analysis against the photo (the photo itself is NEVER persisted — see
-   * `search-by-photo.helpers.ts`) and searches existing items using the
-   * analysis's suggested name, search keywords, and tags. Returns
-   * `{ analysis, matches }`; `matches` is list-shape items (same as
-   * `GET /api/items`), ranked by distinct search-term hit count.
+   * `search-by-photo.helpers.ts`) and searches existing items — scoped to
+   * the caller's active workspace (EVT-40) — using the analysis's suggested
+   * name, search keywords, and tags. Returns `{ analysis, matches }`;
+   * `matches` is list-shape items (same as `GET /api/items`), ranked by
+   * distinct search-term hit count. Read-only (no write), so a `viewer` can
+   * use it.
    *
    * Wrong mimetype → 415. Oversized (>5 MB, the vision-analysis ceiling,
    * stricter than the general upload ceiling since nothing here is stored)
@@ -167,24 +194,34 @@ export class ItemsController {
   @HttpCode(HttpStatus.OK)
   @UseFilters(new PayloadTooLargeFilter('File exceeds the 5 MB search-by-photo upload limit'))
   @UseInterceptors(FileInterceptor('file', searchByPhotoMulterOptions))
-  searchByPhoto(@UploadedFile() file: Express.Multer.File) {
+  searchByPhoto(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ) {
     if (!file) {
       throw new BadRequestException('file is required');
     }
-    return this.itemsService.searchByPhoto(file.buffer, file.mimetype);
+    return this.itemsService.searchByPhoto(file.buffer, file.mimetype, workspace.id);
   }
 
   /**
    * POST /api/items
    *
-   * Create an item. Tags are upserted by name. Returns 201 with the new item.
-   * `createdById` is stamped from the caller's session (EVT-14) — this
-   * route requires an approved user, so `user` is always present here.
+   * Create an item in the caller's active workspace (EVT-40). Tags are
+   * upserted by name. Returns 201 with the new item. `createdById` is
+   * stamped from the caller's session (EVT-14) — this route requires an
+   * approved user, so `user` is always present here. Mutating — a `viewer`
+   * gets 403 (EVT-40 AC 5).
    */
   @Post()
+  @UseGuards(WorkspaceWriteGuard)
   @HttpCode(HttpStatus.CREATED)
-  create(@Body() dto: CreateItemDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.itemsService.create(dto, user.id);
+  create(
+    @Body() dto: CreateItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ) {
+    return this.itemsService.create(dto, user.id, workspace.id);
   }
 
   /**
@@ -192,17 +229,20 @@ export class ItemsController {
    *
    * Distributor barcode receiving's "add to existing" branch (EVT-31 AC 4):
    * re-scanning a known MPN records an `add` movement for `quantity`
-   * against this item instead of creating a duplicate. Attributed to the
-   * caller. 404 when the item does not exist.
+   * against this item instead of creating a duplicate item. Attributed to
+   * the caller. 404 when the item does not exist OR belongs to a different
+   * workspace (EVT-40 AC 2). Mutating — a `viewer` gets 403 (EVT-40 AC 5).
    */
   @Post(':id/receive')
+  @UseGuards(WorkspaceWriteGuard)
   @HttpCode(HttpStatus.OK)
   receive(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReceiveItemDto,
     @CurrentUser() user: AuthenticatedUser,
+    @CurrentWorkspace() workspace: WorkspaceContext,
   ) {
-    return this.itemsService.receive(id, dto.quantity, user.id);
+    return this.itemsService.receive(id, dto.quantity, user.id, workspace.id);
   }
 
   /**
@@ -211,27 +251,35 @@ export class ItemsController {
    * Partial update. When `tags` is provided, the tag list is fully replaced.
    * A changed `quantity` or `locationId` writes a matching `adjust`/`move`
    * stock movement (EVT-25 AC 3/4), attributed to the caller. 404 when the
-   * item does not exist.
+   * item does not exist OR belongs to a different workspace (EVT-40 AC 2).
+   * Mutating — a `viewer` gets 403 (EVT-40 AC 5).
    */
   @Patch(':id')
+  @UseGuards(WorkspaceWriteGuard)
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateItemDto,
     @CurrentUser() user: AuthenticatedUser,
+    @CurrentWorkspace() workspace: WorkspaceContext,
   ) {
-    return this.itemsService.update(id, dto, user.id);
+    return this.itemsService.update(id, dto, user.id, workspace.id);
   }
 
   /**
    * DELETE /api/items/:id
    *
    * Delete an item (cascades photos and tag associations per schema).
-   * Returns 204 No Content on success.
-   * 404 when the item does not exist.
+   * Returns 204 No Content on success. 404 when the item does not exist OR
+   * belongs to a different workspace (EVT-40 AC 2). Mutating — a `viewer`
+   * gets 403 (EVT-40 AC 5).
    */
   @Delete(':id')
+  @UseGuards(WorkspaceWriteGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
-  remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    return this.itemsService.remove(id);
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ): Promise<void> {
+    return this.itemsService.remove(id, workspace.id);
   }
 }

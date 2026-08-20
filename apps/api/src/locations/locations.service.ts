@@ -192,19 +192,6 @@ export class LocationsService {
     };
   }
 
-  /** Resolve a location by its QR token. */
-  async findByQr(qr: string) {
-    const location = await this.prisma.location.findUnique({
-      where: { qrCode: qr },
-    });
-
-    if (!location) {
-      throw new NotFoundException(`Location with QR "${qr}" not found`);
-    }
-
-    return location;
-  }
-
   /**
    * Create a location.
    * - If `parentId` is supplied the new location is nested under that parent;

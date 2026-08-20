@@ -26,7 +26,6 @@ describe('LocationsController', () => {
 
   const serviceMock = {
     findAll: jest.fn(),
-    findByQr: jest.fn(),
     findOne: jest.fn(),
     create: jest.fn(),
     rename: jest.fn(),
@@ -63,20 +62,6 @@ describe('LocationsController', () => {
 
       expect(serviceMock.findAll).toHaveBeenCalledTimes(1);
       expect(result).toBe(list);
-    });
-  });
-
-  // ── findByQr ─────────────────────────────────────────────────────────────
-
-  describe('GET /locations/by-qr/:qr (findByQr)', () => {
-    it('delegates to LocationsService.findByQr with the QR token', async () => {
-      const loc = makeLocation({ qrCode: 'qr-abc' });
-      serviceMock.findByQr.mockResolvedValue(loc);
-
-      const result = await controller.findByQr('qr-abc');
-
-      expect(serviceMock.findByQr).toHaveBeenCalledWith('qr-abc');
-      expect(result).toBe(loc);
     });
   });
 

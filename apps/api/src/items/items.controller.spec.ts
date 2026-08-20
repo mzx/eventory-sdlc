@@ -26,8 +26,11 @@ const THROTTLER_TTL_METADATA_KEY = 'THROTTLER:TTL';
 
 const ITEM_ID = '11111111-1111-1111-1111-111111111111';
 const USER_ID = '22222222-2222-2222-2222-222222222222';
+const WORKSPACE_ID = '33333333-3333-3333-3333-333333333333';
 /** Minimal `AuthenticatedUser` stand-in — only `.id` is read by the controller. */
 const CURRENT_USER = { id: USER_ID } as never;
+/** `@CurrentWorkspace()` resolves this shape (EVT-40) — see workspace-context.ts. */
+const CURRENT_WORKSPACE = { id: WORKSPACE_ID, role: 'member' } as never;
 
 function makeItemServiceMock() {
   return {
@@ -100,29 +103,36 @@ describe('ItemsController', () => {
       const rows = [{ id: ITEM_ID, name: 'Drill' }];
       service.list.mockResolvedValue(rows);
 
-      const result = await controller.list({});
+      const result = await controller.list({}, CURRENT_WORKSPACE);
       expect(result).toBe(rows);
-      expect(service.list).toHaveBeenCalledWith({});
+      expect(service.list).toHaveBeenCalledWith({}, WORKSPACE_ID);
     });
 
     it('passes query params to service', async () => {
       service.list.mockResolvedValue([]);
-      await controller.list({ search: 'drill', tag: 'power-tool', locationId: ITEM_ID });
-      expect(service.list).toHaveBeenCalledWith({
-        search: 'drill',
-        tag: 'power-tool',
-        locationId: ITEM_ID,
-      });
+      await controller.list(
+        { search: 'drill', tag: 'power-tool', locationId: ITEM_ID },
+        CURRENT_WORKSPACE,
+      );
+      expect(service.list).toHaveBeenCalledWith(
+        {
+          search: 'drill',
+          tag: 'power-tool',
+          locationId: ITEM_ID,
+        },
+        WORKSPACE_ID,
+      );
     });
 
     it('returns empty array when no items match', async () => {
       service.list.mockResolvedValue([]);
-      expect(await controller.list({})).toEqual([]);
+      expect(await controller.list({}, CURRENT_WORKSPACE)).toEqual([]);
     });
   });
 
   // =========================================================================
-  // findByQr
+  // findByQr — EVT-40 AC 4: scoped by the CALLER's membership, not the
+  // current workspace context, so this deliberately passes `user.id` only.
   // =========================================================================
 
   describe('findByQr', () => {
@@ -130,20 +140,20 @@ describe('ItemsController', () => {
       const result = { kind: 'item' as const, item: { id: ITEM_ID, name: 'Drill' } };
       service.findByQr.mockResolvedValue(result);
 
-      expect(await controller.findByQr('some-token')).toBe(result);
-      expect(service.findByQr).toHaveBeenCalledWith('some-token');
+      expect(await controller.findByQr('some-token', CURRENT_USER)).toBe(result);
+      expect(service.findByQr).toHaveBeenCalledWith('some-token', USER_ID);
     });
 
     it('returns location result for a location QR token', async () => {
       const result = { kind: 'location' as const, location: { id: 'loc-id', name: 'Garage' } };
       service.findByQr.mockResolvedValue(result);
 
-      expect(await controller.findByQr('loc-token')).toBe(result);
+      expect(await controller.findByQr('loc-token', CURRENT_USER)).toBe(result);
     });
 
     it('propagates NotFoundException from service (unknown QR token)', async () => {
       service.findByQr.mockRejectedValue(new NotFoundException('not found'));
-      await expect(controller.findByQr('unknown')).rejects.toThrow(NotFoundException);
+      await expect(controller.findByQr('unknown', CURRENT_USER)).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -156,13 +166,15 @@ describe('ItemsController', () => {
       const item = { id: ITEM_ID };
       service.findById.mockResolvedValue(item);
 
-      expect(await controller.findById(ITEM_ID)).toBe(item);
-      expect(service.findById).toHaveBeenCalledWith(ITEM_ID);
+      expect(await controller.findById(ITEM_ID, CURRENT_WORKSPACE)).toBe(item);
+      expect(service.findById).toHaveBeenCalledWith(ITEM_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.findById.mockRejectedValue(new NotFoundException());
-      await expect(controller.findById(ITEM_ID)).rejects.toThrow(NotFoundException);
+      await expect(controller.findById(ITEM_ID, CURRENT_WORKSPACE)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
@@ -171,7 +183,7 @@ describe('ItemsController', () => {
   // =========================================================================
 
   describe('searchByPhoto', () => {
-    it('delegates to ItemsService.searchByPhoto with the file buffer and mimetype', async () => {
+    it('delegates to ItemsService.searchByPhoto with the file buffer, mimetype, and workspace', async () => {
       const file = makeMulterFile();
       const result = {
         analysis: { suggested_name: 'M4 hex bolt', tags: [], search_keywords: [] },
@@ -179,16 +191,16 @@ describe('ItemsController', () => {
       };
       service.searchByPhoto.mockResolvedValue(result);
 
-      const response = await controller.searchByPhoto(file);
+      const response = await controller.searchByPhoto(file, CURRENT_WORKSPACE);
 
       expect(response).toBe(result);
-      expect(service.searchByPhoto).toHaveBeenCalledWith(file.buffer, file.mimetype);
+      expect(service.searchByPhoto).toHaveBeenCalledWith(file.buffer, file.mimetype, WORKSPACE_ID);
     });
 
     it('throws BadRequestException when no file is present (multer rejected it)', () => {
-      expect(() => controller.searchByPhoto(undefined as unknown as Express.Multer.File)).toThrow(
-        BadRequestException,
-      );
+      expect(() =>
+        controller.searchByPhoto(undefined as unknown as Express.Multer.File, CURRENT_WORKSPACE),
+      ).toThrow(BadRequestException);
       expect(service.searchByPhoto).not.toHaveBeenCalled();
     });
 
@@ -218,8 +230,8 @@ describe('ItemsController', () => {
       service.create.mockResolvedValue(item);
 
       const dto: CreateItemDto = { name: 'Drill' };
-      expect(await controller.create(dto, CURRENT_USER)).toBe(item);
-      expect(service.create).toHaveBeenCalledWith(dto, USER_ID);
+      expect(await controller.create(dto, CURRENT_USER, CURRENT_WORKSPACE)).toBe(item);
+      expect(service.create).toHaveBeenCalledWith(dto, USER_ID, WORKSPACE_ID);
     });
   });
 
@@ -233,13 +245,15 @@ describe('ItemsController', () => {
       service.update.mockResolvedValue(updated);
 
       const dto: UpdateItemDto = { name: 'Updated' };
-      expect(await controller.update(ITEM_ID, dto, CURRENT_USER)).toBe(updated);
-      expect(service.update).toHaveBeenCalledWith(ITEM_ID, dto, USER_ID);
+      expect(await controller.update(ITEM_ID, dto, CURRENT_USER, CURRENT_WORKSPACE)).toBe(updated);
+      expect(service.update).toHaveBeenCalledWith(ITEM_ID, dto, USER_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.update.mockRejectedValue(new NotFoundException());
-      await expect(controller.update(ITEM_ID, {}, CURRENT_USER)).rejects.toThrow(NotFoundException);
+      await expect(controller.update(ITEM_ID, {}, CURRENT_USER, CURRENT_WORKSPACE)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
@@ -248,20 +262,22 @@ describe('ItemsController', () => {
   // =========================================================================
 
   describe('receive', () => {
-    it('delegates to ItemsService.receive with the quantity and caller id', async () => {
+    it('delegates to ItemsService.receive with the quantity, caller id, and workspace', async () => {
       const received = { id: ITEM_ID, quantity: 125 };
       service.receive.mockResolvedValue(received);
 
       const dto: ReceiveItemDto = { quantity: 25 };
-      expect(await controller.receive(ITEM_ID, dto, CURRENT_USER)).toBe(received);
-      expect(service.receive).toHaveBeenCalledWith(ITEM_ID, 25, USER_ID);
+      expect(await controller.receive(ITEM_ID, dto, CURRENT_USER, CURRENT_WORKSPACE)).toBe(
+        received,
+      );
+      expect(service.receive).toHaveBeenCalledWith(ITEM_ID, 25, USER_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service (unknown item)', async () => {
       service.receive.mockRejectedValue(new NotFoundException());
-      await expect(controller.receive(ITEM_ID, { quantity: 5 }, CURRENT_USER)).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        controller.receive(ITEM_ID, { quantity: 5 }, CURRENT_USER, CURRENT_WORKSPACE),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -274,10 +290,10 @@ describe('ItemsController', () => {
       const page = { data: [{ id: 'mv-1' }], page: 1, pageSize: 20, total: 1, totalPages: 1 };
       stockMovementsService.listForItem.mockResolvedValue(page);
 
-      const result = await controller.listMovements(ITEM_ID, {});
+      const result = await controller.listMovements(ITEM_ID, {}, CURRENT_WORKSPACE);
 
       expect(result).toBe(page);
-      expect(stockMovementsService.listForItem).toHaveBeenCalledWith(ITEM_ID, {});
+      expect(stockMovementsService.listForItem).toHaveBeenCalledWith(ITEM_ID, {}, WORKSPACE_ID);
     });
 
     it('forwards page/pageSize query params', async () => {
@@ -289,17 +305,23 @@ describe('ItemsController', () => {
         totalPages: 1,
       });
 
-      await controller.listMovements(ITEM_ID, { page: 2, pageSize: 5 });
+      await controller.listMovements(ITEM_ID, { page: 2, pageSize: 5 }, CURRENT_WORKSPACE);
 
-      expect(stockMovementsService.listForItem).toHaveBeenCalledWith(ITEM_ID, {
-        page: 2,
-        pageSize: 5,
-      });
+      expect(stockMovementsService.listForItem).toHaveBeenCalledWith(
+        ITEM_ID,
+        {
+          page: 2,
+          pageSize: 5,
+        },
+        WORKSPACE_ID,
+      );
     });
 
     it('propagates NotFoundException from the service (unknown item)', async () => {
       stockMovementsService.listForItem.mockRejectedValue(new NotFoundException());
-      await expect(controller.listMovements(ITEM_ID, {})).rejects.toThrow(NotFoundException);
+      await expect(controller.listMovements(ITEM_ID, {}, CURRENT_WORKSPACE)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
@@ -312,8 +334,8 @@ describe('ItemsController', () => {
       const queue = [{ id: ITEM_ID, daysOverdue: 3 }];
       service.listVerificationQueue.mockResolvedValue(queue);
 
-      expect(await controller.listVerificationQueue()).toBe(queue);
-      expect(service.listVerificationQueue).toHaveBeenCalledWith();
+      expect(await controller.listVerificationQueue(CURRENT_WORKSPACE)).toBe(queue);
+      expect(service.listVerificationQueue).toHaveBeenCalledWith(undefined, WORKSPACE_ID);
     });
   });
 
@@ -322,20 +344,20 @@ describe('ItemsController', () => {
   // =========================================================================
 
   describe('count', () => {
-    it('delegates to ItemsService.count with id, quantity, and the caller id', async () => {
+    it('delegates to ItemsService.count with id, quantity, caller id, and workspace', async () => {
       const result = { item: { id: ITEM_ID }, bookQuantity: 3, countedQuantity: 5, delta: 2 };
       service.count.mockResolvedValue(result);
 
       const dto: CountItemDto = { quantity: 5 };
-      expect(await controller.count(ITEM_ID, dto, CURRENT_USER)).toBe(result);
-      expect(service.count).toHaveBeenCalledWith(ITEM_ID, 5, USER_ID);
+      expect(await controller.count(ITEM_ID, dto, CURRENT_USER, CURRENT_WORKSPACE)).toBe(result);
+      expect(service.count).toHaveBeenCalledWith(ITEM_ID, 5, USER_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.count.mockRejectedValue(new NotFoundException());
-      await expect(controller.count(ITEM_ID, { quantity: 1 }, CURRENT_USER)).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        controller.count(ITEM_ID, { quantity: 1 }, CURRENT_USER, CURRENT_WORKSPACE),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -344,20 +366,20 @@ describe('ItemsController', () => {
   // =========================================================================
 
   describe('consume', () => {
-    it('delegates to ItemsService.consume with id, quantity, and the caller id', async () => {
+    it('delegates to ItemsService.consume with id, quantity, caller id, and workspace', async () => {
       const result = { item: { id: ITEM_ID }, offerVerification: true };
       service.consume.mockResolvedValue(result);
 
       const dto: ConsumeItemDto = { quantity: 2 };
-      expect(await controller.consume(ITEM_ID, dto, CURRENT_USER)).toBe(result);
-      expect(service.consume).toHaveBeenCalledWith(ITEM_ID, 2, USER_ID);
+      expect(await controller.consume(ITEM_ID, dto, CURRENT_USER, CURRENT_WORKSPACE)).toBe(result);
+      expect(service.consume).toHaveBeenCalledWith(ITEM_ID, 2, USER_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.consume.mockRejectedValue(new NotFoundException());
-      await expect(controller.consume(ITEM_ID, { quantity: 1 }, CURRENT_USER)).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        controller.consume(ITEM_ID, { quantity: 1 }, CURRENT_USER, CURRENT_WORKSPACE),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -368,13 +390,15 @@ describe('ItemsController', () => {
   describe('remove', () => {
     it('delegates to ItemsService.remove', async () => {
       service.remove.mockResolvedValue(undefined);
-      await controller.remove(ITEM_ID);
-      expect(service.remove).toHaveBeenCalledWith(ITEM_ID);
+      await controller.remove(ITEM_ID, CURRENT_WORKSPACE);
+      expect(service.remove).toHaveBeenCalledWith(ITEM_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.remove.mockRejectedValue(new NotFoundException());
-      await expect(controller.remove(ITEM_ID)).rejects.toThrow(NotFoundException);
+      await expect(controller.remove(ITEM_ID, CURRENT_WORKSPACE)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 

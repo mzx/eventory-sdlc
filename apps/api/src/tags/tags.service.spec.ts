@@ -1,28 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { TagsService } from './tags.service';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  DEFAULT_WORKSPACE_ID,
-  __resetDefaultWorkspaceCacheForTests,
-} from '../workspace/default-workspace';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Minimal PrismaService double with the tag model mocked plus `workspace`
- * (EVT-39) — `upsertByName` resolves the Default Workspace's id before
- * building its compound `where`, see `default-workspace.ts`.
- */
+const WORKSPACE_ID = '99999999-9999-9999-9999-999999999999';
+
 function makePrismaMock() {
   return {
     tag: {
       findMany: jest.fn(),
       upsert: jest.fn(),
-    },
-    workspace: {
-      findUniqueOrThrow: jest.fn().mockResolvedValue({ id: DEFAULT_WORKSPACE_ID }),
     },
   };
 }
@@ -36,10 +26,6 @@ describe('TagsService', () => {
   let prismaMock: ReturnType<typeof makePrismaMock>;
 
   beforeEach(async () => {
-    // The default-workspace lookup caches its result at module scope
-    // (EVT-39) — reset it so each test starts from the same "not yet
-    // resolved" state and genuinely exercises `workspace.findUniqueOrThrow`.
-    __resetDefaultWorkspaceCacheForTests();
     prismaMock = makePrismaMock();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -60,7 +46,7 @@ describe('TagsService', () => {
         { id: 'id-2', name: 'hand-tool', color: '#ff0000', _count: { items: 1 } },
       ]);
 
-      const result = await service.findAll();
+      const result = await service.findAll(WORKSPACE_ID);
 
       expect(result).toEqual([
         { id: 'id-1', name: 'power-tool', color: null, itemCount: 3 },
@@ -68,15 +54,35 @@ describe('TagsService', () => {
       ]);
     });
 
-    it('passes the correct orderBy to Prisma (count desc, then name asc)', async () => {
+    it('passes the correct where + orderBy to Prisma (scoped to workspaceId; count desc, then name asc)', async () => {
       prismaMock.tag.findMany.mockResolvedValue([]);
 
-      await service.findAll();
+      await service.findAll(WORKSPACE_ID);
 
       expect(prismaMock.tag.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
+          where: { workspaceId: WORKSPACE_ID },
           orderBy: [{ items: { _count: 'desc' } }, { name: 'asc' }],
         }),
+      );
+    });
+
+    // EVT-40 round-2 review, security finding 1 — GET /api/tags was
+    // unscoped; this is the regression test.
+    it('EVT-40: scopes the query to workspaceId — a different workspace gets a different where clause', async () => {
+      const OTHER_WORKSPACE_ID = '88888888-8888-8888-8888-888888888888';
+      prismaMock.tag.findMany.mockResolvedValue([]);
+
+      await service.findAll(WORKSPACE_ID);
+      await service.findAll(OTHER_WORKSPACE_ID);
+
+      expect(prismaMock.tag.findMany).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ where: { workspaceId: WORKSPACE_ID } }),
+      );
+      expect(prismaMock.tag.findMany).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ where: { workspaceId: OTHER_WORKSPACE_ID } }),
       );
     });
 
@@ -87,7 +93,7 @@ describe('TagsService', () => {
         { id: 'id-battery', name: 'battery', color: null, _count: { items: 1 } },
       ]);
 
-      const afterTagging = await service.findAll();
+      const afterTagging = await service.findAll(WORKSPACE_ID);
       expect(afterTagging[0]).toEqual({ id: 'id-drill', name: 'drill', color: null, itemCount: 2 });
       expect(afterTagging[1]).toEqual({
         id: 'id-battery',
@@ -102,56 +108,63 @@ describe('TagsService', () => {
         { id: 'id-drill', name: 'drill', color: null, _count: { items: 1 } },
       ]);
 
-      const afterUntagging = await service.findAll();
+      const afterUntagging = await service.findAll(WORKSPACE_ID);
       expect(afterUntagging[0].itemCount).toBe(1);
       expect(afterUntagging[1].itemCount).toBe(1);
     });
 
     it('returns an empty array when no tags exist', async () => {
       prismaMock.tag.findMany.mockResolvedValue([]);
-      expect(await service.findAll()).toEqual([]);
+      expect(await service.findAll(WORKSPACE_ID)).toEqual([]);
     });
   });
 
   // -------------------------------------------------------------------------
-  // upsertByName
+  // upsertByName (EVT-40: scoped to the caller's workspace, not always Default)
   // -------------------------------------------------------------------------
 
   describe('upsertByName', () => {
-    it('creates a new tag when the name does not exist', async () => {
+    it('creates a new tag scoped to the given workspace when the name does not exist', async () => {
       const created = { id: 'new-id', name: 'cordless', color: null };
       prismaMock.tag.upsert.mockResolvedValue(created);
 
-      const result = await service.upsertByName('cordless');
+      const result = await service.upsertByName('cordless', WORKSPACE_ID);
 
       expect(prismaMock.tag.upsert).toHaveBeenCalledWith({
-        where: { workspaceId_name: { workspaceId: DEFAULT_WORKSPACE_ID, name: 'cordless' } },
+        where: { workspaceId_name: { workspaceId: WORKSPACE_ID, name: 'cordless' } },
         update: {},
-        create: { name: 'cordless' },
+        create: { name: 'cordless', workspaceId: WORKSPACE_ID },
       });
       expect(result).toEqual(created);
     });
 
-    it('returns the existing tag when the name already exists', async () => {
+    it('returns the existing tag when the name already exists in that workspace', async () => {
       const existing = { id: 'existing-id', name: 'drill', color: null };
       prismaMock.tag.upsert.mockResolvedValue(existing);
 
-      const result = await service.upsertByName('drill');
+      const result = await service.upsertByName('drill', WORKSPACE_ID);
       expect(result).toEqual(existing);
     });
 
-    it('resolves the default workspace id once and caches it across calls (EVT-39)', async () => {
-      prismaMock.tag.upsert
-        .mockResolvedValueOnce({ id: 'id-1', name: 'a', color: null })
-        .mockResolvedValueOnce({ id: 'id-2', name: 'b', color: null });
+    it('scopes the compound where by workspace — two different workspace ids produce different where clauses', async () => {
+      const OTHER_WORKSPACE_ID = '88888888-8888-8888-8888-888888888888';
+      prismaMock.tag.upsert.mockResolvedValue({ id: 'id-1', name: 'drill-bit', color: null });
 
-      await service.upsertByName('a');
-      await service.upsertByName('b');
+      await service.upsertByName('drill-bit', WORKSPACE_ID);
+      await service.upsertByName('drill-bit', OTHER_WORKSPACE_ID);
 
-      // Two upserts, but only a single `workspace.findUniqueOrThrow` round-trip
-      // — the module-level cache serves the second call.
-      expect(prismaMock.tag.upsert).toHaveBeenCalledTimes(2);
-      expect(prismaMock.workspace.findUniqueOrThrow).toHaveBeenCalledTimes(1);
+      expect(prismaMock.tag.upsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          where: { workspaceId_name: { workspaceId: WORKSPACE_ID, name: 'drill-bit' } },
+        }),
+      );
+      expect(prismaMock.tag.upsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          where: { workspaceId_name: { workspaceId: OTHER_WORKSPACE_ID, name: 'drill-bit' } },
+        }),
+      );
     });
   });
 
@@ -165,20 +178,30 @@ describe('TagsService', () => {
         .mockResolvedValueOnce({ id: 'id-a', name: 'a', color: null })
         .mockResolvedValueOnce({ id: 'id-b', name: 'b', color: null });
 
-      const ids = await service.upsertMany(['a', 'b']);
+      const ids = await service.upsertMany(['a', 'b'], WORKSPACE_ID);
       expect(ids).toEqual(['id-a', 'id-b']);
     });
 
     it('returns an empty array for an empty input', async () => {
-      expect(await service.upsertMany([])).toEqual([]);
+      expect(await service.upsertMany([], WORKSPACE_ID)).toEqual([]);
     });
 
     it('deduplication: upsertByName called once per name', async () => {
       prismaMock.tag.upsert.mockResolvedValue({ id: 'id-x', name: 'x', color: null });
 
-      await service.upsertMany(['x', 'x']);
+      await service.upsertMany(['x', 'x'], WORKSPACE_ID);
       // Called twice (Promise.all over input array — dedup is the caller's responsibility)
       expect(prismaMock.tag.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('passes the same workspaceId to every upsertByName call', async () => {
+      prismaMock.tag.upsert.mockResolvedValue({ id: 'id-x', name: 'x', color: null });
+
+      await service.upsertMany(['a', 'b'], WORKSPACE_ID);
+
+      for (const call of prismaMock.tag.upsert.mock.calls) {
+        expect(call[0].where.workspaceId_name.workspaceId).toBe(WORKSPACE_ID);
+      }
     });
   });
 
@@ -191,12 +214,12 @@ describe('TagsService', () => {
       // Step 1: item create uses upsertByName → tag row inserted
       const newTag = { id: 'tag-new', name: 'multimeter', color: null };
       prismaMock.tag.upsert.mockResolvedValue(newTag);
-      await service.upsertByName('multimeter');
+      await service.upsertByName('multimeter', WORKSPACE_ID);
 
       // Step 2: subsequent findAll picks up the new tag (DB now has it)
       prismaMock.tag.findMany.mockResolvedValue([{ ...newTag, _count: { items: 1 } }]);
 
-      const tags = await service.findAll();
+      const tags = await service.findAll(WORKSPACE_ID);
       expect(tags).toContainEqual({ id: 'tag-new', name: 'multimeter', color: null, itemCount: 1 });
     });
   });

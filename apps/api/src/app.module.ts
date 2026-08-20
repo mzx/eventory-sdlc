@@ -18,6 +18,7 @@ import { QrModule } from './qr/qr.module';
 import { ShoppingListModule } from './shopping-list/shopping-list.module';
 import { TagsModule } from './tags/tags.module';
 import { UsersModule } from './users/users.module';
+import { WorkspaceContextGuard } from './workspace/workspace-context.guard';
 
 @Module({
   imports: [
@@ -49,6 +50,11 @@ import { UsersModule } from './users/users.module';
     // unauthenticated flood is throttled before it reaches the (cheap, but
     // non-zero) DB lookup this guard does per request.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    // Tenant context (EVT-40) — resolves the caller's active Workspace
+    // membership onto `request.workspace`. MUST run after JwtAuthGuard
+    // (needs `request.user`); see WorkspaceContextGuard's doc comment for
+    // the @Public()/@AllowPending() carve-outs it mirrors.
+    { provide: APP_GUARD, useClass: WorkspaceContextGuard },
   ],
 })
 export class AppModule {}

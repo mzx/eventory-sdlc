@@ -17,8 +17,11 @@ const THROTTLER_TTL_METADATA_KEY = 'THROTTLER:TTL';
 
 const PHOTO_ID = '11111111-1111-1111-1111-111111111111';
 const USER_ID = '22222222-2222-2222-2222-222222222222';
+const WORKSPACE_ID = '33333333-3333-3333-3333-333333333333';
 /** Minimal `AuthenticatedUser` stand-in — only `.id` is read by the controller. */
 const CURRENT_USER = { id: USER_ID } as never;
+/** `@CurrentWorkspace()` resolves this shape (EVT-40) — see workspace-context.ts. */
+const CURRENT_WORKSPACE = { id: WORKSPACE_ID, role: 'member' } as never;
 
 function makePhotosServiceMock() {
   return {
@@ -73,42 +76,54 @@ describe('PhotosController', () => {
       const photo = { id: PHOTO_ID, filename: file.filename, url: `/storage/${file.filename}` };
       service.savePhoto.mockResolvedValue(photo);
 
-      const result = await controller.upload(file, { itemId: 'item-id' }, undefined, CURRENT_USER);
+      const result = await controller.upload(
+        file,
+        { itemId: 'item-id' },
+        undefined,
+        CURRENT_USER,
+        CURRENT_WORKSPACE,
+      );
 
       expect(result).toBe(photo);
-      expect(service.savePhoto).toHaveBeenCalledWith(file, 'item-id', false, USER_ID);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, 'item-id', false, USER_ID, WORKSPACE_ID);
     });
 
     it('delegates without itemId when not provided', async () => {
       const file = makeMulterFile();
       service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
 
-      await controller.upload(file, {}, undefined, CURRENT_USER);
+      await controller.upload(file, {}, undefined, CURRENT_USER, CURRENT_WORKSPACE);
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false, USER_ID);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false, USER_ID, WORKSPACE_ID);
     });
 
     it('passes analyze=true through to the service when ?analyze=true', async () => {
       const file = makeMulterFile();
       service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
 
-      await controller.upload(file, {}, 'true', CURRENT_USER);
+      await controller.upload(file, {}, 'true', CURRENT_USER, CURRENT_WORKSPACE);
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, true, USER_ID);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, true, USER_ID, WORKSPACE_ID);
     });
 
     it('treats any non-"true" value (including missing) as analyze=false', async () => {
       const file = makeMulterFile();
       service.savePhoto.mockResolvedValue({ id: PHOTO_ID });
 
-      await controller.upload(file, {}, 'yes', CURRENT_USER);
+      await controller.upload(file, {}, 'yes', CURRENT_USER, CURRENT_WORKSPACE);
 
-      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false, USER_ID);
+      expect(service.savePhoto).toHaveBeenCalledWith(file, undefined, false, USER_ID, WORKSPACE_ID);
     });
 
     it('throws BadRequestException when no file is present (multer rejected it)', () => {
       expect(() =>
-        controller.upload(undefined as unknown as Express.Multer.File, {}, undefined, CURRENT_USER),
+        controller.upload(
+          undefined as unknown as Express.Multer.File,
+          {},
+          undefined,
+          CURRENT_USER,
+          CURRENT_WORKSPACE,
+        ),
       ).toThrow(BadRequestException);
       expect(service.savePhoto).not.toHaveBeenCalled();
     });
@@ -118,7 +133,7 @@ describe('PhotosController', () => {
       service.savePhoto.mockRejectedValue(new BadRequestException('Item x not found'));
 
       await expect(
-        controller.upload(file, { itemId: 'missing' }, undefined, CURRENT_USER),
+        controller.upload(file, { itemId: 'missing' }, undefined, CURRENT_USER, CURRENT_WORKSPACE),
       ).rejects.toThrow(BadRequestException);
     });
 
@@ -148,13 +163,15 @@ describe('PhotosController', () => {
       const photo = { id: PHOTO_ID, filename: 'a.png', url: '/storage/a.png' };
       service.findById.mockResolvedValue(photo);
 
-      expect(await controller.findById(PHOTO_ID)).toBe(photo);
-      expect(service.findById).toHaveBeenCalledWith(PHOTO_ID);
+      expect(await controller.findById(PHOTO_ID, CURRENT_WORKSPACE)).toBe(photo);
+      expect(service.findById).toHaveBeenCalledWith(PHOTO_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.findById.mockRejectedValue(new NotFoundException());
-      await expect(controller.findById(PHOTO_ID)).rejects.toThrow(NotFoundException);
+      await expect(controller.findById(PHOTO_ID, CURRENT_WORKSPACE)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
@@ -165,13 +182,15 @@ describe('PhotosController', () => {
   describe('remove', () => {
     it('delegates to PhotosService.remove', async () => {
       service.remove.mockResolvedValue(undefined);
-      await controller.remove(PHOTO_ID);
-      expect(service.remove).toHaveBeenCalledWith(PHOTO_ID);
+      await controller.remove(PHOTO_ID, CURRENT_WORKSPACE);
+      expect(service.remove).toHaveBeenCalledWith(PHOTO_ID, WORKSPACE_ID);
     });
 
     it('propagates NotFoundException from service', async () => {
       service.remove.mockRejectedValue(new NotFoundException());
-      await expect(controller.remove(PHOTO_ID)).rejects.toThrow(NotFoundException);
+      await expect(controller.remove(PHOTO_ID, CURRENT_WORKSPACE)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });

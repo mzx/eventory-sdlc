@@ -13,6 +13,7 @@ const TO_LOC_ID = '33333333-3333-3333-3333-333333333333';
 const USER_ID = '44444444-4444-4444-4444-444444444444';
 const MOVEMENT_ID = '55555555-5555-5555-5555-555555555555';
 const CONTAINER_ID = '66666666-6666-6666-6666-666666666666';
+const WORKSPACE_ID = '77777777-7777-7777-7777-777777777777';
 
 function makeMovementRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -43,13 +44,25 @@ function makeItemRow(overrides: Record<string, unknown> = {}) {
 
 /**
  * `tx.*` mocks — a bare object exposing only the delegates `recordMovement`
- * / `recordConsumption` touch. `item.updateMany` backs `recordConsumption`'s
- * conditional decrement (EVT-28 review round 2, finding 1).
+ * / `recordConsumption` / `recordContainerMove` touch. `item.updateMany`
+ * backs `recordConsumption`'s conditional decrement (EVT-28 review round 2,
+ * finding 1). `item.findUnique` / `location.findUnique` (EVT-40 round-2
+ * review, security finding 6) back the workspaceId-derivation reads —
+ * `beforeEach` below gives them a sane default so every pre-existing test
+ * that doesn't care about the derived value keeps working unmodified.
  */
 function makeTxMock() {
   return {
     stockMovement: { create: jest.fn() },
-    item: { update: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
+    item: {
+      update: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    location: {
+      findUnique: jest.fn(),
+    },
     // EVT-26 low-stock auto-trigger — raw `INSERT ... ON CONFLICT DO NOTHING`.
     $executeRaw: jest.fn().mockResolvedValue(0),
   };
@@ -92,6 +105,19 @@ describe('StockMovementsService', () => {
     const built = makePrismaMock();
     prismaMock = built.mock;
     tx = built.tx;
+
+    // EVT-40 round-2 review, security finding 6 — recordMovement /
+    // recordConsumption / recordContainerMove all derive `workspaceId` from
+    // an item/location read rather than trusting caller input. These
+    // defaults let every PRE-EXISTING test (which doesn't care about the
+    // derived value) keep passing unmodified; tests that DO care override
+    // per-test as usual.
+    tx.item.findUnique.mockResolvedValue({
+      quantity: 999,
+      minQuantity: null,
+      workspaceId: WORKSPACE_ID,
+    });
+    tx.location.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [StockMovementsService, { provide: PrismaService, useValue: prismaMock }],
@@ -256,6 +282,45 @@ describe('StockMovementsService', () => {
       });
     });
 
+    // -----------------------------------------------------------------------
+    // EVT-40 round-2 review, security finding 6 — `workspaceId` is DERIVED
+    // from the item being written (a `tx.item.findUnique` read, no longer a
+    // caller-supplied field), so it can never be silently wrong or omitted.
+    // -----------------------------------------------------------------------
+
+    it("EVT-40: derives workspaceId from the item's own row (not caller input) and stamps it on the movement", async () => {
+      tx.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow());
+      tx.item.update.mockResolvedValue(makeItemRow());
+
+      await service.recordMovement(asClient(prismaMock), {
+        itemId: ITEM_ID,
+        kind: 'adjust',
+        delta: 1,
+      });
+
+      expect(tx.item.findUnique).toHaveBeenCalledWith({
+        where: { id: ITEM_ID },
+        select: { workspaceId: true },
+      });
+      expect(tx.stockMovement.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ workspaceId: WORKSPACE_ID }),
+      });
+    });
+
+    it('EVT-40: throws (loudly, not silently) if the item cannot be found while deriving workspaceId', async () => {
+      tx.item.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.recordMovement(asClient(prismaMock), {
+          itemId: ITEM_ID,
+          kind: 'adjust',
+          delta: 1,
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(tx.stockMovement.create).not.toHaveBeenCalled();
+    });
+
     it('forwards a caller-supplied itemInclude to the Item update', async () => {
       const include = { tags: true };
       tx.stockMovement.create.mockResolvedValue(makeMovementRow());
@@ -318,6 +383,7 @@ describe('StockMovementsService', () => {
 
     it('rides along an already-open transaction client without opening a nested transaction', async () => {
       const openTx = makeTxMock(); // no `$transaction` method — this IS the tx
+      openTx.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       openTx.stockMovement.create.mockResolvedValue(makeMovementRow());
       openTx.item.update.mockResolvedValue(makeItemRow());
 
@@ -574,6 +640,40 @@ describe('StockMovementsService', () => {
       });
     });
 
+    it("EVT-40: derives workspaceId from the item's own row (not caller input) and stamps it on the movement", async () => {
+      tx.item.updateMany.mockResolvedValue({ count: 1 });
+      tx.item.findUnique.mockResolvedValue({
+        quantity: 5,
+        minQuantity: null,
+        workspaceId: WORKSPACE_ID,
+      });
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ kind: 'consume', delta: -1 }));
+
+      await service.recordConsumption(asClient(tx) as never, {
+        itemId: ITEM_ID,
+        kind: 'consume',
+        requestedQuantity: 1,
+      });
+
+      expect(tx.stockMovement.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ workspaceId: WORKSPACE_ID }),
+      });
+    });
+
+    it('EVT-40: throws (loudly, not silently) if the item cannot be found while deriving workspaceId', async () => {
+      tx.item.updateMany.mockResolvedValue({ count: 1 });
+      tx.item.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.recordConsumption(asClient(tx) as never, {
+          itemId: ITEM_ID,
+          kind: 'consume',
+          requestedQuantity: 1,
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(tx.stockMovement.create).not.toHaveBeenCalled();
+    });
+
     // -----------------------------------------------------------------------
     // EVT-27 review: `recordConsumption` — the only write path for
     // `ItemsService.consume()` — must open the same EVT-26 low-stock entry
@@ -671,6 +771,7 @@ describe('StockMovementsService', () => {
           toLocationId: TO_LOC_ID,
           note: null,
           createdById: null,
+          workspaceId: WORKSPACE_ID,
         },
       });
       // Never touches Item — a container move has no Item row to update.
@@ -722,8 +823,46 @@ describe('StockMovementsService', () => {
       );
     });
 
+    // -----------------------------------------------------------------------
+    // EVT-40 round-2 review, security finding 6 — workspaceId is DERIVED
+    // from the container Location itself, not trusted from caller input.
+    // -----------------------------------------------------------------------
+
+    it("EVT-40: derives workspaceId from the container's own Location row", async () => {
+      tx.location.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
+      tx.stockMovement.create.mockResolvedValue(makeMovementRow({ containerId: CONTAINER_ID }));
+
+      await service.recordContainerMove(asClient(prismaMock), {
+        containerId: CONTAINER_ID,
+        fromLocationId: FROM_LOC_ID,
+        toLocationId: TO_LOC_ID,
+      });
+
+      expect(tx.location.findUnique).toHaveBeenCalledWith({
+        where: { id: CONTAINER_ID },
+        select: { workspaceId: true },
+      });
+      expect(tx.stockMovement.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ workspaceId: WORKSPACE_ID }) }),
+      );
+    });
+
+    it('EVT-40: throws (loudly, not silently) if the container cannot be found while deriving workspaceId', async () => {
+      tx.location.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.recordContainerMove(asClient(prismaMock), {
+          containerId: CONTAINER_ID,
+          fromLocationId: FROM_LOC_ID,
+          toLocationId: TO_LOC_ID,
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(tx.stockMovement.create).not.toHaveBeenCalled();
+    });
+
     it('rides along an already-open transaction client without opening a nested transaction', async () => {
       const openTx = makeTxMock();
+      openTx.location.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       openTx.stockMovement.create.mockResolvedValue(makeMovementRow({ containerId: CONTAINER_ID }));
 
       await service.recordContainerMove(asClient(openTx), {
@@ -743,17 +882,32 @@ describe('StockMovementsService', () => {
 
   describe('listForItem', () => {
     it('404s when the item does not exist', async () => {
-      prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.listForItem(ITEM_ID, {})).rejects.toThrow(NotFoundException);
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.listForItem(ITEM_ID, {}, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it("EVT-40: scopes the existence check to the caller's workspace", async () => {
+      // `findFirst` (not `findUnique`) is what makes this a scoped lookup —
+      // a foreign-workspace item resolves the exact same "not found" path
+      // as a genuinely unknown id (the mock returning null covers both).
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.listForItem(ITEM_ID, {}, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: ITEM_ID, workspaceId: WORKSPACE_ID } }),
+      );
     });
 
     it('returns newest-first, paginated, with the item found', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.stockMovement.count.mockResolvedValue(42);
       const rows = [makeMovementRow({ id: 'mv-2' }), makeMovementRow({ id: 'mv-1' })];
       prismaMock.stockMovement.findMany.mockResolvedValue(rows);
 
-      const result = await service.listForItem(ITEM_ID, {});
+      const result = await service.listForItem(ITEM_ID, {}, WORKSPACE_ID);
 
       expect(prismaMock.stockMovement.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -767,11 +921,11 @@ describe('StockMovementsService', () => {
     });
 
     it('applies page/pageSize to skip/take', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.stockMovement.count.mockResolvedValue(100);
       prismaMock.stockMovement.findMany.mockResolvedValue([]);
 
-      const result = await service.listForItem(ITEM_ID, { page: 3, pageSize: 10 });
+      const result = await service.listForItem(ITEM_ID, { page: 3, pageSize: 10 }, WORKSPACE_ID);
 
       expect(prismaMock.stockMovement.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ skip: 20, take: 10 }),
@@ -782,21 +936,21 @@ describe('StockMovementsService', () => {
     });
 
     it('returns an empty page (not an error) when the item has no movements yet', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.stockMovement.count.mockResolvedValue(0);
       prismaMock.stockMovement.findMany.mockResolvedValue([]);
 
-      const result = await service.listForItem(ITEM_ID, {});
+      const result = await service.listForItem(ITEM_ID, {}, WORKSPACE_ID);
 
       expect(result).toEqual({ data: [], page: 1, pageSize: 20, total: 0, totalPages: 1 });
     });
 
     it('includes from/to location names and the linked project summary', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.stockMovement.count.mockResolvedValue(1);
       prismaMock.stockMovement.findMany.mockResolvedValue([]);
 
-      await service.listForItem(ITEM_ID, {});
+      await service.listForItem(ITEM_ID, {}, WORKSPACE_ID);
 
       const findManyArg = prismaMock.stockMovement.findMany.mock.calls[0][0];
       expect(findManyArg.include).toEqual(

@@ -14,15 +14,13 @@
  * see the schema-header note in `prisma/schema.prisma` for the full
  * rationale (three places the literal below must stay in sync).
  *
- * The handful of call sites that DO need this module are the ones whose
- * `where` clause used to target a now-composite unique key (e.g.
- * `TagsService.upsertByName` used to do `where: { name }`; `Tag.name` is now
- * `@@unique([workspaceId, name])`, so the lookup needs an explicit
- * `workspaceId` to build the compound key) — those import
- * `getDefaultWorkspaceId` below rather than hand-rolling the literal.
+ * The handful of call sites that DO need this module are the ones that need
+ * the Default Workspace's id explicitly — e.g. `ensureDefaultWorkspaceMembership`
+ * below, granted on user approval/promotion since EVT-40's global
+ * `WorkspaceContextGuard` requires a resolvable membership.
  */
 
-import { Prisma, PrismaClient } from '@prisma/client';
+import { PrismaClient, UserRole, WorkspaceRole } from '@prisma/client';
 
 /**
  * Fixed, well-known id of the single workspace the EVT-39 migration creates
@@ -63,13 +61,66 @@ export async function getDefaultWorkspaceId(prisma: WorkspaceLookupClient): Prom
   return cachedDefaultWorkspaceId;
 }
 
-/** Builds the compound `Tag` unique-where for the Default Workspace. */
-export async function defaultWorkspaceTagWhere(
-  prisma: WorkspaceLookupClient,
-  name: string,
-): Promise<Prisma.TagWhereUniqueInput> {
+/**
+ * Maps a global `UserRole` to the `WorkspaceRole` a user should default to
+ * in the Default Workspace — mirrors the EVT-39 migration's backfill:
+ * `admin` -> `owner`, everyone else -> `member`. Shared by every call site
+ * that grants Default Workspace membership (`ensureDefaultWorkspaceMembership`
+ * callers in `AuthService` and `UsersService`).
+ */
+export function defaultWorkspaceRoleForUserRole(role: UserRole): WorkspaceRole {
+  return role === UserRole.admin ? WorkspaceRole.owner : WorkspaceRole.member;
+}
+
+/** Minimal shape {@link ensureDefaultWorkspaceMembership} needs from a Prisma client. */
+type MembershipClient = WorkspaceLookupClient & Pick<PrismaClient, 'workspaceMember'>;
+
+/**
+ * Grants `userId` a `WorkspaceMember` row in the Default Workspace — but
+ * ONLY when they have ZERO memberships in ANY workspace. EVT-40's
+ * `WorkspaceContextGuard` is global, so an `approved` user with ZERO
+ * workspace memberships is locked out of every tenant-scoped route
+ * (items/photos/QR); this function is exclusively that lockout-recovery
+ * path (EVT-20), never a general "make sure they're in the Default
+ * Workspace" upsert.
+ *
+ * CONTRACT (EVT-40 round-3 review, security finding — EVT-42 relies on
+ * this): a user who already belongs to AT LEAST ONE workspace is left
+ * completely untouched, even if none of their memberships is in the
+ * Default Workspace specifically. This is what makes self-healing safe
+ * once EVT-42 introduces deliberate membership revocation — without this
+ * gate, a revoked user's Default Workspace membership would be silently
+ * re-granted on their very next login, turning "revoke" into a no-op (and,
+ * since the role mapper below never yields `viewer`, a revoked `viewer`
+ * would come back as `member` — revocation as an accidental privilege
+ * upgrade). Only a user with NO membership anywhere is healed back into
+ * the Default Workspace; a user who still holds membership in some OTHER
+ * workspace after a Default Workspace revocation is assumed to be exactly
+ * where EVT-42's revocation left them, not accidentally locked out.
+ *
+ * Idempotent and safe to call unconditionally on every approved login —
+ * the zero-membership check above already covers the "no-op if they
+ * already have one" case. Every code path that makes a user `approved`
+ * calls this:
+ *   - `UsersService.updateStatus` (an admin approving a pending user)
+ *   - `AuthService.upsertFromGoogleProfile`'s three auto-promotion branches
+ *     (first-ever sign-in, and the `EVENTORY_ADMIN_EMAILS` allowlist)
+ */
+export async function ensureDefaultWorkspaceMembership(
+  prisma: MembershipClient,
+  userId: string,
+  role: WorkspaceRole,
+): Promise<void> {
+  const existingMembershipCount = await prisma.workspaceMember.count({ where: { userId } });
+  if (existingMembershipCount > 0) {
+    return;
+  }
   const workspaceId = await getDefaultWorkspaceId(prisma);
-  return { workspaceId_name: { workspaceId, name } };
+  await prisma.workspaceMember.upsert({
+    where: { workspaceId_userId: { workspaceId, userId } },
+    update: {},
+    create: { workspaceId, userId, role },
+  });
 }
 
 /** Test-only: resets the module-level cache between test runs. */

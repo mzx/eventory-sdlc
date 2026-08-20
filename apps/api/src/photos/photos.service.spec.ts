@@ -28,16 +28,17 @@ jest.mock('fs/promises', () => ({
 // ---------------------------------------------------------------------------
 
 const PHOTO_ID = '11111111-1111-1111-1111-111111111111';
+const WORKSPACE_ID = '99999999-9999-9999-9999-999999999999';
 
 function makePrismaMock() {
   return {
     photo: {
       create: jest.fn(),
-      findUnique: jest.fn(),
+      findFirst: jest.fn(),
       delete: jest.fn(),
     },
     item: {
-      findUnique: jest.fn(),
+      findFirst: jest.fn(),
       updateMany: jest.fn(),
     },
   };
@@ -98,7 +99,7 @@ describe('PhotosService', () => {
   // =========================================================================
 
   describe('savePhoto', () => {
-    it('creates a Photo row with width/height from sharp metadata (AC3)', async () => {
+    it('creates a Photo row with width/height from sharp metadata (AC3), stamped with workspaceId', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
       const created = {
         id: PHOTO_ID,
@@ -112,7 +113,13 @@ describe('PhotosService', () => {
       };
       prismaMock.photo.create.mockResolvedValue(created);
 
-      const result = await service.savePhoto(makeFile({ filename: 'uuid.png' }));
+      const result = await service.savePhoto(
+        makeFile({ filename: 'uuid.png' }),
+        undefined,
+        false,
+        undefined,
+        WORKSPACE_ID,
+      );
 
       expect(prismaMock.photo.create).toHaveBeenCalledWith({
         data: {
@@ -121,20 +128,46 @@ describe('PhotosService', () => {
           sizeBytes: 2048,
           width: 640,
           height: 480,
+          workspaceId: WORKSPACE_ID,
         },
       });
       expect(result).toEqual({ ...created, url: '/storage/uuid.png' });
     });
 
-    it('links itemId when provided', async () => {
+    it('links itemId when it belongs to the same workspace', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'item-1' });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
 
-      await service.savePhoto(makeFile(), 'item-1');
+      await service.savePhoto(makeFile(), 'item-1', false, undefined, WORKSPACE_ID);
 
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith({
+        where: { id: 'item-1', workspaceId: WORKSPACE_ID },
+        select: { id: true },
+      });
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ itemId: 'item-1' }) }),
       );
+    });
+
+    // =======================================================================
+    // EVT-40 — itemId is ALWAYS validated against the caller's workspace,
+    // regardless of `analyze` (previously this only ran on the
+    // `analyze && itemId` path — see PhotosService.savePhoto's doc comment).
+    // =======================================================================
+
+    it('EVT-40: throws BadRequestException when itemId belongs to a different workspace, even with analyze=false', async () => {
+      metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.item.findFirst.mockResolvedValue(null);
+
+      const file = makeFile();
+      await expect(
+        service.savePhoto(file, 'foreign-item', false, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(prismaMock.photo.create).not.toHaveBeenCalled();
+      expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
+      expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
 
     // =======================================================================
@@ -144,10 +177,11 @@ describe('PhotosService', () => {
 
     it('EVT-24 AC1: auto-promotes the uploaded photo to primary when the item has none yet', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'item-1' });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
       prismaMock.item.updateMany.mockResolvedValue({ count: 1 });
 
-      await service.savePhoto(makeFile(), 'item-1');
+      await service.savePhoto(makeFile(), 'item-1', false, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.updateMany).toHaveBeenCalledWith({
         where: { id: 'item-1', primaryPhotoId: null },
@@ -157,6 +191,7 @@ describe('PhotosService', () => {
 
     it('EVT-24 AC2: does not steal an existing primary — updateMany matches zero rows when primaryPhotoId is already set', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'item-1' });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'second.png' });
       // `updateMany`'s `where: { primaryPhotoId: null }` is what actually
       // enforces AC2 against the real DB; here we assert the call shape and
@@ -164,7 +199,7 @@ describe('PhotosService', () => {
       // otherwise change behavior.
       prismaMock.item.updateMany.mockResolvedValue({ count: 0 });
 
-      await service.savePhoto(makeFile(), 'item-1');
+      await service.savePhoto(makeFile(), 'item-1', false, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.updateMany).toHaveBeenCalledWith({
         where: { id: 'item-1', primaryPhotoId: null },
@@ -176,18 +211,19 @@ describe('PhotosService', () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'unlinked.png' });
 
-      await service.savePhoto(makeFile());
+      await service.savePhoto(makeFile(), undefined, false, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.updateMany).not.toHaveBeenCalled();
     });
 
     it('EVT-24: logs and swallows a failure promoting to primary rather than unwinding the upload', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'item-1' });
       const created = { id: PHOTO_ID, filename: 'x.png' };
       prismaMock.photo.create.mockResolvedValue(created);
       prismaMock.item.updateMany.mockRejectedValue(new Error('connection lost'));
 
-      const result = await service.savePhoto(makeFile(), 'item-1');
+      const result = await service.savePhoto(makeFile(), 'item-1', false, undefined, WORKSPACE_ID);
 
       expect(result).toEqual({ ...created, url: '/storage/x.png' });
       expect(unlinkMock).not.toHaveBeenCalled();
@@ -197,7 +233,7 @@ describe('PhotosService', () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
 
-      await service.savePhoto(makeFile(), undefined, false, 'user-1');
+      await service.savePhoto(makeFile(), undefined, false, 'user-1', WORKSPACE_ID);
 
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ uploadedById: 'user-1' }) }),
@@ -208,7 +244,7 @@ describe('PhotosService', () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 100, height: 100 });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
 
-      await service.savePhoto(makeFile());
+      await service.savePhoto(makeFile(), undefined, false, undefined, WORKSPACE_ID);
 
       const createArg = prismaMock.photo.create.mock.calls[0][0];
       expect(createArg.data).not.toHaveProperty('uploadedById');
@@ -218,7 +254,13 @@ describe('PhotosService', () => {
       metadataMock.mockRejectedValue(new Error('unsupported image format'));
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.heic' });
 
-      await service.savePhoto(makeFile({ filename: 'x.heic', mimetype: 'image/heic' }));
+      await service.savePhoto(
+        makeFile({ filename: 'x.heic', mimetype: 'image/heic' }),
+        undefined,
+        false,
+        undefined,
+        WORKSPACE_ID,
+      );
 
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ width: null, height: null }) }),
@@ -226,12 +268,15 @@ describe('PhotosService', () => {
       expect(unlinkMock).not.toHaveBeenCalled();
     });
 
-    it('throws BadRequestException when itemId does not reference an existing item', async () => {
+    it('throws BadRequestException when the item.create FK check itself fails (race: item deleted between check and write)', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 10, height: 10 });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'missing-item' });
       prismaMock.photo.create.mockRejectedValue(fkViolation());
 
       const file = makeFile();
-      await expect(service.savePhoto(file, 'missing-item')).rejects.toThrow(BadRequestException);
+      await expect(
+        service.savePhoto(file, 'missing-item', false, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(BadRequestException);
       expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
 
@@ -241,7 +286,9 @@ describe('PhotosService', () => {
       prismaMock.photo.create.mockRejectedValue(other);
 
       const file = makeFile();
-      await expect(service.savePhoto(file)).rejects.toThrow(other);
+      await expect(
+        service.savePhoto(file, undefined, false, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(other);
       expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
 
@@ -251,7 +298,9 @@ describe('PhotosService', () => {
       metadataMock.mockResolvedValue({ format: undefined, width: undefined, height: undefined });
 
       const file = makeFile({ mimetype: 'image/png' });
-      await expect(service.savePhoto(file)).rejects.toThrow(BadRequestException);
+      await expect(
+        service.savePhoto(file, undefined, false, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(BadRequestException);
       expect(prismaMock.photo.create).not.toHaveBeenCalled();
       expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
@@ -260,7 +309,9 @@ describe('PhotosService', () => {
       metadataMock.mockRejectedValue(new Error('unsupported image format'));
 
       const file = makeFile({ mimetype: 'image/jpeg', filename: 'x.jpg' });
-      await expect(service.savePhoto(file)).rejects.toThrow(BadRequestException);
+      await expect(
+        service.savePhoto(file, undefined, false, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(BadRequestException);
       expect(prismaMock.photo.create).not.toHaveBeenCalled();
       expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
@@ -270,7 +321,7 @@ describe('PhotosService', () => {
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'ok.png' });
 
       const file = makeFile();
-      await service.savePhoto(file);
+      await service.savePhoto(file, undefined, false, undefined, WORKSPACE_ID);
 
       expect(unlinkMock).not.toHaveBeenCalled();
     });
@@ -285,7 +336,7 @@ describe('PhotosService', () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'uuid.png' });
 
-      await service.savePhoto(makeFile());
+      await service.savePhoto(makeFile(), undefined, false, undefined, WORKSPACE_ID);
 
       expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
       expect(prismaMock.photo.create).toHaveBeenCalledWith({
@@ -295,6 +346,7 @@ describe('PhotosService', () => {
           sizeBytes: 2048,
           width: 640,
           height: 480,
+          workspaceId: WORKSPACE_ID,
         },
       });
     });
@@ -310,7 +362,7 @@ describe('PhotosService', () => {
       });
 
       const file = makeFile();
-      const result = await service.savePhoto(file, undefined, true);
+      const result = await service.savePhoto(file, undefined, true, undefined, WORKSPACE_ID);
 
       const buffer = await readFileMock.mock.results[0].value;
       expect(readFileMock).toHaveBeenCalledWith(file.path);
@@ -326,7 +378,7 @@ describe('PhotosService', () => {
       aiServiceMock.analyzePhoto.mockResolvedValue(STUB_ANALYSIS);
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'uuid.png' });
 
-      await service.savePhoto(makeFile(), undefined, true);
+      await service.savePhoto(makeFile(), undefined, true, undefined, WORKSPACE_ID);
 
       expect(prismaMock.photo.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ aiAnalysis: STUB_ANALYSIS }) }),
@@ -342,7 +394,7 @@ describe('PhotosService', () => {
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'big.png' });
 
       const file = makeFile({ size: 6 * 1024 * 1024 }); // > MAX_ANALYSIS_SIZE_BYTES (5 MB)
-      await service.savePhoto(file, undefined, true);
+      await service.savePhoto(file, undefined, true, undefined, WORKSPACE_ID);
 
       expect(readFileMock).not.toHaveBeenCalled();
       expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
@@ -361,29 +413,29 @@ describe('PhotosService', () => {
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'ok.png' });
 
       const file = makeFile({ size: 5 * 1024 * 1024 }); // exactly at the ceiling
-      await service.savePhoto(file, undefined, true);
+      await service.savePhoto(file, undefined, true, undefined, WORKSPACE_ID);
 
       expect(aiServiceMock.analyzePhoto).toHaveBeenCalled();
     });
   });
 
   // =========================================================================
-  // savePhoto — itemId pre-validation before a billed AI call
-  // (EVT-7 review round 2, finding 5)
+  // savePhoto — itemId workspace pre-validation (EVT-40; formerly EVT-7
+  // review round 2 finding 5's narrower "only when analyze=true" check)
   // =========================================================================
 
-  describe('savePhoto — itemId pre-validation for analyze=true', () => {
-    it('throws BadRequestException and never calls AiService when itemId does not exist', async () => {
+  describe('savePhoto — itemId workspace pre-validation', () => {
+    it('throws BadRequestException and never calls AiService when itemId does not exist in the workspace', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
-      prismaMock.item.findUnique.mockResolvedValue(null);
+      prismaMock.item.findFirst.mockResolvedValue(null);
 
       const file = makeFile();
-      await expect(service.savePhoto(file, 'missing-item', true)).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(
+        service.savePhoto(file, 'missing-item', true, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(BadRequestException);
 
-      expect(prismaMock.item.findUnique).toHaveBeenCalledWith({
-        where: { id: 'missing-item' },
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith({
+        where: { id: 'missing-item', workspaceId: WORKSPACE_ID },
         select: { id: true },
       });
       expect(aiServiceMock.analyzePhoto).not.toHaveBeenCalled();
@@ -391,24 +443,28 @@ describe('PhotosService', () => {
       expect(unlinkMock).toHaveBeenCalledWith(file.path);
     });
 
-    it('proceeds to run AiService.analyzePhoto when itemId exists', async () => {
+    it('proceeds to run AiService.analyzePhoto when itemId exists in the workspace', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
-      prismaMock.item.findUnique.mockResolvedValue({ id: 'item-1' });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'item-1' });
       aiServiceMock.analyzePhoto.mockResolvedValue(STUB_ANALYSIS);
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'ok.png' });
 
-      await service.savePhoto(makeFile(), 'item-1', true);
+      await service.savePhoto(makeFile(), 'item-1', true, undefined, WORKSPACE_ID);
 
       expect(aiServiceMock.analyzePhoto).toHaveBeenCalled();
     });
 
-    it('does not pre-validate itemId when analyze is false (photo.create FK handling covers it)', async () => {
+    it('EVT-40: still validates itemId when analyze is false (no longer skipped)', async () => {
       metadataMock.mockResolvedValue({ format: 'png', width: 640, height: 480 });
+      prismaMock.item.findFirst.mockResolvedValue({ id: 'item-1' });
       prismaMock.photo.create.mockResolvedValue({ id: PHOTO_ID, filename: 'x.png' });
 
-      await service.savePhoto(makeFile(), 'item-1', false);
+      await service.savePhoto(makeFile(), 'item-1', false, undefined, WORKSPACE_ID);
 
-      expect(prismaMock.item.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith({
+        where: { id: 'item-1', workspaceId: WORKSPACE_ID },
+        select: { id: true },
+      });
     });
   });
 
@@ -417,17 +473,25 @@ describe('PhotosService', () => {
   // =========================================================================
 
   describe('findById', () => {
-    it('returns the photo row with a public url', async () => {
-      prismaMock.photo.findUnique.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
+    it('returns the photo row with a public url when it belongs to the workspace', async () => {
+      prismaMock.photo.findFirst.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
 
-      const result = await service.findById(PHOTO_ID);
+      const result = await service.findById(PHOTO_ID, WORKSPACE_ID);
 
       expect(result).toEqual({ id: PHOTO_ID, filename: 'a.png', url: '/storage/a.png' });
+      expect(prismaMock.photo.findFirst).toHaveBeenCalledWith({
+        where: { id: PHOTO_ID, workspaceId: WORKSPACE_ID },
+      });
     });
 
     it('throws NotFoundException when the photo does not exist', async () => {
-      prismaMock.photo.findUnique.mockResolvedValue(null);
-      await expect(service.findById(PHOTO_ID)).rejects.toThrow(NotFoundException);
+      prismaMock.photo.findFirst.mockResolvedValue(null);
+      await expect(service.findById(PHOTO_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
+    });
+
+    it('EVT-40: 404s for a foreign-workspace photo, same as an unknown id', async () => {
+      prismaMock.photo.findFirst.mockResolvedValue(null);
+      await expect(service.findById(PHOTO_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -437,19 +501,29 @@ describe('PhotosService', () => {
 
   describe('remove', () => {
     it('deletes the Photo row and unlinks its on-disk file', async () => {
-      prismaMock.photo.findUnique.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
+      prismaMock.photo.findFirst.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
       prismaMock.photo.delete.mockResolvedValue({ id: PHOTO_ID, filename: 'a.png' });
 
-      await service.remove(PHOTO_ID);
+      await service.remove(PHOTO_ID, WORKSPACE_ID);
 
+      expect(prismaMock.photo.findFirst).toHaveBeenCalledWith({
+        where: { id: PHOTO_ID, workspaceId: WORKSPACE_ID },
+      });
       expect(prismaMock.photo.delete).toHaveBeenCalledWith({ where: { id: PHOTO_ID } });
       expect(unlinkMock).toHaveBeenCalledWith(expect.stringContaining('a.png'));
     });
 
     it('throws NotFoundException when the photo does not exist, without attempting delete', async () => {
-      prismaMock.photo.findUnique.mockResolvedValue(null);
+      prismaMock.photo.findFirst.mockResolvedValue(null);
 
-      await expect(service.remove(PHOTO_ID)).rejects.toThrow(NotFoundException);
+      await expect(service.remove(PHOTO_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
+      expect(prismaMock.photo.delete).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40: throws NotFoundException for a foreign-workspace photo, without attempting delete', async () => {
+      prismaMock.photo.findFirst.mockResolvedValue(null);
+
+      await expect(service.remove(PHOTO_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
       expect(prismaMock.photo.delete).not.toHaveBeenCalled();
     });
   });
