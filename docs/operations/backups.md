@@ -152,33 +152,57 @@ the name in compose means the *next* `./deploy.sh` will look for (and, if
 missing, silently create empty) the unprefixed `eventory-photo-storage`
 volume instead. Run this **once**, on the VM, **before** your next
 `./deploy.sh`, to copy the data across to the name Compose will use going
-forward:
+forward.
+
+**This is a copy, not a snapshot — quiesce first.** The nightly backup tar
+(see "On the VM" above) reads a live volume and that's fine: a photo
+mid-upload just shows up truncated or missing in that tar, and the *next*
+night's backup has it. This migration is different: it is a one-time
+cutover to a *new* volume name that `./deploy.sh` is about to make the
+*only* volume the api container ever writes to again. The currently
+deployed stack is still up and its `api` container is still live — if it
+accepts an upload while `cp -a` is copying, that file either lands only in
+the old volume (never reaching the new one, since the copy already read
+past it) or arrives mid-copy and is silently dropped by the eventual
+`./deploy.sh` cutover. Either way it's not "slightly stale," it's **gone**:
+there is no next night's backup of the old volume once `eventory-photo-storage`
+takes over. So there must be no live writer for the duration of the copy:
 
 ```bash
 ssh root@<vm-ip>
+cd /opt/eventory
+
 # 1. Confirm the old volume exists and has the data you expect:
 docker volume ls | grep eventory-photo-storage
 docker run --rm -v eventory_eventory-photo-storage:/data:ro alpine sh -c 'ls /data | wc -l'
 
-# 2. Create the new pinned-name volume and copy everything across:
+# 2. Stop api BEFORE copying anything — it's the only container with the
+#    photo volume mounted (caddy only reverse-proxies /storage to api; it
+#    holds no volume of its own, so it needs no separate stop — once api is
+#    down, caddy's proxied requests simply fail closed with a 502/504
+#    instead of writing anywhere):
+docker compose -f docker-compose.prod.yml stop api
+
+# 3. Create the new pinned-name volume and copy everything across:
 docker volume create eventory-photo-storage
 docker run --rm \
   -v eventory_eventory-photo-storage:/from:ro \
   -v eventory-photo-storage:/to \
   alpine sh -c 'cp -a /from/. /to/'
 
-# 3. Verify the copy is complete and byte-identical:
+# 4. Verify the copy is complete and byte-identical:
 docker run --rm \
   -v eventory_eventory-photo-storage:/from:ro \
   -v eventory-photo-storage:/to:ro \
   alpine sh -c 'diff -rq /from /to && echo IDENTICAL'
 
-# 4. Only after step 3 prints IDENTICAL, proceed with the normal
-#    ./deploy.sh — Compose will now attach the already-populated
-#    eventory-photo-storage volume (it won't recreate it; Docker volumes
-#    are created only if the name doesn't already exist). Leave the old
-#    eventory_eventory-photo-storage volume in place for a few days as a
-#    safety net before removing it manually.
+# 5. Only after step 4 prints IDENTICAL, proceed with the normal
+#    ./deploy.sh — it rebuilds and brings api back up (this time against
+#    the now-populated eventory-photo-storage volume) along with
+#    everything else; Compose won't recreate the volume itself (Docker
+#    volumes are created only if the name doesn't already exist). Leave
+#    the old eventory_eventory-photo-storage volume in place for a few
+#    days as a safety net before removing it manually.
 ```
 
 If this is a **fresh** VM with nothing deployed yet, skip this section
@@ -202,6 +226,21 @@ docker-compose.prod.yml ps` — the `db` service already has a `pg_isready`
 healthcheck with `start_period: 10s`, `retries: 10`), not merely for the
 container to have started, before restoring.
 
+**Both paths below stop `api` before restoring anything, and don't start it
+again until every restore is done.** This is not the same tradeoff as the
+nightly backup tar's "uploads in flight are accepted" (see "On the VM"
+above) — that's a read from a live volume, where a mid-upload file is at
+worst missing from *that* tar and present in the next one. A restore
+*writes into* a volume (`pg_restore --clean`, or `rm -rf /data/* && tar
+xzf`), and `api` is the only container with either volume mounted. If it's
+still running and accepting a request mid-restore, that write either lands
+on data about to be dropped/replaced, or races the restore and corrupts the
+result — there is no "next backup" to fall back on for a photo that never
+existed anywhere else. `caddy` only reverse-proxies `/api` and `/storage`
+to `api` and holds no volume of its own, so stopping `api` alone removes
+every live writer; once it's down, `caddy` just returns 502/504 for those
+routes instead of writing anywhere.
+
 ### Path A — fresh VM (total loss)
 
 Starting point: a brand-new VM, nothing deployed yet, and your latest
@@ -216,7 +255,17 @@ backups sitting in `~/eventory-backups/` on your Mac (from `fetch-backups.sh`).
 #    exits non-zero if it isn't — re-run `docker compose -f
 #    docker-compose.prod.yml ps` on the VM to confirm `db` shows healthy).
 
-# 3. From your Mac, copy the backup files up (or SCP them from wherever the
+# 3. Stop api BEFORE restoring anything. deploy.sh already brought it up
+#    in step 1, so from the moment the stack is healthy it's a live writer
+#    of both volumes below — a stray health-checker hit or an early visitor
+#    landing between now and the restores could write a photo straight into
+#    eventory-photo-storage right before step 5's `rm -rf` wipes it, or race
+#    the `pg_restore --clean` transaction. Unlikely on a brand-new VM with
+#    no real users yet, but the cost of skipping this is silent data loss,
+#    so quiesce anyway — it stays stopped through both restores below:
+ssh root@<vm-ip> 'cd /opt/eventory && docker compose -f docker-compose.prod.yml stop api'
+
+# 4. From your Mac, copy the backup files up (or SCP them from wherever the
 #    off-VM copy lives) into a 0700 staging dir on the VM — NOT /tmp, which
 #    is world-readable and these files contain every user's email/OAuth id:
 ssh root@<vm-ip> 'mkdir -p -m 700 /root/eventory-restore'
@@ -227,8 +276,8 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T db \
   pg_restore -U eventory -d eventory --clean --if-exists < /root/eventory-restore/eventory-db-<TIMESTAMP>.dump
 rm /root/eventory-restore/eventory-db-<TIMESTAMP>.dump
 
-# 4. Restore photos into the (empty) eventory-photo-storage volume. Verify
-#    the archive with `tar tzf` BEFORE `rm -rf`-ing the target — an empty or
+# 5. Restore photos into the eventory-photo-storage volume. Verify the
+#    archive with `tar tzf` BEFORE `rm -rf`-ing the target — an empty or
 #    corrupt TIMESTAMP/archive must never wipe the only copy of the data
 #    without extracting first:
 scp ~/eventory-backups/eventory-photos-<TIMESTAMP>.tar.gz root@<vm-ip>:/root/eventory-restore/
@@ -244,10 +293,13 @@ ssh root@<vm-ip> '
   rm "$ARCHIVE"
 '
 
-# 5. Restart api so it picks up the restored data with a clean connection:
-ssh root@<vm-ip> 'cd /opt/eventory && docker compose -f docker-compose.prod.yml restart api'
+# 6. Start api again now that both restores are done, so it picks up the
+#    restored data with a clean connection, then confirm it comes back
+#    healthy before trusting the site:
+ssh root@<vm-ip> 'cd /opt/eventory && docker compose -f docker-compose.prod.yml start api'
+ssh root@<vm-ip> 'cd /opt/eventory && docker compose -f docker-compose.prod.yml ps'
 
-# 6. Verify: open the site, spot-check item counts, or:
+# 7. Verify: open the site, spot-check item counts, or:
 ssh root@<vm-ip> 'cd /opt/eventory && docker compose -f docker-compose.prod.yml exec -T db \
   psql -U eventory -d eventory -tAc "SELECT count(*) FROM \"Item\";"'
 ```
@@ -263,7 +315,9 @@ on the VM — no network transfer needed.
 ssh root@<vm-ip>
 cd /opt/eventory
 
-# 1. Stop api so nothing writes to the db mid-restore:
+# 1. Stop api so nothing writes to either the db or the photo volume
+#    mid-restore — it stays stopped through steps 3 and 4 below, not just
+#    the db restore:
 docker compose -f docker-compose.prod.yml stop api
 
 # 2. Find the backup you want (or use the newest). Backups live in
@@ -356,6 +410,20 @@ against throwaway resources only:
   exits 2 with a usage error instead of silently defaulting to "not stale"
   (finding 10).
 
+**Round-3 fix (this revision):** the "One-time volume migration", Path A,
+and Path B commands above were reordered so `api` (the volume's only
+writer) is always stopped before any copy/restore *into* a volume and only
+started again once every copy/restore in that flow is done — closing a
+write-skew data-loss gap where a live upload landing mid-copy/mid-restore
+could be silently dropped (see the framing note above the restore paths
+and the "This is a copy, not a snapshot" note in the migration section for
+the full reasoning). This is a command-ordering fix only — the underlying
+`cp -a` / `pg_restore` / `tar xzf` mechanics were unchanged from the
+round-2 verification above, so they were not re-run against throwaway
+resources for this revision; the new `docker compose stop/start api`
+invocations are standard Compose commands with no new mechanics to
+exercise.
+
 ## Known limitations (documented per the task's non-goals)
 
 - **No point-in-time recovery / WAL archiving** — nightly granularity only;
@@ -366,4 +434,9 @@ against throwaway resources only:
   artifacts before `rsync`, or switch the off-VM leg to an
   already-encrypted-at-rest object store.
 - **Photo tar is not point-in-time consistent** with concurrent uploads —
-  acceptable for nightly home use (see "On the VM" above).
+  acceptable for nightly home use (see "On the VM" above). This applies
+  only to *taking* the nightly backup (a read of a live volume); every
+  path that *restores or copies data into* a volume (the one-time volume
+  migration, and both restore paths) stops `api` first specifically
+  because that tradeoff is not acceptable in the write direction — see the
+  framing note above the "Restore runbook" section.
