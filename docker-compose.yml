@@ -33,6 +33,12 @@ services:
     working_dir: /workspace/apps/api
     environment:
       DATABASE_URL: postgresql://eventory:eventory@db:5432/eventory?schema=public
+      # Runtime (RLS-restricted) connection — EVT-44. `eventory_rls` is
+      # created by that task's migration the FIRST time `prisma migrate
+      # deploy` runs (below); until then this is simply not resolvable, and
+      # `PrismaService` falls back to DATABASE_URL above (no-op, matches
+      # pre-EVT-44 behavior) — see apps/api/.env.example's longer comment.
+      APP_DATABASE_URL: postgresql://eventory_rls:eventory_rls_change_me@db:5432/eventory?schema=public
       PORT: 3001
       PUBLIC_BASE_URL: https://localhost:5173
       # Secrets interpolated from the gitignored root .env file (empty

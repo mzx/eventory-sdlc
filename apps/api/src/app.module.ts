@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AiModule } from './ai/ai.module';
 import { AuthModule } from './auth/auth.module';
@@ -19,6 +19,7 @@ import { ShoppingListModule } from './shopping-list/shopping-list.module';
 import { TagsModule } from './tags/tags.module';
 import { UsersModule } from './users/users.module';
 import { WorkspaceContextGuard } from './workspace/workspace-context.guard';
+import { WorkspaceDbContextInterceptor } from './workspace/workspace-db-context.interceptor';
 import { WorkspaceModule } from './workspace/workspace.module';
 
 @Module({
@@ -57,6 +58,12 @@ import { WorkspaceModule } from './workspace/workspace.module';
     // (needs `request.user`); see WorkspaceContextGuard's doc comment for
     // the @Public()/@AllowPending() carve-outs it mirrors.
     { provide: APP_GUARD, useClass: WorkspaceContextGuard },
+    // Postgres RLS wiring (EVT-44) — every guard above has already resolved
+    // `request.workspace` by the time ANY interceptor runs (Nest always
+    // runs the full guard chain before the interceptor chain), so this
+    // reads a fully-settled value. See WorkspaceDbContextInterceptor's doc
+    // comment for why this is an interceptor and not folded into the guard.
+    { provide: APP_INTERCEPTOR, useClass: WorkspaceDbContextInterceptor },
   ],
 })
 export class AppModule {}

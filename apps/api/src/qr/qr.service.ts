@@ -71,21 +71,41 @@ export class QrService {
    * Throws `NotFoundException` unless `token` is the `qrCode` of an item or
    * a location. Checks items first (same convention as `ItemsService.findByQr`
    * / `LocationsService.findByQr`).
+   *
+   * EVT-44 round-2 review (MAJOR, finding 3): `GET /api/qr/:token`
+   * (`QrController.render`) is `@Public()` — a native camera app scans a
+   * printed sticker with no session cookie at all, so `WorkspaceContextGuard`
+   * returns early and `workspaceDbContext` never gets an ambient
+   * `workspaceId`. `Item`/`Location` are RLS-protected tables, so a bare
+   * `this.prisma.item.findUnique(...)` here would be scoped to "no
+   * workspace" by `PrismaService`'s Proxy and RLS would filter every row —
+   * every valid printed sticker would 404 under the restricted
+   * `eventory_rls` role. Fixed with the SAME documented, read-only
+   * `app.rls_bypass_read` pattern `ItemsService.findByQr` already uses: both
+   * lookups run inside one `$transaction` that sets the bypass flag as its
+   * first statement. `WITH CHECK` never honors that flag (see the
+   * migration's doc comment), so this can only ever widen a READ — this
+   * method only checks existence, it never writes anything. Proven under the
+   * restricted role by `test/rls-isolation.e2e-spec.ts`'s AC6 test.
    */
   private async assertTokenExists(token: string): Promise<void> {
-    const item = await this.prisma.item.findUnique({
-      where: { qrCode: token },
-      select: { id: true },
+    const { item, location } = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.rls_bypass_read', 'true', true)`;
+      const item = await tx.item.findUnique({
+        where: { qrCode: token },
+        select: { id: true },
+      });
+      if (item) {
+        return { item, location: null };
+      }
+      const location = await tx.location.findUnique({
+        where: { qrCode: token },
+        select: { id: true },
+      });
+      return { item: null, location };
     });
-    if (item) {
-      return;
-    }
 
-    const location = await this.prisma.location.findUnique({
-      where: { qrCode: token },
-      select: { id: true },
-    });
-    if (location) {
+    if (item || location) {
       return;
     }
 

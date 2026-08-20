@@ -100,6 +100,10 @@ function makePrismaMock() {
       findUnique: jest.fn(),
     },
     $queryRaw: jest.fn(),
+    // EVT-44: `findByQr` issues `tx.$executeRaw` (the `app.rls_bypass_read`
+    // RLS flag) as the first statement of its own `$transaction` — see that
+    // method's doc comment.
+    $executeRaw: jest.fn(),
     // `create`/`update` (EVT-25) run inside `this.prisma.$transaction(...)`
     // so the movement + item writes are atomic. The mock just invokes the
     // callback with itself as `tx` — every `tx.item.*` call inside the
@@ -270,6 +274,21 @@ describe('ItemsService', () => {
 
       const queryArgs = prismaMock.$queryRaw.mock.calls[0];
       expect(queryArgs).toContain(WORKSPACE_ID);
+    });
+
+    // EVT-44 round-2 review, finding 1 (CRITICAL) — the raw search query
+    // must run through the managed `$transaction` (which injects
+    // `set_config('app.workspace_id', ...)`), not a bare `$queryRaw` that
+    // PrismaService's RLS Proxy never sees. See items.service.ts's
+    // `searchItemIds` doc comment and test/rls-isolation.e2e-spec.ts's AC5.
+    it('EVT-44: routes the raw search query through this.prisma.$transaction, not a standalone $queryRaw', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.item.findMany.mockResolvedValue([]);
+
+      await service.list({ search: 'drill' }, WORKSPACE_ID);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function));
     });
 
     // -----------------------------------------------------------------------
@@ -572,6 +591,19 @@ describe('ItemsService', () => {
       const calledWith = prismaMock.$queryRaw.mock.calls[0];
       expect(calledWith).toContain(WORKSPACE_ID);
     });
+
+    // EVT-44 round-2 review, finding 1 (CRITICAL) — same fix as the text
+    // search path above: the photo-search matching query must run through
+    // the managed `$transaction`, not a standalone `$queryRaw`.
+    it('EVT-44: routes the batched matching query through this.prisma.$transaction, not a standalone $queryRaw', async () => {
+      aiMock.analyzePhoto.mockResolvedValue(analysisWith());
+      prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function));
+    });
   });
 
   // =========================================================================
@@ -789,6 +821,31 @@ describe('ItemsService', () => {
       expect(prismaMock.item.findUnique).toHaveBeenCalledWith(
         expect.objectContaining({ where: { qrCode: QR_ITEM } }),
       );
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-44 round-2 review, finding 9 — assert the bypass `$executeRaw` was
+    // actually INVOKED (not merely mocked/available), and that it runs
+    // BEFORE the item/location lookups, inside the same `$transaction`.
+    // -----------------------------------------------------------------------
+
+    it('EVT-44: invokes the app.rls_bypass_read $executeRaw as the first statement inside the transaction', async () => {
+      const detail = makeItemDetail({ qrCode: QR_ITEM });
+      prismaMock.item.findUnique.mockResolvedValue(detail);
+      prismaMock.workspaceMember.findUnique.mockResolvedValue({ userId: USER_FOR_QR });
+
+      await service.findByQr(QR_ITEM, USER_FOR_QR);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
+      const bypassCallArgs = prismaMock.$executeRaw.mock.calls[0];
+      expect(bypassCallArgs[0].join('')).toContain('app.rls_bypass_read');
+
+      // Ordering: the bypass statement must run before the item lookup, not
+      // just be called SOME time during the test.
+      const executeRawOrder = prismaMock.$executeRaw.mock.invocationCallOrder[0];
+      const findUniqueOrder = prismaMock.item.findUnique.mock.invocationCallOrder[0];
+      expect(executeRawOrder).toBeLessThan(findUniqueOrder);
     });
   });
 

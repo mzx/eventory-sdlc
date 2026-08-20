@@ -13,7 +13,6 @@ module.exports = {
     '!**/*.spec.ts',
     '!**/main.ts',
     '!**/*.module.ts',
-    '!**/prisma.service.ts',
     '!**/db/**',
     '!**/health/**',
   ],

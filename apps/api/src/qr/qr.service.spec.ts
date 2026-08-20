@@ -13,10 +13,20 @@ const ITEM_TOKEN = 'item-qr-token';
 const LOCATION_TOKEN = 'location-qr-token';
 
 function makePrismaMock() {
-  return {
+  const mock = {
     item: { findUnique: jest.fn() },
     location: { findUnique: jest.fn() },
+    // EVT-44 round-2 review, finding 3: `assertTokenExists` now runs both
+    // lookups inside `this.prisma.$transaction(...)`, setting the read-only
+    // `app.rls_bypass_read` RLS flag as its first statement (same pattern as
+    // `ItemsService.findByQr`) — the `@Public()` QR route has no ambient
+    // workspace to scope by. The mock just invokes the callback with itself
+    // as `tx`, mirroring `items.service.spec.ts`'s `makePrismaMock`.
+    $executeRaw: jest.fn(),
+    $transaction: jest.fn(),
   };
+  mock.$transaction.mockImplementation((cb: (tx: typeof mock) => unknown) => cb(mock));
+  return mock;
 }
 
 /** Decodes a PNG buffer (as produced by `qrcode`) back to the encoded text. */
@@ -207,6 +217,25 @@ describe('QrService', () => {
 
       expect(decodedPng.width).toBe(200);
       expect(decodedPng.height).toBe(200);
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-44 round-2 review, finding 3 — the `@Public()` QR route has no
+    // ambient workspace, so `assertTokenExists` must apply the read-only
+    // `app.rls_bypass_read` flag itself (same pattern as
+    // `ItemsService.findByQr`) rather than relying on `PrismaService`'s
+    // ambient-workspace wrapping, which never fires here.
+    // -----------------------------------------------------------------------
+
+    it('EVT-44: looks up the token inside a $transaction that sets app.rls_bypass_read as its first statement', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ id: 'item-1' });
+
+      await service.renderPng(ITEM_TOKEN, undefined);
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
+      const bypassCallArgs = prismaMock.$executeRaw.mock.calls[0];
+      expect(bypassCallArgs[0].join('')).toContain('app.rls_bypass_read');
     });
   });
 });

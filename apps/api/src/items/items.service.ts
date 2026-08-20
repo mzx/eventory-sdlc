@@ -106,16 +106,36 @@ export class ItemsService {
    * LIKE wildcard rather than a literal character (EVT-17 review round 2,
    * finding 1c). The pattern itself is still passed as a bound Prisma
    * parameter, never string-concatenated into the SQL text.
+   *
+   * EVT-44 round-2 review (CRITICAL, finding 1): runs inside
+   * `this.prisma.$transaction(...)` rather than a standalone
+   * `this.prisma.$queryRaw` — `PrismaService`'s RLS Proxy only wraps MODEL
+   * delegates (`this.item`, `this.location`, ...), never `$queryRaw`/
+   * `$executeRaw` directly, so a bare `this.prisma.$queryRaw` never got
+   * `set_config('app.workspace_id', ...)` applied at all. Under the
+   * restricted `eventory_rls` role (`FORCE ROW LEVEL SECURITY`, no bypass
+   * privilege) that meant every row was filtered out regardless of this
+   * query's own `WHERE "workspaceId" = ...` clause — `GET /api/items?search=`
+   * silently returned empty for every caller. Routing through
+   * `this.prisma.$transaction` reuses the SAME managed-transaction machinery
+   * every other write path in this service already relies on (see
+   * `PrismaService`'s doc comment): the override injects `set_config` as the
+   * transaction's first statement whenever an ambient `workspaceId` is
+   * present, with zero change to this method's own SQL. Proven against real
+   * Postgres under the restricted role by `test/rls-isolation.e2e-spec.ts`'s
+   * AC5 tests.
    */
   private async searchItemIds(search: string, workspaceId: string): Promise<string[]> {
     const pattern = `%${escapeLikePattern(search)}%`;
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
+    const rows = await this.prisma.$transaction(
+      (tx) => tx.$queryRaw<{ id: string }[]>`
       SELECT id FROM "Item"
       WHERE "workspaceId" = ${workspaceId}::uuid
         AND (name ILIKE ${pattern} ESCAPE '\\'
          OR description ILIKE ${pattern} ESCAPE '\\'
          OR properties::text ILIKE ${pattern} ESCAPE '\\')
-    `;
+    `,
+    );
     return rows.map((r) => r.id);
   }
 
@@ -202,13 +222,23 @@ export class ItemsService {
    * properties JSONB, or any tag name happens in one round trip. Returns
    * per-item hit counts (one hit per distinct term that matched) plus each
    * item's `createdAt`, so the caller can rank without a second query.
+   *
+   * EVT-44 round-2 review (CRITICAL, finding 1): same fix, same rationale
+   * as `searchItemIds` above — routed through `this.prisma.$transaction`
+   * so `set_config('app.workspace_id', ...)` is applied in the SAME
+   * transaction as the raw query, rather than a bare `$queryRaw` that the
+   * RLS Proxy never sees (it only wraps model delegates). Without this,
+   * `POST /api/items/search-by-photo` silently returned zero matches under
+   * the restricted `eventory_rls` role, regardless of what the caller's
+   * photo actually matched.
    */
   private async matchingItemHitsForTerms(
     terms: string[],
     workspaceId: string,
   ): Promise<Map<string, { count: number; createdAt: Date }>> {
     const patterns = terms.map((term) => `%${escapeLikePattern(term)}%`);
-    const rows = await this.prisma.$queryRaw<{ id: string; createdAt: Date; term: string }[]>`
+    const rows = await this.prisma.$transaction(
+      (tx) => tx.$queryRaw<{ id: string; createdAt: Date; term: string }[]>`
       SELECT DISTINCT i.id, i."createdAt", t.term
       FROM "Item" i
       CROSS JOIN unnest(ARRAY[${Prisma.join(patterns)}]::text[]) AS t(term)
@@ -219,7 +249,8 @@ export class ItemsService {
          OR i.description ILIKE t.term ESCAPE '\\'
          OR i.properties::text ILIKE t.term ESCAPE '\\'
          OR tag.name ILIKE t.term ESCAPE '\\')
-    `;
+    `,
+    );
 
     const hits = new Map<string, { count: number; createdAt: Date }>();
     for (const row of rows) {
@@ -270,13 +301,43 @@ export class ItemsService {
    * - Returns `{ kind: 'location', location }` when the token is on a Location.
    * - Throws `NotFoundException` when the token matches neither, OR when it
    *   matches one but `userId` is not a member of that resource's workspace.
+   *
+   * EVT-44: `Item`/`Location` are RLS-protected (see the migration's doc
+   * comment) — a bare `this.prisma.item.findUnique({ where: { qrCode } })`
+   * would be silently scoped to the caller's AMBIENT workspace by
+   * `PrismaService`'s extension, defeating the deliberately-global lookup
+   * this method exists for. Both lookups below instead run inside one
+   * `$transaction` that sets the read-only `app.rls_bypass_read` session
+   * flag as its first statement — RLS's `USING` clause honors that flag
+   * (see the migration), but `WITH CHECK` never does, so this can only ever
+   * be used to READ across workspaces, never to write into one. The
+   * `isMemberOfWorkspace` re-authorization below is what actually decides
+   * whether the caller gets the row back.
    */
   async findByQr(qr: string, userId: string) {
-    // Check items first
-    const item = await this.prisma.item.findUnique({
-      where: { qrCode: qr },
-      include: ITEM_DETAIL_INCLUDE,
+    const { item, location } = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.rls_bypass_read', 'true', true)`;
+      const item = await tx.item.findUnique({
+        where: { qrCode: qr },
+        include: ITEM_DETAIL_INCLUDE,
+      });
+      if (item) {
+        return { item, location: null };
+      }
+      const location = await tx.location.findUnique({
+        where: { qrCode: qr },
+        select: {
+          id: true,
+          name: true,
+          path: true,
+          parentId: true,
+          notes: true,
+          workspaceId: true,
+        },
+      });
+      return { item: null, location };
     });
+
     if (item) {
       if (!(await this.isMemberOfWorkspace(userId, item.workspaceId))) {
         throw new NotFoundException(`No item or location found for QR token: ${qr}`);
@@ -284,18 +345,6 @@ export class ItemsService {
       return { kind: 'item' as const, item };
     }
 
-    // Check locations
-    const location = await this.prisma.location.findUnique({
-      where: { qrCode: qr },
-      select: {
-        id: true,
-        name: true,
-        path: true,
-        parentId: true,
-        notes: true,
-        workspaceId: true,
-      },
-    });
     if (location) {
       if (!(await this.isMemberOfWorkspace(userId, location.workspaceId))) {
         throw new NotFoundException(`No item or location found for QR token: ${qr}`);
