@@ -33,14 +33,17 @@ function makePrismaMock() {
   const mock: {
     user: typeof user;
     workspace: { findUniqueOrThrow: jest.Mock };
-    workspaceMember: { upsert: jest.Mock };
+    workspaceMember: { upsert: jest.Mock; count: jest.Mock };
     $transaction: jest.Mock;
   } = {
     user,
     // EVT-40 — an admin+approved promotion also grants Default Workspace
     // membership; see ensureDefaultWorkspaceMembership.
     workspace: { findUniqueOrThrow: jest.fn().mockResolvedValue({ id: DEFAULT_WORKSPACE_ID }) },
-    workspaceMember: { upsert: jest.fn() },
+    // Defaults to zero memberships so existing tests' expected
+    // `ensureDefaultWorkspaceMembership` grants still fire; tests exercising
+    // the "already has a membership elsewhere" gate override this per-call.
+    workspaceMember: { upsert: jest.fn(), count: jest.fn().mockResolvedValue(0) },
     // Mimics Prisma's interactive `$transaction(async (tx) => ...)` by
     // handing the callback this same mock — `tx.user.count()` /
     // `tx.user.create()` hit the exact jest mocks the test configured.
@@ -285,6 +288,46 @@ describe('AuthService', () => {
       await service.upsertFromGoogleProfile(makeProfile());
 
       expect(prisma.workspaceMember.upsert).not.toHaveBeenCalled();
+    });
+
+    // ---------------------------------------------------------------------
+    // EVT-40 round-3 review, security finding — the self-heal above must
+    // NOT resurrect a deliberately-revoked Default Workspace membership
+    // (EVT-42) for a user who still belongs to SOME other workspace. Only a
+    // user with ZERO memberships anywhere is healed.
+    // ---------------------------------------------------------------------
+
+    it('EVT-40: does NOT grant a Default-Workspace membership on login when the user already has a membership in ANY workspace', async () => {
+      const existing = makeUser({ role: UserRole.user, status: UserStatus.approved });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+      const updated = { ...existing, lastLoginAt: new Date() };
+      prisma.user.update.mockResolvedValue(updated);
+      prisma.workspaceMember.count.mockResolvedValueOnce(1); // already a member somewhere
+
+      await service.upsertFromGoogleProfile(makeProfile());
+
+      expect(prisma.workspaceMember.count).toHaveBeenCalledWith({ where: { userId: updated.id } });
+      expect(prisma.workspaceMember.upsert).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40: still heals an already-approved user with ZERO memberships anywhere (EVT-20 recovery path), role mapping unchanged', async () => {
+      const existing = makeUser({ role: UserRole.admin, status: UserStatus.approved });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+      const updated = { ...existing, lastLoginAt: new Date() };
+      prisma.user.update.mockResolvedValue(updated);
+      prisma.workspaceMember.count.mockResolvedValueOnce(0); // zero memberships anywhere
+
+      await service.upsertFromGoogleProfile(makeProfile());
+
+      expect(prisma.workspaceMember.upsert).toHaveBeenCalledWith({
+        where: { workspaceId_userId: { workspaceId: DEFAULT_WORKSPACE_ID, userId: updated.id } },
+        update: {},
+        create: {
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          userId: updated.id,
+          role: WorkspaceRole.owner, // admin -> owner mapping unchanged for the healed case
+        },
+      });
     });
 
     it('binds googleId to an existing row matched by email ONLY when that row has no googleId yet', async () => {

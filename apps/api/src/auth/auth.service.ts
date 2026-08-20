@@ -205,11 +205,14 @@ export class AuthService {
       });
       if (updated.status === UserStatus.approved) {
         // EVT-40, round-2 review finding 8: called on EVERY login for an
-        // already-approved user, not just a fresh promotion — idempotent
-        // (ensureDefaultWorkspaceMembership upserts), so this self-heals a
-        // user who is approved but somehow still membership-less (e.g. a
-        // transient failure right after a prior promotion committed) rather
-        // than leaving them stuck until an operator intervenes.
+        // already-approved user, not just a fresh promotion — this
+        // self-heals a user who is approved but somehow has ZERO
+        // memberships anywhere (e.g. a transient failure right after a
+        // prior promotion committed) rather than leaving them stuck until
+        // an operator intervenes. `ensureDefaultWorkspaceMembership` is a
+        // no-op for a user who already belongs to ANY workspace (round-3
+        // review, security finding) — see its doc comment for why that gate
+        // is required once EVT-42 adds membership revocation.
         await ensureDefaultWorkspaceMembership(
           this.prisma,
           updated.id,

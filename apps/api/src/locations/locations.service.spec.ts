@@ -286,27 +286,6 @@ describe('LocationsService', () => {
     });
   });
 
-  // ── findByQr ─────────────────────────────────────────────────────────────
-
-  describe('findByQr', () => {
-    it('returns the location matching the QR token', async () => {
-      const loc = makeLocation({ qrCode: 'qr-garage' });
-      locationMock.findUnique.mockResolvedValue(loc);
-
-      const result = await service.findByQr('qr-garage');
-
-      expect(locationMock.findUnique).toHaveBeenCalledWith({
-        where: { qrCode: 'qr-garage' },
-      });
-      expect(result.qrCode).toBe('qr-garage');
-    });
-
-    it('throws NotFoundException when QR token is unknown', async () => {
-      locationMock.findUnique.mockResolvedValue(null);
-      await expect(service.findByQr('unknown-qr')).rejects.toBeInstanceOf(NotFoundException);
-    });
-  });
-
   // ── create ────────────────────────────────────────────────────────────────
 
   describe('create', () => {

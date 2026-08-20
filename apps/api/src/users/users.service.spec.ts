@@ -28,6 +28,10 @@ function makePrismaMock() {
     },
     workspaceMember: {
       upsert: jest.fn(),
+      // Defaults to zero memberships so existing "grants membership on
+      // approval" tests still fire; the zero-membership gate test below
+      // overrides this per-call.
+      count: jest.fn().mockResolvedValue(0),
     },
   };
 }
@@ -162,6 +166,25 @@ describe('UsersService', () => {
 
       await service.updateStatus(OTHER_ID, { status: UserStatus.rejected }, makeAdmin() as never);
 
+      expect(prisma.workspaceMember.upsert).not.toHaveBeenCalled();
+    });
+
+    // -------------------------------------------------------------------------
+    // EVT-40 round-3 review, security finding — approving a user who already
+    // belongs to SOME workspace must NOT also grant Default Workspace
+    // membership (guards against resurrecting a deliberately-revoked
+    // Default Workspace membership once EVT-42 adds revocation).
+    // -------------------------------------------------------------------------
+
+    it('EVT-40: does NOT grant Default Workspace membership on approval when the user already has a membership in ANY workspace', async () => {
+      const target = makeUser({ role: UserRole.user });
+      prisma.user.findUnique.mockResolvedValue(target);
+      prisma.user.update.mockResolvedValue({ ...target, status: UserStatus.approved });
+      prisma.workspaceMember.count.mockResolvedValueOnce(1); // already a member somewhere
+
+      await service.updateStatus(OTHER_ID, { status: UserStatus.approved }, makeAdmin() as never);
+
+      expect(prisma.workspaceMember.count).toHaveBeenCalledWith({ where: { userId: OTHER_ID } });
       expect(prisma.workspaceMember.upsert).not.toHaveBeenCalled();
     });
 

@@ -76,15 +76,32 @@ export function defaultWorkspaceRoleForUserRole(role: UserRole): WorkspaceRole {
 type MembershipClient = WorkspaceLookupClient & Pick<PrismaClient, 'workspaceMember'>;
 
 /**
- * Grants `userId` a `WorkspaceMember` row in the Default Workspace,
- * idempotently (a no-op if they already have one) — EVT-40's
+ * Grants `userId` a `WorkspaceMember` row in the Default Workspace — but
+ * ONLY when they have ZERO memberships in ANY workspace. EVT-40's
  * `WorkspaceContextGuard` is global, so an `approved` user with ZERO
  * workspace memberships is locked out of every tenant-scoped route
- * (items/photos/QR). Full membership management (inviting a user to a
- * SPECIFIC, non-default workspace) is EVT-42's job; this narrower helper
- * only keeps the pre-EVT-40, single-household-workspace deployment target
- * working without that machinery existing yet. Every code path that makes a
- * user `approved` calls this:
+ * (items/photos/QR); this function is exclusively that lockout-recovery
+ * path (EVT-20), never a general "make sure they're in the Default
+ * Workspace" upsert.
+ *
+ * CONTRACT (EVT-40 round-3 review, security finding — EVT-42 relies on
+ * this): a user who already belongs to AT LEAST ONE workspace is left
+ * completely untouched, even if none of their memberships is in the
+ * Default Workspace specifically. This is what makes self-healing safe
+ * once EVT-42 introduces deliberate membership revocation — without this
+ * gate, a revoked user's Default Workspace membership would be silently
+ * re-granted on their very next login, turning "revoke" into a no-op (and,
+ * since the role mapper below never yields `viewer`, a revoked `viewer`
+ * would come back as `member` — revocation as an accidental privilege
+ * upgrade). Only a user with NO membership anywhere is healed back into
+ * the Default Workspace; a user who still holds membership in some OTHER
+ * workspace after a Default Workspace revocation is assumed to be exactly
+ * where EVT-42's revocation left them, not accidentally locked out.
+ *
+ * Idempotent and safe to call unconditionally on every approved login —
+ * the zero-membership check above already covers the "no-op if they
+ * already have one" case. Every code path that makes a user `approved`
+ * calls this:
  *   - `UsersService.updateStatus` (an admin approving a pending user)
  *   - `AuthService.upsertFromGoogleProfile`'s three auto-promotion branches
  *     (first-ever sign-in, and the `EVENTORY_ADMIN_EMAILS` allowlist)
@@ -94,6 +111,10 @@ export async function ensureDefaultWorkspaceMembership(
   userId: string,
   role: WorkspaceRole,
 ): Promise<void> {
+  const existingMembershipCount = await prisma.workspaceMember.count({ where: { userId } });
+  if (existingMembershipCount > 0) {
+    return;
+  }
   const workspaceId = await getDefaultWorkspaceId(prisma);
   await prisma.workspaceMember.upsert({
     where: { workspaceId_userId: { workspaceId, userId } },
