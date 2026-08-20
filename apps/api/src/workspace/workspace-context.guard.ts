@@ -63,6 +63,21 @@ const NO_WORKSPACE_MESSAGE = 'No workspace access';
  *
  * Skipped entirely (mirrors `JwtAuthGuard`'s own carve-outs) for `@Public()`
  * routes.
+ *
+ * EVT-44: this guard does NOT itself populate the `workspaceDbContext` ALS
+ * that drives Postgres RLS — `WorkspaceDbContextInterceptor` (registered as
+ * a GLOBAL `APP_INTERCEPTOR`, which always runs strictly AFTER every guard
+ * in Nest's request lifecycle) reads the `request.workspace` this guard
+ * resolves and wraps the REST of the request in `workspaceDbContext.run(...)`.
+ * A guard can't safely do that wrapping itself: `AsyncLocalStorage.enterWith`
+ * mutates whatever async context happens to be active at the moment it's
+ * called rather than creating a new, request-scoped boundary the way
+ * `.run()` does — under concurrent requests that raced a interleaved
+ * `enterWith()` call from a DIFFERENT in-flight request's guard, exactly the
+ * kind of pooled-connection leak this task exists to prevent. See
+ * `workspace-db-context.interceptor.ts`'s doc comment for the full
+ * rationale (this was caught empirically, not just by inspection — see that
+ * file's history).
  */
 @Injectable()
 export class WorkspaceContextGuard implements CanActivate {

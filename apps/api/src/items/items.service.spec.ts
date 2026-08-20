@@ -100,6 +100,10 @@ function makePrismaMock() {
       findUnique: jest.fn(),
     },
     $queryRaw: jest.fn(),
+    // EVT-44: `findByQr` issues `tx.$executeRaw` (the `app.rls_bypass_read`
+    // RLS flag) as the first statement of its own `$transaction` — see that
+    // method's doc comment.
+    $executeRaw: jest.fn(),
     // `create`/`update` (EVT-25) run inside `this.prisma.$transaction(...)`
     // so the movement + item writes are atomic. The mock just invokes the
     // callback with itself as `tx` — every `tx.item.*` call inside the

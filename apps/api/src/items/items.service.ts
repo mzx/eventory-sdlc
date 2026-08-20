@@ -270,13 +270,43 @@ export class ItemsService {
    * - Returns `{ kind: 'location', location }` when the token is on a Location.
    * - Throws `NotFoundException` when the token matches neither, OR when it
    *   matches one but `userId` is not a member of that resource's workspace.
+   *
+   * EVT-44: `Item`/`Location` are RLS-protected (see the migration's doc
+   * comment) — a bare `this.prisma.item.findUnique({ where: { qrCode } })`
+   * would be silently scoped to the caller's AMBIENT workspace by
+   * `PrismaService`'s extension, defeating the deliberately-global lookup
+   * this method exists for. Both lookups below instead run inside one
+   * `$transaction` that sets the read-only `app.rls_bypass_read` session
+   * flag as its first statement — RLS's `USING` clause honors that flag
+   * (see the migration), but `WITH CHECK` never does, so this can only ever
+   * be used to READ across workspaces, never to write into one. The
+   * `isMemberOfWorkspace` re-authorization below is what actually decides
+   * whether the caller gets the row back.
    */
   async findByQr(qr: string, userId: string) {
-    // Check items first
-    const item = await this.prisma.item.findUnique({
-      where: { qrCode: qr },
-      include: ITEM_DETAIL_INCLUDE,
+    const { item, location } = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.rls_bypass_read', 'true', true)`;
+      const item = await tx.item.findUnique({
+        where: { qrCode: qr },
+        include: ITEM_DETAIL_INCLUDE,
+      });
+      if (item) {
+        return { item, location: null };
+      }
+      const location = await tx.location.findUnique({
+        where: { qrCode: qr },
+        select: {
+          id: true,
+          name: true,
+          path: true,
+          parentId: true,
+          notes: true,
+          workspaceId: true,
+        },
+      });
+      return { item: null, location };
     });
+
     if (item) {
       if (!(await this.isMemberOfWorkspace(userId, item.workspaceId))) {
         throw new NotFoundException(`No item or location found for QR token: ${qr}`);
@@ -284,18 +314,6 @@ export class ItemsService {
       return { kind: 'item' as const, item };
     }
 
-    // Check locations
-    const location = await this.prisma.location.findUnique({
-      where: { qrCode: qr },
-      select: {
-        id: true,
-        name: true,
-        path: true,
-        parentId: true,
-        notes: true,
-        workspaceId: true,
-      },
-    });
     if (location) {
       if (!(await this.isMemberOfWorkspace(userId, location.workspaceId))) {
         throw new NotFoundException(`No item or location found for QR token: ${qr}`);

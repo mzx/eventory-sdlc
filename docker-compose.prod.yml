@@ -37,6 +37,13 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-eventory}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-eventory}?schema=public
+      # Runtime (RLS-restricted) connection — EVT-44, see
+      # apps/api/.env.example's longer comment. `eventory_rls`'s password is
+      # a placeholder baked into that task's migration SQL by default —
+      # operators MUST rotate it (`ALTER ROLE eventory_rls PASSWORD ...`)
+      # and set EVENTORY_RLS_PASSWORD in `.env.prod` to match before any
+      # real deployment; see docs/operations/tenancy-rls.md.
+      APP_DATABASE_URL: postgresql://eventory_rls:${EVENTORY_RLS_PASSWORD:-eventory_rls_change_me}@db:5432/${POSTGRES_DB:-eventory}?schema=public
       PORT: ${PORT:-3001}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL must be set}
       WEB_BASE: ${WEB_BASE:?WEB_BASE must be set}

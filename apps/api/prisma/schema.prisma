@@ -60,6 +60,18 @@
 // EVT-40, not this task. `ShoppingListEntry`'s partial "one open entry per
 // item" unique index is already item-scoped (items can't span workspaces)
 // and is untouched.
+//
+// Postgres row-level security backstop (EVT-44): the migration
+// `20260821090000_row_level_security` (raw SQL — RLS has no Prisma schema
+// DSL representation) enables + FORCES row-level security, keyed to the
+// session setting `app.workspace_id`, on every table listed above (Item,
+// Location, Category, Tag, Project, StockMovement, ShoppingListEntry,
+// Photo) — application scoping (this file + EVT-40/EVT-41's per-request
+// tenant context) stays the CORRECTNESS layer; RLS is the CONTAINMENT
+// layer underneath it, enforced even if a query forgets a `where`. See that
+// migration's own doc comment and docs/operations/tenancy-rls.md for the
+// full layered-security writeup, including why `WorkspaceMember`/
+// `WorkspaceInvite` are deliberately OUT of RLS scope.
 
 generator client {
   provider = "prisma-client-js"
