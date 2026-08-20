@@ -8,6 +8,7 @@ import {
   ALLOW_MISSING_WORKSPACE_KEY,
   RequestWithWorkspace,
   WORKSPACE_HEADER,
+  WORKSPACE_QUERY_PARAM,
 } from './workspace-context';
 
 /** Matches a well-formed UUID — cheap pre-check before hitting the DB with a header value. */
@@ -36,7 +37,12 @@ const NO_WORKSPACE_MESSAGE = 'No workspace access';
  *   member of, or this throws `ForbiddenException` (403) — a non-member
  *   header is always rejected, whether the workspace exists or not (never
  *   distinguishes "doesn't exist" from "not yours").
- * - Header absent: falls back to the caller's oldest membership (first
+ * - Header absent but `?workspace=` query parameter present: identical
+ *   validation and rejection rules as the header. Exists for browser-native
+ *   subresource requests (`<img src="/storage/…">`) that send the session
+ *   cookie but cannot attach a custom header — see `WORKSPACE_QUERY_PARAM`'s
+ *   doc comment. The header wins when both are present.
+ * - Neither present: falls back to the caller's oldest membership (first
  *   workspace they joined) as the default.
  *
  * **FAIL CLOSED (EVT-42 round-2 security review, CRITICAL).** If NO
@@ -119,12 +125,29 @@ export class WorkspaceContextGuard implements CanActivate {
     const headerRaw = request.headers[WORKSPACE_HEADER];
     const headerWorkspaceId = Array.isArray(headerRaw) ? headerRaw[0] : headerRaw;
 
-    if (headerWorkspaceId) {
-      if (!UUID_RE.test(headerWorkspaceId)) {
+    // `?workspace=` — the header's equivalent for browser-native subresource
+    // requests (`<img>` tags can't send custom headers); same validation
+    // below, header wins when both are present. Express's query parser can
+    // yield arrays/objects for repeated or bracketed params — anything that
+    // isn't a plain string is treated as absent-or-malformed, never trusted.
+    const queryRaw = (request.query as Record<string, unknown> | undefined)?.[
+      WORKSPACE_QUERY_PARAM
+    ];
+    const queryWorkspaceId =
+      typeof queryRaw === 'string'
+        ? queryRaw
+        : Array.isArray(queryRaw) && typeof queryRaw[0] === 'string'
+          ? queryRaw[0]
+          : undefined;
+
+    const requestedWorkspaceId = headerWorkspaceId || queryWorkspaceId;
+
+    if (requestedWorkspaceId) {
+      if (!UUID_RE.test(requestedWorkspaceId)) {
         throw new ForbiddenException(NOT_A_MEMBER_MESSAGE);
       }
       const membership = await this.prisma.workspaceMember.findUnique({
-        where: { workspaceId_userId: { workspaceId: headerWorkspaceId, userId: user.id } },
+        where: { workspaceId_userId: { workspaceId: requestedWorkspaceId, userId: user.id } },
         select: { workspaceId: true, role: true },
       });
       if (!membership) {

@@ -9,9 +9,21 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
 /** Public URL prefix uploaded photos are served under (see apps/api main.ts). */
 const STORAGE_URL_PREFIX = '/storage';
 
-/** Builds the browser-facing URL for a stored photo filename. */
+/**
+ * Builds the browser-facing URL for a stored photo filename.
+ *
+ * Carries the active workspace as `?workspace=` — an `<img>` tag can't send
+ * the `X-Workspace-Id` header, and without it the server falls back to the
+ * caller's OLDEST workspace, 404ing every photo that belongs to any other
+ * one. The guard validates the param against membership exactly like the
+ * header. Distinct URLs per workspace also keep the browser's
+ * `private, immutable` photo cache correct across workspace switches.
+ */
 export function photoUrl(filename: string): string {
-  return `${STORAGE_URL_PREFIX}/${filename}`;
+  const workspaceId = getActiveWorkspaceId();
+  return workspaceId
+    ? `${STORAGE_URL_PREFIX}/${filename}?workspace=${encodeURIComponent(workspaceId)}`
+    : `${STORAGE_URL_PREFIX}/${filename}`;
 }
 
 /** Builds the browser-facing URL for the QR sticker PNG of an item/location token. */

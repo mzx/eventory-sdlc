@@ -36,6 +36,18 @@ export interface WorkspaceContext {
 /** Header a caller sends to select a non-default workspace (see the guard's doc comment). */
 export const WORKSPACE_HEADER = 'x-workspace-id';
 
+/**
+ * Query-parameter equivalent of `WORKSPACE_HEADER` for browser-native
+ * subresource requests — an `<img src="/storage/…">` tag sends the session
+ * cookie but can never attach a custom header, so without this every photo
+ * rendered while a NON-default workspace is active would 404 (the guard's
+ * header-absent fallback resolves the caller's oldest membership, and
+ * `StorageController` then looks the file up under the wrong workspace).
+ * Validated against membership identically to the header; the header wins
+ * when both are present.
+ */
+export const WORKSPACE_QUERY_PARAM = 'workspace';
+
 export type RequestWithWorkspace = Omit<Request, 'workspace'> & {
   /**
    * Populated by `WorkspaceContextGuard`:

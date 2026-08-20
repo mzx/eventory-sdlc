@@ -6,6 +6,7 @@ import {
   fetchItems,
   fetchWorkspaces,
   getActiveWorkspaceId,
+  photoUrl,
   redeemInvite,
   searchItemsByPhoto,
   setActiveWorkspaceId,
@@ -292,5 +293,34 @@ describe('active workspace store + X-Workspace-Id header (EVT-43)', () => {
       expect(survivor).toHaveBeenCalledTimes(1);
       expect(unmounted).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Photo-serving hotfix: `<img>` tags can't send `X-Workspace-Id`, so the
+// active workspace must ride along in the photo URL itself — without it the
+// server resolves the caller's OLDEST workspace and 404s every photo
+// belonging to any other one (broken images everywhere photos render while
+// a non-default workspace is active).
+describe('photoUrl carries the active workspace (?workspace=)', () => {
+  it('appends the active workspace id as a query parameter', () => {
+    setActiveWorkspaceId('11111111-1111-1111-1111-111111111111');
+    expect(photoUrl('drill.jpg')).toBe(
+      '/storage/drill.jpg?workspace=11111111-1111-1111-1111-111111111111',
+    );
+  });
+
+  it('returns the bare storage URL when no workspace is active', () => {
+    setActiveWorkspaceId(null);
+    expect(photoUrl('drill.jpg')).toBe('/storage/drill.jpg');
+  });
+
+  it('reflects a workspace switch immediately — no stale URL from the previous workspace', () => {
+    setActiveWorkspaceId('11111111-1111-1111-1111-111111111111');
+    const before = photoUrl('drill.jpg');
+    setActiveWorkspaceId('22222222-2222-2222-2222-222222222222');
+    expect(photoUrl('drill.jpg')).toBe(
+      '/storage/drill.jpg?workspace=22222222-2222-2222-2222-222222222222',
+    );
+    expect(photoUrl('drill.jpg')).not.toBe(before);
   });
 });
