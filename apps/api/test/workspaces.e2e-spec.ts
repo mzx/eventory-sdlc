@@ -221,6 +221,39 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
         .expect(409);
     });
 
+    // EVT-42 clearance review / EVT-45 fix — a revoke that loses the race
+    // to a redemption must 409 WITHOUT clobbering the already-`redeemed`
+    // audit record back to `revoked`. Sequential ordering (redeem, THEN
+    // attempt revoke) reproduces the exact state the conditional `updateMany`
+    // has to handle, without needing genuine DB-level concurrency.
+    it('EVT-45: revoking an ALREADY-REDEEMED invite 409s and does NOT clobber the redeemed status', async () => {
+      const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
+      const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
+      const inviteRes = await owner.post(`/api/workspaces/${ws.body.id}/invites`).send({});
+
+      const invitee = await authService.upsertFromGoogleProfile(makeProfile());
+      await wrapWithCookie(app, authService, invitee)
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
+        .expect(201);
+
+      await owner.delete(`/api/workspaces/${ws.body.id}/invites/${inviteRes.body.id}`).expect(409);
+
+      const invite = await prisma.workspaceInvite.findUniqueOrThrow({
+        where: { id: inviteRes.body.id },
+      });
+      expect(invite.status).toBe('redeemed'); // NOT clobbered to 'revoked'
+    });
+
+    it('revoking an unknown invite id 404s', async () => {
+      const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
+      const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
+
+      await owner
+        .delete(`/api/workspaces/${ws.body.id}/invites/00000000-0000-0000-0000-000000000099`)
+        .expect(404);
+    });
+
     it('single-use: a second redemption of the same token 409s', async () => {
       const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
       const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
@@ -379,6 +412,31 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
       await inviteeHttp.post('/api/items').send({ name: 'Drill', quantity: 1 }).expect(403);
     });
 
+    // EVT-42 clearance review / EVT-45 fix — an invite's role is only what a
+    // BRAND-NEW member is granted; an EXISTING member's real role must be
+    // reflected back, not the invite's.
+    it('EVT-45: redeeming a viewer-granting invite as an EXISTING owner returns the owner\'s ACTUAL role, not "viewer"', async () => {
+      const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
+      const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
+      const inviteRes = await owner
+        .post(`/api/workspaces/${ws.body.id}/invites`)
+        .send({ role: WorkspaceRole.viewer })
+        .expect(201);
+
+      // The owner redeems their OWN workspace's viewer invite — already a
+      // member (owner), so the upsert's `update: {}` branch leaves their
+      // role untouched.
+      const redeemRes = await owner
+        .post('/api/invites/redeem')
+        .send({ token: inviteRes.body.token })
+        .expect(201);
+      expect(redeemRes.body).toEqual({ workspaceId: ws.body.id, role: WorkspaceRole.owner });
+
+      // Still fully able to write — proves the role was NOT silently
+      // downgraded to viewer by the redemption.
+      await owner.post('/api/items').send({ name: 'Drill', quantity: 1 }).expect(201);
+    });
+
     it('owner toggles member <-> viewer and the change takes effect on the very next request', async () => {
       const owner = await createAuthedHttp(app, prisma, authService, { workspaceId: null });
       const ws = await owner.post('/api/workspaces').send({ name: 'Garage' });
@@ -444,12 +502,12 @@ describe('Workspaces & Memberships API (e2e) — EVT-42', () => {
     // WorkspaceContextGuard fix must hold even for controllers that
     // declare ZERO `@CurrentWorkspace()` routes of their own
     // (LocationsController/CategoriesController/ProjectsController/
-    // ShoppingListController — EVT-41's still-unlanded scoping work). Before
-    // the fix, a zero-membership caller reached these handlers regardless
-    // (`request.workspace = null` but the guard still returned `true`); the
-    // concrete attack was a throwaway Google account dumping every
-    // workspace's locations/categories/projects/shopping-list, reads AND
-    // writes, with zero allowlisting required.
+    // ShoppingListController — EVT-41's tenant-scoping work, landed since).
+    // Before the fix, a zero-membership caller reached these handlers
+    // regardless (`request.workspace = null` but the guard still returned
+    // `true`); the concrete attack was a throwaway Google account dumping
+    // every workspace's locations/categories/projects/shopping-list, reads
+    // AND writes, with zero allowlisting required.
     // -------------------------------------------------------------------
 
     it('EVT-42 round-2 (CRITICAL): a zero-membership user is blocked (403) from locations, categories, projects, and shopping-list — reads AND writes', async () => {

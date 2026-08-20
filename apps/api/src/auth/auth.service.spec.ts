@@ -1,13 +1,18 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
-import { UserRole, UserStatus } from '@prisma/client';
+import { InviteStatus, UserRole, UserStatus, WorkspaceRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { hashInviteToken } from '../workspace/workspaces.service';
 import {
   AuthService,
   DEFAULT_JWT_SECRET,
+  isAllowlistConfigured,
+  isEmailAllowed,
   parseAdminAllowlist,
+  parseAllowedSignins,
   resolveJwtSecret,
+  SignInNotAllowedError,
   toPublicUser,
 } from './auth.service';
 import { GoogleProfile } from './google.strategy';
@@ -26,11 +31,16 @@ function makePrismaMock() {
     update: jest.fn(),
     count: jest.fn(),
   };
+  const workspaceInvite = {
+    findUnique: jest.fn().mockResolvedValue(null),
+  };
   const mock: {
     user: typeof user;
+    workspaceInvite: typeof workspaceInvite;
     $transaction: jest.Mock;
   } = {
     user,
+    workspaceInvite,
     // Mimics Prisma's interactive `$transaction(async (tx) => ...)` by
     // handing the callback this same mock — `tx.user.count()` /
     // `tx.user.create()` hit the exact jest mocks the test configured.
@@ -380,6 +390,182 @@ describe('AuthService', () => {
       expect(updateArg.data.role).toBeUndefined();
       expect(updateArg.data.status).toBeUndefined();
     });
+
+    // =======================================================================
+    // EVENTORY_ALLOWED_SIGNINS sign-in allowlist (EVT-45)
+    // =======================================================================
+
+    describe('EVT-45 sign-in allowlist', () => {
+      it('REFUSES a brand-new, non-allowlisted sign-in with SignInNotAllowedError and creates NO row', async () => {
+        prisma.user.findUnique.mockResolvedValue(null); // no match by googleId or email
+        prisma.user.count.mockResolvedValue(1); // not the bootstrap case
+
+        await expect(
+          service.upsertFromGoogleProfile(makeProfile({ email: 'stranger@example.com' }), {
+            EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com',
+          }),
+        ).rejects.toThrow(SignInNotAllowedError);
+
+        expect(prisma.user.create).not.toHaveBeenCalled();
+      });
+
+      it('admits an exact-email allowlist match', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        prisma.user.create.mockResolvedValue(makeUser({ email: 'alice@example.com' }));
+
+        await service.upsertFromGoogleProfile(makeProfile({ email: 'alice@example.com' }), {
+          EVENTORY_ALLOWED_SIGNINS: 'alice@example.com',
+        });
+
+        expect(prisma.user.create).toHaveBeenCalled();
+      });
+
+      it('admits an `@domain` allowlist match', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        prisma.user.create.mockResolvedValue(makeUser({ email: 'anyone@family.example.com' }));
+
+        await service.upsertFromGoogleProfile(makeProfile({ email: 'anyone@family.example.com' }), {
+          EVENTORY_ALLOWED_SIGNINS: '@family.example.com',
+        });
+
+        expect(prisma.user.create).toHaveBeenCalled();
+      });
+
+      it('admits a non-allowlisted email that IS EVENTORY_ADMIN_EMAILS-allowlisted', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        prisma.user.create.mockResolvedValue(makeUser({ email: 'operator@example.com' }));
+
+        await service.upsertFromGoogleProfile(makeProfile({ email: 'operator@example.com' }), {
+          EVENTORY_ALLOWED_SIGNINS: 'nobody@example.com',
+          EVENTORY_ADMIN_EMAILS: 'operator@example.com',
+        });
+
+        expect(prisma.user.create).toHaveBeenCalled();
+      });
+
+      it('the zero-user bootstrap sign-in is admitted regardless of the allowlist', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(0); // bootstrap
+        prisma.user.create.mockResolvedValue(
+          makeUser({ role: UserRole.admin, status: UserStatus.approved }),
+        );
+
+        await service.upsertFromGoogleProfile(makeProfile({ email: 'stranger@example.com' }), {
+          EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com',
+        });
+
+        expect(prisma.user.create).toHaveBeenCalled();
+      });
+
+      it('admits a non-allowlisted email presenting a valid, pending, unexpired invite token', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        prisma.user.create.mockResolvedValue(makeUser({ email: 'invitee@example.com' }));
+        const rawToken = 'a'.repeat(64);
+        prisma.workspaceInvite.findUnique.mockResolvedValue({
+          id: 'invite-1',
+          tokenHash: hashInviteToken(rawToken),
+          status: InviteStatus.pending,
+          role: WorkspaceRole.member,
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+
+        await service.upsertFromGoogleProfile(
+          makeProfile({ email: 'invitee@example.com' }),
+          { EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com' },
+          rawToken,
+        );
+
+        expect(prisma.workspaceInvite.findUnique).toHaveBeenCalledWith({
+          where: { tokenHash: hashInviteToken(rawToken) },
+        });
+        expect(prisma.user.create).toHaveBeenCalled();
+      });
+
+      it('REFUSES a non-allowlisted email presenting an EXPIRED invite token', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        const rawToken = 'b'.repeat(64);
+        prisma.workspaceInvite.findUnique.mockResolvedValue({
+          id: 'invite-1',
+          tokenHash: hashInviteToken(rawToken),
+          status: InviteStatus.pending,
+          role: WorkspaceRole.member,
+          expiresAt: new Date(Date.now() - 60_000), // expired
+        });
+
+        await expect(
+          service.upsertFromGoogleProfile(
+            makeProfile({ email: 'stranger@example.com' }),
+            { EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com' },
+            rawToken,
+          ),
+        ).rejects.toThrow(SignInNotAllowedError);
+        expect(prisma.user.create).not.toHaveBeenCalled();
+      });
+
+      it('REFUSES a non-allowlisted email presenting an already-REDEEMED invite token', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        const rawToken = 'c'.repeat(64);
+        prisma.workspaceInvite.findUnique.mockResolvedValue({
+          id: 'invite-1',
+          tokenHash: hashInviteToken(rawToken),
+          status: InviteStatus.redeemed,
+          role: WorkspaceRole.member,
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+
+        await expect(
+          service.upsertFromGoogleProfile(
+            makeProfile({ email: 'stranger@example.com' }),
+            { EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com' },
+            rawToken,
+          ),
+        ).rejects.toThrow(SignInNotAllowedError);
+      });
+
+      it('an UNKNOWN invite token does not admit a non-allowlisted sign-in', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        prisma.workspaceInvite.findUnique.mockResolvedValue(null);
+
+        await expect(
+          service.upsertFromGoogleProfile(
+            makeProfile({ email: 'stranger@example.com' }),
+            { EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com' },
+            'not-a-real-token',
+          ),
+        ).rejects.toThrow(SignInNotAllowedError);
+      });
+
+      it('does NOT gate an EXISTING account matched by googleId, even when the allowlist would refuse them', async () => {
+        const existing = makeUser({ email: 'stranger@example.com' });
+        prisma.user.findUnique.mockResolvedValueOnce(existing); // matched by googleId
+        prisma.user.update.mockResolvedValue({ ...existing, lastLoginAt: new Date() });
+
+        const result = await service.upsertFromGoogleProfile(
+          makeProfile({ email: 'stranger@example.com' }),
+          { EVENTORY_ALLOWED_SIGNINS: 'someone-else@example.com' },
+        );
+
+        expect(result).toEqual({ ...existing, lastLoginAt: expect.any(Date) });
+        expect(prisma.user.create).not.toHaveBeenCalled();
+      });
+
+      it('does NOT gate when EVENTORY_ALLOWED_SIGNINS is unset (open registration, pre-EVT-45 default)', async () => {
+        prisma.user.findUnique.mockResolvedValue(null);
+        prisma.user.count.mockResolvedValue(1);
+        prisma.user.create.mockResolvedValue(makeUser({ email: 'anyone@example.com' }));
+
+        await service.upsertFromGoogleProfile(makeProfile({ email: 'anyone@example.com' }), {});
+
+        expect(prisma.user.create).toHaveBeenCalled();
+      });
+    });
   });
 
   // =========================================================================
@@ -574,6 +760,64 @@ describe('parseAdminAllowlist', () => {
 
   it('ignores empty entries from trailing/double commas', () => {
     expect(parseAdminAllowlist('alice@example.com,,')).toEqual(new Set(['alice@example.com']));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAllowedSignins / isEmailAllowed / isAllowlistConfigured (EVT-45)
+// ---------------------------------------------------------------------------
+
+describe('parseAllowedSignins', () => {
+  it('returns empty sets when unset or empty', () => {
+    expect(parseAllowedSignins(undefined)).toEqual({ emails: new Set(), domains: new Set() });
+    expect(parseAllowedSignins('')).toEqual({ emails: new Set(), domains: new Set() });
+  });
+
+  it('splits emails and @domain entries into separate sets, trimmed and lowercased', () => {
+    const result = parseAllowedSignins(
+      ' Alice@Example.com, @Family.Example.com ,bob@example.com,,',
+    );
+    expect(result).toEqual({
+      emails: new Set(['alice@example.com', 'bob@example.com']),
+      domains: new Set(['family.example.com']),
+    });
+  });
+
+  it('ignores a bare "@" entry (empty domain)', () => {
+    expect(parseAllowedSignins('@,alice@example.com')).toEqual({
+      emails: new Set(['alice@example.com']),
+      domains: new Set(),
+    });
+  });
+});
+
+describe('isAllowlistConfigured', () => {
+  it('is false for an empty allowlist', () => {
+    expect(isAllowlistConfigured(parseAllowedSignins(undefined))).toBe(false);
+  });
+
+  it('is true once at least one email or domain is present', () => {
+    expect(isAllowlistConfigured(parseAllowedSignins('alice@example.com'))).toBe(true);
+    expect(isAllowlistConfigured(parseAllowedSignins('@example.com'))).toBe(true);
+  });
+});
+
+describe('isEmailAllowed', () => {
+  it('matches an exact (case-insensitive) email entry', () => {
+    const allowlist = parseAllowedSignins('alice@example.com');
+    expect(isEmailAllowed('Alice@Example.com', allowlist)).toBe(true);
+    expect(isEmailAllowed('bob@example.com', allowlist)).toBe(false);
+  });
+
+  it('matches any address at an allowlisted @domain entry', () => {
+    const allowlist = parseAllowedSignins('@family.example.com');
+    expect(isEmailAllowed('anyone@family.example.com', allowlist)).toBe(true);
+    expect(isEmailAllowed('anyone@other.example.com', allowlist)).toBe(false);
+  });
+
+  it('does NOT match a subdomain of an allowlisted domain (exact match only)', () => {
+    const allowlist = parseAllowedSignins('@example.com');
+    expect(isEmailAllowed('someone@sub.example.com', allowlist)).toBe(false);
   });
 });
 

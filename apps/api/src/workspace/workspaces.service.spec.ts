@@ -602,20 +602,22 @@ describe('InvitesService', () => {
   });
 
   describe('revoke', () => {
-    it('revokes a pending invite', async () => {
+    it('revokes a pending invite via a CONDITIONAL updateMany (status: pending in the where clause)', async () => {
       jest.spyOn(workspacesService, 'requireOwner').mockResolvedValue(makeMembership());
       prisma.workspaceInvite.findUnique.mockResolvedValue({
         id: 'invite-1',
         workspaceId: WORKSPACE_ID,
         status: InviteStatus.pending,
       });
+      prisma.workspaceInvite.updateMany.mockResolvedValue({ count: 1 });
 
       await service.revoke(WORKSPACE_ID, 'invite-1', OWNER_ID);
 
-      expect(prisma.workspaceInvite.update).toHaveBeenCalledWith({
-        where: { id: 'invite-1' },
+      expect(prisma.workspaceInvite.updateMany).toHaveBeenCalledWith({
+        where: { id: 'invite-1', workspaceId: WORKSPACE_ID, status: InviteStatus.pending },
         data: { status: InviteStatus.revoked },
       });
+      expect(prisma.workspaceInvite.update).not.toHaveBeenCalled();
     });
 
     it('404s for an unknown invite id', async () => {
@@ -625,6 +627,7 @@ describe('InvitesService', () => {
       await expect(service.revoke(WORKSPACE_ID, 'unknown', OWNER_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+      expect(prisma.workspaceInvite.updateMany).not.toHaveBeenCalled();
     });
 
     it('404s when the invite belongs to a DIFFERENT workspace', async () => {
@@ -638,6 +641,7 @@ describe('InvitesService', () => {
       await expect(service.revoke(WORKSPACE_ID, 'invite-1', OWNER_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+      expect(prisma.workspaceInvite.updateMany).not.toHaveBeenCalled();
     });
 
     it('409s when the invite is not pending (already redeemed/revoked)', async () => {
@@ -647,10 +651,40 @@ describe('InvitesService', () => {
         workspaceId: WORKSPACE_ID,
         status: InviteStatus.redeemed,
       });
+      // The conditional updateMany matches zero rows because `status` isn't
+      // `pending` anymore — this is what actually drives the 409, not the
+      // find's `status` field.
+      prisma.workspaceInvite.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(service.revoke(WORKSPACE_ID, 'invite-1', OWNER_ID)).rejects.toBeInstanceOf(
         ConflictException,
       );
+    });
+
+    // EVT-42 clearance review / EVT-45: a raced redemption that commits
+    // BETWEEN this method's existence-check read and its conditional write
+    // must not have its `redeemed` status clobbered back to `revoked` — the
+    // conditional `updateMany` (not an unconditional `update` keyed by id
+    // alone) is what prevents that. This test simulates exactly that race:
+    // the read still shows `pending` (that's the state at read time), but
+    // the conditional write matches zero rows because `redeem()` won the
+    // race and already flipped the status in between.
+    it('409s (does NOT clobber) when a concurrent redemption wins the race between the read and the conditional write', async () => {
+      jest.spyOn(workspacesService, 'requireOwner').mockResolvedValue(makeMembership());
+      prisma.workspaceInvite.findUnique.mockResolvedValue({
+        id: 'invite-1',
+        workspaceId: WORKSPACE_ID,
+        status: InviteStatus.pending, // still pending as of the read
+      });
+      prisma.workspaceInvite.updateMany.mockResolvedValue({ count: 0 }); // but redeem() won the race
+
+      await expect(service.revoke(WORKSPACE_ID, 'invite-1', OWNER_ID)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.workspaceInvite.updateMany).toHaveBeenCalledWith({
+        where: { id: 'invite-1', workspaceId: WORKSPACE_ID, status: InviteStatus.pending },
+        data: { status: InviteStatus.revoked },
+      });
     });
   });
 
@@ -658,7 +692,7 @@ describe('InvitesService', () => {
     const RAW_TOKEN = 'a'.repeat(64);
     const TOKEN_HASH = createHash('sha256').update(RAW_TOKEN).digest('hex');
 
-    it('claims the invite atomically and grants membership', async () => {
+    it('claims the invite atomically and grants membership — a NEW member gets the invite role', async () => {
       prisma.workspaceInvite.findUnique.mockResolvedValue({
         id: 'invite-1',
         tokenHash: TOKEN_HASH,
@@ -667,7 +701,11 @@ describe('InvitesService', () => {
         status: InviteStatus.pending,
       });
       prisma.workspaceInvite.updateMany.mockResolvedValue({ count: 1 });
-      prisma.workspaceMember.upsert.mockResolvedValue(makeMembership());
+      // A brand-new membership: the upsert's `create` branch stamps
+      // `invite.role`, so the row Prisma hands back carries that same role.
+      prisma.workspaceMember.upsert.mockResolvedValue(
+        makeMembership({ userId: OTHER_ID, role: WorkspaceRole.viewer }),
+      );
 
       const result = await service.redeem(RAW_TOKEN, OTHER_ID);
 
@@ -732,6 +770,30 @@ describe('InvitesService', () => {
 
       const upsertArg = prisma.workspaceMember.upsert.mock.calls[0][0];
       expect(upsertArg.update).toEqual({});
+    });
+
+    // EVT-42 clearance review / EVT-45 fix: the response must reflect the
+    // upserted row's ACTUAL role, not blindly echo back `invite.role`.
+    it("EVT-45: returns the EXISTING member's ACTUAL role, not the invite's role, when they already belong", async () => {
+      prisma.workspaceInvite.findUnique.mockResolvedValue({
+        id: 'invite-1',
+        tokenHash: TOKEN_HASH,
+        workspaceId: WORKSPACE_ID,
+        role: WorkspaceRole.viewer, // the invite grants viewer...
+        status: InviteStatus.pending,
+      });
+      prisma.workspaceInvite.updateMany.mockResolvedValue({ count: 1 });
+      // ...but OWNER_ID is ALREADY a member with a DIFFERENT role (owner) —
+      // the idempotent `update: {}` branch leaves that untouched, so the
+      // row Prisma hands back still carries `owner`.
+      prisma.workspaceMember.upsert.mockResolvedValue(
+        makeMembership({ userId: OWNER_ID, role: WorkspaceRole.owner }),
+      );
+
+      const result = await service.redeem(RAW_TOKEN, OWNER_ID);
+
+      expect(result).toEqual({ workspaceId: WORKSPACE_ID, role: WorkspaceRole.owner });
+      expect(result.role).not.toBe(WorkspaceRole.viewer);
     });
   });
 });

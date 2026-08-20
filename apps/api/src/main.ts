@@ -1,13 +1,35 @@
-import { RequestMethod, ValidationPipe } from '@nestjs/common';
+import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { isAllowlistConfigured, parseAllowedSignins } from './auth/auth.service';
 import { allowedCorsOrigins, corsOriginValidator } from './common/cors.config';
 import { resolveHttpsOptions } from './common/https-options';
 import { configureTrustProxy } from './common/trust-proxy.config';
 
+/**
+ * EVT-45: `EVENTORY_ALLOWED_SIGNINS` unset/empty keeps the pre-EVT-45 open
+ * self-registration behavior (any verified Google account may sign in and
+ * create a workspace) rather than failing closed — deliberately, so a fresh
+ * `docker compose up` with zero env vars still boots operable (same
+ * "fail-open-by-default, but never SILENTLY" rationale as the EVT-20
+ * bootstrap allowlist). This warning is the "never silently" half: it must
+ * be impossible to miss in `docker compose logs -f` / `pnpm dev` output on
+ * a deployment the operator forgot to gate.
+ */
+function warnIfSigninsOpen(): void {
+  if (!isAllowlistConfigured(parseAllowedSignins(process.env.EVENTORY_ALLOWED_SIGNINS))) {
+    new Logger('Bootstrap').warn(
+      'EVENTORY_ALLOWED_SIGNINS is not set — open self-registration is ENABLED. ' +
+        'Any verified Google account can sign in, create a workspace, and reach billed ' +
+        'AI endpoints. Set EVENTORY_ALLOWED_SIGNINS for public deployments (see README.md).',
+    );
+  }
+}
+
 async function bootstrap(): Promise<void> {
+  warnIfSigninsOpen();
   // HTTPS via mkcert when apps/api/certs/{cert,key}.pem exist (EVT-18) —
   // phone cameras and the Google OAuth redirect (EVT-14) need a secure
   // origin. Falls back to plain HTTP when the certs are absent, so CI and

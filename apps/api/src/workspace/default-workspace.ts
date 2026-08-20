@@ -15,8 +15,14 @@
  * rationale (three places the literal below must stay in sync).
  *
  * The handful of call sites that DO need this module are the ones that need
- * the Default Workspace's id explicitly — e.g. `TagsService.upsertByName`'s
- * composite-unique `where` clause.
+ * the Default Workspace's id explicitly. As of EVT-45, the only remaining
+ * caller of `getDefaultWorkspaceId` itself is the e2e test suite
+ * (`test/e2e-auth-helper.ts`), which seeds a `WorkspaceMember` row against
+ * `DEFAULT_WORKSPACE_ID` directly for legacy fixtures. This comment used to
+ * cite `TagsService.upsertByName`'s composite-unique `where` clause as an
+ * example caller — that's stale: `upsertByName` takes an explicit
+ * `workspaceId` parameter (scoped to the caller's actual workspace) as of
+ * the EVT-40 tenancy work, and never reaches into this module at all.
  *
  * EVT-40 introduced a runtime self-heal, `ensureDefaultWorkspaceMembership`,
  * that auto-granted an approved-but-membership-less user a Default Workspace
