@@ -42,6 +42,12 @@ precisely during EVT-42's rebase, 2026-08-21; first observed 2026-08-14):
 - Full `apps/api` e2e suite passes locally N=3 consecutive runs (the flake
   bar), evidence in the PR
 
+3. `scripts/fetch-backups.sh` fails on macOS: Apple's BSD rsync 2.6.9 rejects
+   the GNU-style `--chmod=F600,D700` argument (found 2026-08-21 during the
+   first real off-VM fetch; worked around with scp + chmod). Fix: portable
+   invocation (separate `--chmod` flags, detect rsync flavor, or plain
+   scp + chmod fallback), plus a spec in the backup-lib tests.
+
 ## Non-goals
 
 - Adding e2e to CI's required checks (separate decision — note it in the PR
