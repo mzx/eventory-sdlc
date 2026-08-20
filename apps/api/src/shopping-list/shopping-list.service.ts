@@ -39,11 +39,13 @@ export class ShoppingListService {
   /**
    * Open entries, oldest-first — the shopping list itself (EVT-26 AC 4), and
    * also the source the web nav badge count (AC 6) is derived from (its
-   * length), so the badge and the list can never disagree.
+   * length), so the badge and the list can never disagree. Scoped to
+   * `workspaceId` (EVT-41) — the badge count and the list are both
+   * per-workspace.
    */
-  async listOpen() {
+  async listOpen(workspaceId: string) {
     return this.prisma.shoppingListEntry.findMany({
-      where: { status: 'open' },
+      where: { status: 'open', workspaceId },
       orderBy: { createdAt: 'asc' },
       include: ENTRY_INCLUDE,
     });
@@ -61,14 +63,20 @@ export class ShoppingListService {
    * what gives the button its "one tap, visual confirmation, nothing to
    * think about" feel.
    *
+   * `itemId` must belong to `workspaceId` (EVT-41) — 404 for a
+   * foreign-workspace or unknown item, never distinguished (same posture as
+   * `ItemsService.findById`). The created entry is stamped with the SAME
+   * `workspaceId` — never trusted from anywhere else, always derived from
+   * the item this check just verified.
+   *
    * Checks-then-creates rather than relying solely on the partial unique
    * index catching a violation, so the common (non-racing) path never
    * throws; the index remains the backstop for a genuine race between this
    * call and a concurrent auto-trigger/second tap (caught below via P2002).
    */
-  async createManual(itemId: string) {
-    const item = await this.prisma.item.findUnique({
-      where: { id: itemId },
+  async createManual(itemId: string, workspaceId: string) {
+    const item = await this.prisma.item.findFirst({
+      where: { id: itemId, workspaceId },
       select: { id: true },
     });
     if (!item) {
@@ -82,7 +90,7 @@ export class ShoppingListService {
 
     try {
       return await this.prisma.shoppingListEntry.create({
-        data: { itemId, status: 'open', source: 'manual' },
+        data: { itemId, status: 'open', source: 'manual', workspaceId },
         include: ENTRY_INCLUDE,
       });
     } catch (err) {
@@ -98,6 +106,13 @@ export class ShoppingListService {
     }
   }
 
+  /**
+   * `itemId` alone is enough to scope this lookup — the partial unique
+   * index (`WHERE status = 'open'`) is already item-scoped, and an item can
+   * never belong to more than one workspace, so no separate `workspaceId`
+   * filter is needed here (the caller has already verified the item's
+   * workspace before reaching this helper).
+   */
   private findOpenForItem(itemId: string) {
     return this.prisma.shoppingListEntry.findFirst({
       where: { itemId, status: 'open' },
@@ -135,10 +150,13 @@ export class ShoppingListService {
    * `updateMany` affects zero rows, and it throws `ConflictException`
    * (rolling back its `recordMovement` write) rather than both committing
    * an `add` movement (round-2 review, minor/TOCTOU).
+   *
+   * 404 for a foreign-workspace entry, same as an unknown id (EVT-41) — same
+   * "don't confirm existence" posture as everywhere else.
    */
-  async restock(entryId: string, quantity: number, createdById?: string) {
-    const entry = await this.prisma.shoppingListEntry.findUnique({
-      where: { id: entryId },
+  async restock(entryId: string, quantity: number, workspaceId: string, createdById?: string) {
+    const entry = await this.prisma.shoppingListEntry.findFirst({
+      where: { id: entryId, workspaceId },
       include: { item: { select: { id: true, quantity: true, locationId: true } } },
     });
     if (!entry) {

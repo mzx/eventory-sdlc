@@ -38,9 +38,10 @@ export function slugify(name: string): string {
 export class CategoriesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Flat list of all categories ordered by materialized path. */
-  async findAll(): Promise<CategoryRow[]> {
+  /** Flat list of categories in `workspaceId`, ordered by materialized path (EVT-41). */
+  async findAll(workspaceId: string): Promise<CategoryRow[]> {
     const rows = await this.prisma.category.findMany({
+      where: { workspaceId },
       orderBy: { path: 'asc' },
       select: { id: true, name: true, path: true, parentId: true },
     });
@@ -48,13 +49,16 @@ export class CategoriesService {
   }
 
   /**
-   * Create a category.
+   * Create a category in `workspaceId` (EVT-41).
    *
    * - `path` is composed as `<parentPath>.<slug>` (root: just `<slug>`).
-   * - Duplicate sibling (identical path) is rejected with `ConflictException`.
-   * - Unknown `parentId` is rejected with `NotFoundException`.
+   * - Duplicate sibling (identical path) is rejected with `ConflictException`
+   *   — scoped per-workspace via the schema's `@@unique([workspaceId, path])`.
+   * - Unknown OR foreign-workspace `parentId` is rejected with
+   *   `NotFoundException` (never distinguishes the two — same posture as
+   *   `LocationsService.create`).
    */
-  async create(dto: CreateCategoryDto): Promise<CategoryRow> {
+  async create(dto: CreateCategoryDto, workspaceId: string): Promise<CategoryRow> {
     const slug = slugify(dto.name);
 
     // Guard: names composed entirely of non-alphanumeric characters (e.g., "!!!")
@@ -70,7 +74,7 @@ export class CategoriesService {
     const parentId: string | null = dto.parentId ?? null;
 
     if (parentId) {
-      const parent = await this.prisma.category.findUnique({ where: { id: parentId } });
+      const parent = await this.prisma.category.findFirst({ where: { id: parentId, workspaceId } });
       if (!parent) {
         throw new NotFoundException(`Parent category ${parentId} not found`);
       }
@@ -81,7 +85,7 @@ export class CategoriesService {
 
     try {
       const created = await this.prisma.category.create({
-        data: { name: dto.name, path, parentId },
+        data: { name: dto.name, path, parentId, workspaceId },
         select: { id: true, name: true, path: true, parentId: true },
       });
       return { ...created, parentId: created.parentId };

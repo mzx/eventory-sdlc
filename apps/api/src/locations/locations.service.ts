@@ -61,23 +61,38 @@ export interface LocationDetail {
 /**
  * Postgres advisory-lock key serializing ALL structural location-tree
  * mutations (`moveContainer` and `rename`, both of which rewrite a
- * subtree's materialized `path`).
+ * subtree's materialized `path`) WITHIN one workspace (EVT-41).
  *
- * A single, transaction-scoped `pg_advisory_xact_lock(key)` — taken as the
- * FIRST statement inside each mutating transaction — is a simpler and
- * *stronger* guarantee than the row-locking machinery it replaces: no
- * concurrent structural mutation of ANY part of the tree can be in flight
- * while this lock is held, so plain (non-`FOR UPDATE`) reads taken after
- * acquiring it are safe to act on. The lock auto-releases at transaction
- * end (commit or rollback) — `pg_advisory_xact_lock`, not the
+ * A single, transaction-scoped `pg_advisory_xact_lock(key1, key2)` — taken
+ * as the FIRST statement inside each mutating transaction — is a simpler
+ * and *stronger* guarantee than the row-locking machinery it replaces: no
+ * concurrent structural mutation of ANY part of the CALLER'S tree can be in
+ * flight while this lock is held, so plain (non-`FOR UPDATE`) reads taken
+ * after acquiring it are safe to act on. The lock auto-releases at
+ * transaction end (commit or rollback) — `pg_advisory_xact_lock`, not the
  * session-scoped `pg_advisory_lock`, so there is no leak/unlock
  * bookkeeping to reason about.
  *
- * Escalation path: if whole-tree serialization ever becomes a measured
- * throughput problem, narrow this to a per-tree-root key (e.g. a hash of
- * the root location's id) rather than reintroducing row-level locking —
- * see the class-level doc comment for the history of why row-locking was
- * abandoned.
+ * EVT-41: this key is now the FIRST argument to the two-`int4` overload of
+ * `pg_advisory_xact_lock`, paired with `hashtext(workspaceId)` as the
+ * second argument (see `rename`/`moveContainer`'s `$executeRaw` calls) —
+ * the single-argument `bigint` form used by EVT-30 serialized ALL
+ * workspaces' tree mutations against each other, which meant one
+ * household's container move blocked every other household's move/rename
+ * for the lock's duration. Keying on `hashtext(workspaceId)` narrows
+ * serialization to "this workspace's tree mutations against each other",
+ * per the EVT-30 design decision's own documented escalation path (narrow
+ * the lock key rather than reintroduce row-level locking) — see the
+ * class-level doc comment for the full row-locking history this design
+ * still avoids.
+ *
+ * `hashtext` (not, say, truncating the UUID) is used because it produces a
+ * uniform `int4` from an arbitrary-length text input with a vanishingly
+ * small collision probability for the number of workspaces this app will
+ * ever have — a false-positive collision (two different workspaces hashing
+ * to the same `int4`) would only cost those two workspaces serializing
+ * against each other unnecessarily, never a correctness bug (mutual
+ * exclusion is still sound, just not maximally granular).
  */
 const LOCATION_TREE_LOCK_KEY = 7_030_001n;
 
@@ -125,15 +140,18 @@ export class LocationsService {
   ) {}
 
   /**
-   * Flat list ordered by materialized path. `itemCount` is RECURSIVE (EVT-30
-   * AC 5) — a container (or an area) rolls up the direct item count of every
-   * descendant, not just its own direct items, computed in-memory from this
-   * single flat fetch via path-prefix matching (O(n^2) over the location
-   * count, which stays small at household/workshop scale — no separate
-   * per-node query).
+   * Flat list ordered by materialized path, scoped to `workspaceId`
+   * (EVT-41). `itemCount` is RECURSIVE (EVT-30 AC 5) — a container (or an
+   * area) rolls up the direct item count of every descendant, not just its
+   * own direct items, computed in-memory from this single flat fetch via
+   * path-prefix matching (O(n^2) over the location count, which stays small
+   * at household/workshop scale — no separate per-node query). Since the
+   * fetch itself is already workspace-scoped, the recursive rollup can never
+   * cross a tenant boundary.
    */
-  async findAll(): Promise<LocationListItem[]> {
+  async findAll(workspaceId: string): Promise<LocationListItem[]> {
     const locations = await this.prisma.location.findMany({
+      where: { workspaceId },
       orderBy: { path: 'asc' },
       include: {
         _count: { select: { items: true } },
@@ -151,10 +169,19 @@ export class LocationsService {
     }));
   }
 
-  /** Single location with children, direct items, and breadcrumb. */
-  async findOne(id: string): Promise<LocationDetail> {
-    const location = await this.prisma.location.findUnique({
-      where: { id },
+  /**
+   * Single location with children, direct items, and breadcrumb. 404 for a
+   * foreign-workspace id, same as an unknown id (EVT-41) — same "don't
+   * confirm existence" posture as `ItemsService`. `children`/`items` need no
+   * additional `workspaceId` filter of their own: every write path that
+   * creates a child location or assigns an item's `locationId` validates the
+   * same-workspace invariant first (see `create`/`assertParentInWorkspace`
+   * below, and `ItemsService.assertLocationInWorkspace`), so a location can
+   * never have a foreign-workspace child or a foreign-workspace item.
+   */
+  async findOne(id: string, workspaceId: string): Promise<LocationDetail> {
+    const location = await this.prisma.location.findFirst({
+      where: { id, workspaceId },
       include: {
         children: { select: { id: true, name: true, path: true, kind: true } },
         items: {
@@ -193,19 +220,25 @@ export class LocationsService {
   }
 
   /**
-   * Create a location.
+   * Create a location, scoped to `workspaceId` (EVT-41).
    * - If `parentId` is supplied the new location is nested under that parent;
-   *   its path is `parent.path + '.' + slug`.
+   *   its path is `parent.path + '.' + slug`. `parentId` must belong to the
+   *   caller's workspace — 404 (not confirming existence) for a
+   *   foreign-workspace or unknown parent, same posture as
+   *   `ItemsService.assertLocationInWorkspace` — this is what prevents a
+   *   cross-tenant reference from ever entering the tree in the first place,
+   *   which is why `findOne` above needs no extra `children` scoping.
    * - Root locations have no parent; path equals the slug.
-   * - Duplicate sibling slugs (i.e. duplicate paths) are rejected with 409.
+   * - Duplicate sibling slugs (i.e. duplicate paths) are rejected with 409 —
+   *   scoped per-workspace by the schema's `@@unique([workspaceId, path])`.
    */
-  async create(dto: CreateLocationDto) {
+  async create(dto: CreateLocationDto, workspaceId: string) {
     const slug = slugify(dto.name);
 
     let path: string;
     if (dto.parentId) {
-      const parent = await this.prisma.location.findUnique({
-        where: { id: dto.parentId },
+      const parent = await this.prisma.location.findFirst({
+        where: { id: dto.parentId, workspaceId },
       });
       if (!parent) {
         throw new NotFoundException(`Parent location ${dto.parentId} not found`);
@@ -223,6 +256,7 @@ export class LocationsService {
           parentId: dto.parentId ?? null,
           notes: dto.notes ?? null,
           kind: dto.kind ?? 'area',
+          workspaceId,
         },
       });
     } catch (err) {
@@ -236,21 +270,23 @@ export class LocationsService {
   }
 
   /**
-   * Rename a location.
+   * Rename a location, scoped to `workspaceId` (EVT-41). 404 for a
+   * foreign-workspace id, same as an unknown id.
    * Recomputes its own path and atomically rewrites all descendant paths inside
    * a single transaction so the tree is never partially updated.
    *
    * Rename also rewrites subtree paths — same class of structural mutation
    * as `moveContainer` — so it takes the SAME `LOCATION_TREE_LOCK_KEY`
-   * advisory lock, as the FIRST statement of its own transaction, before
-   * any read this method relies on for its decision (the pre-flight
-   * `findUnique`/`findFirst` above are fast-fail convenience only, exactly
-   * like `moveContainer`'s pre-transaction reads — see that method's doc
-   * comment). See the class-level doc comment for the full design
-   * rationale.
+   * advisory lock, now keyed additionally by `hashtext(workspaceId)`
+   * (EVT-41 — see `LOCATION_TREE_LOCK_KEY`'s doc comment), as the FIRST
+   * statement of its own transaction, before any read this method relies on
+   * for its decision (the pre-flight `findUnique`/`findFirst` above are
+   * fast-fail convenience only, exactly like `moveContainer`'s
+   * pre-transaction reads — see that method's doc comment). See the
+   * class-level doc comment for the full design rationale.
    */
-  async rename(id: string, name: string) {
-    const location = await this.prisma.location.findUnique({ where: { id } });
+  async rename(id: string, name: string, workspaceId: string) {
+    const location = await this.prisma.location.findFirst({ where: { id, workspaceId } });
     if (!location) {
       throw new NotFoundException(`Location ${id} not found`);
     }
@@ -266,10 +302,11 @@ export class LocationsService {
       return location;
     }
 
-    // Conflict check: another location already owns the new path.
+    // Conflict check: another location already owns the new path — scoped to
+    // this workspace, mirroring the schema's `@@unique([workspaceId, path])`.
     if (newPath !== oldPath) {
       const conflict = await this.prisma.location.findFirst({
-        where: { path: newPath, id: { not: id } },
+        where: { path: newPath, workspaceId, id: { not: id } },
       });
       if (conflict) {
         throw new ConflictException(`A location with path "${newPath}" already exists`);
@@ -280,14 +317,18 @@ export class LocationsService {
       return await this.prisma.$transaction(async (tx) => {
         // Advisory lock FIRST — see LOCATION_TREE_LOCK_KEY's doc comment.
         // Serializes this rename against every other structural mutation
-        // (moves and renames alike) tree-wide. `$executeRaw`, not
-        // `$queryRaw`: `pg_advisory_xact_lock` returns `void`, and Prisma's
-        // `$queryRaw` result-row deserializer cannot handle a `void`-typed
-        // column (throws P2010 "Failed to deserialize column of type
-        // 'void'" on every call — verified against real Postgres).
-        // `$executeRaw` only reports the affected-row count, which we don't
-        // need here anyway, and has no such deserialization step.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LOCATION_TREE_LOCK_KEY})`;
+        // (moves and renames alike) WITHIN THIS WORKSPACE only (EVT-41 —
+        // `hashtext(workspaceId)` as the lock's second key narrows the
+        // single-workspace-wide `LOCATION_TREE_LOCK_KEY` serialization from
+        // EVT-30 down to per-workspace, so two households' tree mutations no
+        // longer block each other). `$executeRaw`, not `$queryRaw`:
+        // `pg_advisory_xact_lock` returns `void`, and Prisma's `$queryRaw`
+        // result-row deserializer cannot handle a `void`-typed column
+        // (throws P2010 "Failed to deserialize column of type 'void'" on
+        // every call — verified against real Postgres). `$executeRaw` only
+        // reports the affected-row count, which we don't need here anyway,
+        // and has no such deserialization step.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LOCATION_TREE_LOCK_KEY}::int, hashtext(${workspaceId}))`;
 
         // 1. Update the renamed location itself.
         const updated = await tx.location.update({
@@ -300,14 +341,19 @@ export class LocationsService {
         //    leading path segment is rewritten.  Using SQL REPLACE() here would
         //    corrupt paths where the same slug appears more than once
         //    (e.g. renaming "a" → "b" would turn descendant "a.a.child" into
-        //    "b.b.child" instead of "b.a.child").
+        //    "b.b.child" instead of "b.a.child"). The `"workspaceId" = ...`
+        //    predicate (EVT-41) is REQUIRED, not defensive — `path` is only
+        //    unique PER workspace since EVT-39, so without it this statement
+        //    would also rewrite another workspace's unrelated location that
+        //    happens to share the same path prefix (e.g. both households
+        //    have a root called "garage").
         //    Template-literal parameters are escaped by Prisma — no injection risk.
         const oldPrefix = `${oldPath}.`;
         const newPrefix = `${newPath}.`;
         await tx.$executeRaw`
           UPDATE "Location"
           SET    path = ${newPrefix} || SUBSTRING(path FROM LENGTH(${oldPrefix}) + 1)
-          WHERE  path LIKE ${oldPrefix + '%'}
+          WHERE  path LIKE ${oldPrefix + '%'} AND "workspaceId" = ${workspaceId}::uuid
         `;
 
         return updated;
@@ -353,14 +399,19 @@ export class LocationsService {
    * Concurrency design (EVT-30 round 6 — see the class-level doc comment
    * for the full history of why the earlier row-locking rounds 3-5 were
    * abandoned): the FIRST statement inside the transaction below takes
-   * `pg_advisory_xact_lock(LOCATION_TREE_LOCK_KEY)`. Because that lock
-   * serializes this transaction against every other structural tree
-   * mutation (every other in-flight `moveContainer` or `rename`), no
-   * concurrent writer can be modifying the container, the destination, or
-   * any part of the subtree while this transaction holds the lock — so the
-   * plain `findUnique`/`findFirst` reads taken AFTER acquiring it are safe
-   * to act on directly, with no `FOR UPDATE`, no lock-ordering analysis,
-   * and no CTE-snapshot staleness window to reason about. The outer,
+   * `pg_advisory_xact_lock(LOCATION_TREE_LOCK_KEY, hashtext(workspaceId))`
+   * (EVT-41 — see `LOCATION_TREE_LOCK_KEY`'s doc comment for why the second
+   * key argument was added). Because that lock serializes this transaction
+   * against every other structural tree mutation WITHIN THE SAME WORKSPACE
+   * (every other in-flight `moveContainer` or `rename` for this
+   * `workspaceId`), no concurrent writer can be modifying the container, the
+   * destination, or any part of the subtree while this transaction holds
+   * the lock — so the plain `findUnique`/`findFirst` reads taken AFTER
+   * acquiring it are safe to act on directly, with no `FOR UPDATE`, no
+   * lock-ordering analysis, and no CTE-snapshot staleness window to reason
+   * about. A different workspace's simultaneous `moveContainer`/`rename`
+   * hashes to a (near-certainly) different second key and proceeds
+   * unblocked — the escalation this task exists to deliver. The outer,
    * pre-transaction reads below remain fast-fail convenience only (missing
    * location/parent, self-move, already-at-destination) so we don't open a
    * transaction for requests that can never succeed; the transaction's own
@@ -372,9 +423,10 @@ export class LocationsService {
   async moveContainer(
     id: string,
     toParentId: string | null,
+    workspaceId: string,
     createdById?: string,
   ): Promise<LocationDetail> {
-    const location = await this.prisma.location.findUnique({ where: { id } });
+    const location = await this.prisma.location.findFirst({ where: { id, workspaceId } });
     if (!location) {
       throw new NotFoundException(`Location ${id} not found`);
     }
@@ -388,8 +440,11 @@ export class LocationsService {
     }
 
     if (toParentId) {
-      const parentExists = await this.prisma.location.findUnique({
-        where: { id: toParentId },
+      // Scoped to `workspaceId` (EVT-41) — a foreign-workspace destination
+      // must not be distinguishable from an unknown one (same posture as
+      // `create`'s parentId check above).
+      const parentExists = await this.prisma.location.findFirst({
+        where: { id: toParentId, workspaceId },
         select: { id: true },
       });
       if (!parentExists) {
@@ -404,22 +459,24 @@ export class LocationsService {
     // below, since this outer `location.parentId` read can be stale by the
     // time we'd act on it.
     if ((toParentId ?? null) === location.parentId) {
-      return this.findOne(id);
+      return this.findOne(id, workspaceId);
     }
 
     try {
       await this.prisma.$transaction(async (tx) => {
         // Advisory lock FIRST — see the method's doc comment and
         // LOCATION_TREE_LOCK_KEY's doc comment. Everything after this line
-        // executes with exclusive ownership of ALL structural tree
-        // mutation; the reads below are plain (no `FOR UPDATE`) because
-        // this lock is what makes them safe to act on. `$executeRaw`, not
-        // `$queryRaw` — see `rename`'s identical lock statement for why
-        // (`pg_advisory_xact_lock` returns `void`, which `$queryRaw`'s
-        // result-row deserializer cannot handle).
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LOCATION_TREE_LOCK_KEY})`;
+        // executes with exclusive ownership of THIS WORKSPACE's structural
+        // tree mutation (EVT-41 — keyed by `hashtext(workspaceId)`, no
+        // longer tree-wide across every workspace); the reads below are
+        // plain (no `FOR UPDATE`) because this lock is what makes them safe
+        // to act on. `$executeRaw`, not `$queryRaw` — see `rename`'s
+        // identical lock statement for why (`pg_advisory_xact_lock` returns
+        // `void`, which `$queryRaw`'s result-row deserializer cannot
+        // handle).
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LOCATION_TREE_LOCK_KEY}::int, hashtext(${workspaceId}))`;
 
-        const freshContainer = await tx.location.findUnique({ where: { id } });
+        const freshContainer = await tx.location.findFirst({ where: { id, workspaceId } });
         if (!freshContainer) {
           throw new NotFoundException(`Location ${id} not found`);
         }
@@ -433,8 +490,8 @@ export class LocationsService {
 
         let freshParent: { id: string; path: string } | null = null;
         if (toParentId) {
-          const candidate = await tx.location.findUnique({
-            where: { id: toParentId },
+          const candidate = await tx.location.findFirst({
+            where: { id: toParentId, workspaceId },
             select: { id: true, path: true },
           });
           if (!candidate) {
@@ -461,7 +518,7 @@ export class LocationsService {
 
         if (newPath !== oldPath) {
           const conflict = await tx.location.findFirst({
-            where: { path: newPath, id: { not: id } },
+            where: { path: newPath, workspaceId, id: { not: id } },
           });
           if (conflict) {
             throw new ConflictException(`A location with path "${newPath}" already exists`);
@@ -477,14 +534,16 @@ export class LocationsService {
 
         // Same SUBSTRING-based prefix rewrite as `rename` — see that
         // method's doc comment for why REPLACE() would corrupt paths where
-        // the same slug repeats at multiple depths.
+        // the same slug repeats at multiple depths, and for why the
+        // `"workspaceId" = ...` predicate (EVT-41) is required (not
+        // defensive) now that `path` is only unique per-workspace.
         if (newPath !== oldPath) {
           const oldPrefix = `${oldPath}.`;
           const newPrefix = `${newPath}.`;
           await tx.$executeRaw`
             UPDATE "Location"
             SET    path = ${newPrefix} || SUBSTRING(path FROM LENGTH(${oldPrefix}) + 1)
-            WHERE  path LIKE ${oldPrefix + '%'}
+            WHERE  path LIKE ${oldPrefix + '%'} AND "workspaceId" = ${workspaceId}::uuid
           `;
         }
 
@@ -504,7 +563,7 @@ export class LocationsService {
         await this.stockMovementsService.recordContainerMove(tx, input);
       });
 
-      return this.findOne(id);
+      return this.findOne(id, workspaceId);
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException(`A location with the target path already exists`);
@@ -528,17 +587,22 @@ export class LocationsService {
   }
 
   /**
-   * Delete a location.
+   * Delete a location, scoped to `workspaceId` (EVT-41). 404 for a
+   * foreign-workspace id, same as an unknown id.
    * Rejected if the location has any direct children (to prevent orphaned
    * sub-trees).  Items inside the location receive `locationId = null` via the
    * schema's `onDelete: SetNull`.
    */
-  async remove(id: string) {
-    const location = await this.prisma.location.findUnique({ where: { id } });
+  async remove(id: string, workspaceId: string) {
+    const location = await this.prisma.location.findFirst({ where: { id, workspaceId } });
     if (!location) {
       throw new NotFoundException(`Location ${id} not found`);
     }
 
+    // No extra `workspaceId` filter needed here — a child's `parentId` can
+    // only ever point at a same-workspace parent (enforced at creation, see
+    // `create`'s doc comment), so every child counted here already belongs
+    // to `workspaceId`.
     const childCount = await this.prisma.location.count({
       where: { parentId: id },
     });

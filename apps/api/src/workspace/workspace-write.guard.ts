@@ -15,24 +15,14 @@ import { RequestWithWorkspace } from './workspace-context';
  * surfaced as a 403 by `@CurrentWorkspace()` once the handler's parameters
  * are resolved, which runs after guards. Either path ends at the same 403.
  *
- * ⚠️ **Coverage is NOT complete as of EVT-40.** This guard is applied ONLY
- * to the Items and Photos modules' mutating routes — the task's explicit
- * scope. The following mutating (and, for the first one, also unscoped
- * READING) endpoints have NEITHER `WorkspaceWriteGuard` NOR any workspace
- * resolution at all, and remain reachable by a `viewer` and by a caller in
- * a different workspace, until EVT-41 lands:
- *   - `GET /api/locations/by-qr/:qr` (`LocationsService.findByQr`) — returns
- *     full location detail with zero workspace check (pre-existing).
- *   - `POST /api/shopping-list`, `POST /api/shopping-list/:id/restock`
- *     (`ShoppingListService`) — mutate `Item.quantity` on the same rows
- *     Items/Photos now protect, with no guard and no workspace scoping on
- *     the target item lookup.
- *   - `POST /api/projects/:id/backflush` and Projects' other mutating routes
- *     (`ProjectsService`) — same gap: consumes/adjusts Item stock with no
- *     workspace check.
- * Do NOT treat "viewer role" or "cross-workspace isolation" as a completed,
- * app-wide property until EVT-41 closes these — they hold ONLY for the
- * Items/Photos/storage/QR surfaces this task covers.
+ * Coverage as of EVT-41: applied to every mutating route in Items, Photos,
+ * Locations (create/rename/move/delete), Categories (create), Projects
+ * (create/update/delete/BOM lines/backflush), and Shopping List
+ * (create-manual/restock) — the full "viewer reads everything, 403 on every
+ * mutation" contract now holds app-wide across every module these two tasks
+ * cover. Tags has no mutating endpoint of its own (tags are only created
+ * transitively via `ItemsService`/`TagsService.upsertMany`, which is scoped
+ * to the caller's workspace).
  */
 @Injectable()
 export class WorkspaceWriteGuard implements CanActivate {

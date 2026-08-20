@@ -13,6 +13,7 @@ const ITEM_ID = '11111111-1111-1111-1111-111111111111';
 const ENTRY_ID = '22222222-2222-2222-2222-222222222222';
 const LOCATION_ID = '33333333-3333-3333-3333-333333333333';
 const USER_ID = '44444444-4444-4444-4444-444444444444';
+const WORKSPACE_ID = '55555555-5555-5555-5555-555555555555';
 
 function makeEntryRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -44,7 +45,7 @@ function makeTxMock() {
 function makePrismaMock() {
   const tx = makeTxMock();
   return {
-    item: { findUnique: jest.fn() },
+    item: { findFirst: jest.fn() },
     shoppingListEntry: {
       findMany: jest.fn(),
       findFirst: jest.fn(),
@@ -89,15 +90,15 @@ describe('ShoppingListService', () => {
   // =========================================================================
 
   describe('listOpen', () => {
-    it('lists open entries, oldest first', async () => {
+    it('lists open entries, oldest first, scoped to workspaceId (EVT-41)', async () => {
       const rows = [makeEntryRow()];
       prismaMock.shoppingListEntry.findMany.mockResolvedValue(rows);
 
-      const result = await service.listOpen();
+      const result = await service.listOpen(WORKSPACE_ID);
 
       expect(prismaMock.shoppingListEntry.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { status: 'open' },
+          where: { status: 'open', workspaceId: WORKSPACE_ID },
           orderBy: { createdAt: 'asc' },
         }),
       );
@@ -111,54 +112,64 @@ describe('ShoppingListService', () => {
 
   describe('createManual', () => {
     it('404s when the item does not exist', async () => {
-      prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.createManual(ITEM_ID)).rejects.toThrow(NotFoundException);
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.createManual(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
     });
 
-    it('creates a new open manual entry when none exists', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+    it('EVT-41: 404s (not distinguished from unknown) when the item belongs to a different workspace', async () => {
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.createManual(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: ITEM_ID, workspaceId: WORKSPACE_ID } }),
+      );
+    });
+
+    it('creates a new open manual entry when none exists, stamped with workspaceId', async () => {
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.shoppingListEntry.findFirst.mockResolvedValue(null);
       const created = makeEntryRow();
       prismaMock.shoppingListEntry.create.mockResolvedValue(created);
 
-      const result = await service.createManual(ITEM_ID);
+      const result = await service.createManual(ITEM_ID, WORKSPACE_ID);
 
       expect(prismaMock.shoppingListEntry.create).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { itemId: ITEM_ID, status: 'open', source: 'manual' } }),
+        expect.objectContaining({
+          data: { itemId: ITEM_ID, status: 'open', source: 'manual', workspaceId: WORKSPACE_ID },
+        }),
       );
       expect(result).toBe(created);
     });
 
     it('idempotency: returns the existing open entry instead of creating a duplicate', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       const existing = makeEntryRow({ source: 'low_stock' });
       prismaMock.shoppingListEntry.findFirst.mockResolvedValue(existing);
 
-      const result = await service.createManual(ITEM_ID);
+      const result = await service.createManual(ITEM_ID, WORKSPACE_ID);
 
       expect(prismaMock.shoppingListEntry.create).not.toHaveBeenCalled();
       expect(result).toBe(existing);
     });
 
     it('recovers from a lost create race (P2002) by returning the winning entry', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.shoppingListEntry.findFirst
         .mockResolvedValueOnce(null) // pre-check: none yet
         .mockResolvedValueOnce(makeEntryRow({ source: 'low_stock' })); // post-conflict re-check
       prismaMock.shoppingListEntry.create.mockRejectedValue(makeUniqueViolation());
 
-      const result = await service.createManual(ITEM_ID);
+      const result = await service.createManual(ITEM_ID, WORKSPACE_ID);
 
       expect(result).toMatchObject({ id: ENTRY_ID, source: 'low_stock' });
     });
 
     it('rethrows a non-P2002 error from create', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID });
       prismaMock.shoppingListEntry.findFirst.mockResolvedValue(null);
       const otherError = new Error('connection reset');
       prismaMock.shoppingListEntry.create.mockRejectedValue(otherError);
 
-      await expect(service.createManual(ITEM_ID)).rejects.toThrow(otherError);
+      await expect(service.createManual(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(otherError);
     });
   });
 
@@ -168,12 +179,24 @@ describe('ShoppingListService', () => {
 
   describe('restock', () => {
     it('404s when the entry does not exist', async () => {
-      prismaMock.shoppingListEntry.findUnique.mockResolvedValue(null);
-      await expect(service.restock(ENTRY_ID, 10, USER_ID)).rejects.toThrow(NotFoundException);
+      prismaMock.shoppingListEntry.findFirst.mockResolvedValue(null);
+      await expect(service.restock(ENTRY_ID, 10, WORKSPACE_ID, USER_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('EVT-41: 404s (not distinguished from unknown) when the entry belongs to a different workspace', async () => {
+      prismaMock.shoppingListEntry.findFirst.mockResolvedValue(null);
+      await expect(service.restock(ENTRY_ID, 10, WORKSPACE_ID, USER_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prismaMock.shoppingListEntry.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: ENTRY_ID, workspaceId: WORKSPACE_ID } }),
+      );
     });
 
     it('409s when the entry is already resolved (loses the atomic close race)', async () => {
-      prismaMock.shoppingListEntry.findUnique.mockResolvedValue(
+      prismaMock.shoppingListEntry.findFirst.mockResolvedValue(
         makeEntryRow({ status: 'done', item: { id: ITEM_ID, quantity: 2, locationId: null } }),
       );
       // Round-2 review fix: "already resolved" is now detected by the
@@ -182,12 +205,14 @@ describe('ShoppingListService', () => {
       // `status` field, which is TOCTOU-prone.
       prismaMock.__tx.shoppingListEntry.updateMany.mockResolvedValue({ count: 0 });
 
-      await expect(service.restock(ENTRY_ID, 10, USER_ID)).rejects.toThrow(ConflictException);
+      await expect(service.restock(ENTRY_ID, 10, WORKSPACE_ID, USER_ID)).rejects.toThrow(
+        ConflictException,
+      );
       expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
     });
 
     it('records an "add" movement for the delta and closes the entry, in one transaction', async () => {
-      prismaMock.shoppingListEntry.findUnique.mockResolvedValue(
+      prismaMock.shoppingListEntry.findFirst.mockResolvedValue(
         makeEntryRow({ item: { id: ITEM_ID, quantity: 2, locationId: LOCATION_ID } }),
       );
       prismaMock.__tx.shoppingListEntry.updateMany.mockResolvedValue({ count: 1 });
@@ -195,7 +220,7 @@ describe('ShoppingListService', () => {
       const closed = makeEntryRow({ status: 'done', resolvedAt: new Date() });
       prismaMock.__tx.shoppingListEntry.findUniqueOrThrow.mockResolvedValue(closed);
 
-      const result = await service.restock(ENTRY_ID, 10, USER_ID);
+      const result = await service.restock(ENTRY_ID, 10, WORKSPACE_ID, USER_ID);
 
       expect(prismaMock.$transaction).toHaveBeenCalled();
       // The entry is closed BEFORE recordMovement runs (round-2 review,

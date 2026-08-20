@@ -159,9 +159,12 @@ export class ProjectsService {
   // list — GET /api/projects?status=
   // -------------------------------------------------------------------------
 
-  /** List projects, newest first, each annotated with its BOM line count. */
-  async list(query: ListProjectsQueryDto) {
-    const where: Prisma.ProjectWhereInput = {};
+  /**
+   * List projects, newest first, each annotated with its BOM line count.
+   * Scoped to `workspaceId` (EVT-41).
+   */
+  async list(query: ListProjectsQueryDto, workspaceId: string) {
+    const where: Prisma.ProjectWhereInput = { workspaceId };
     if (query.status) {
       where.status = query.status;
     }
@@ -186,10 +189,11 @@ export class ProjectsService {
    * Full project detail: BOM lines with their linked item summary, plus the
    * `consumed` backflush history (EVT-28 AC 5) — every `build` movement
    * linked to this project, newest first, empty until first backflushed.
+   * 404 for a foreign-workspace id, same as an unknown id (EVT-41).
    */
-  async findOne(id: string) {
-    const project = await this.prisma.project.findUnique({
-      where: { id },
+  async findOne(id: string, workspaceId: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { id, workspaceId },
       include: PROJECT_DETAIL_INCLUDE,
     });
     if (!project) {
@@ -202,7 +206,8 @@ export class ProjectsService {
   // create — POST /api/projects
   // -------------------------------------------------------------------------
 
-  async create(dto: CreateProjectDto) {
+  /** `workspaceId` (EVT-41) is stamped explicitly on the created row — same rationale as `ItemsService.create`. */
+  async create(dto: CreateProjectDto, workspaceId: string) {
     return this.prisma.project.create({
       data: {
         name: dto.name,
@@ -211,6 +216,7 @@ export class ProjectsService {
         notes: dto.notes,
         startedAt: dto.startedAt ? new Date(dto.startedAt) : undefined,
         completedAt: dto.completedAt ? new Date(dto.completedAt) : undefined,
+        workspaceId,
       },
     });
   }
@@ -219,8 +225,9 @@ export class ProjectsService {
   // update — PATCH /api/projects/:id
   // -------------------------------------------------------------------------
 
-  async update(id: string, dto: UpdateProjectDto) {
-    await this.assertProjectExists(id);
+  /** 404 for a foreign-workspace project, same as an unknown id (EVT-41). */
+  async update(id: string, dto: UpdateProjectDto, workspaceId: string) {
+    await this.assertProjectExists(id, workspaceId);
 
     const { startedAt, completedAt, ...scalarData } = dto;
 
@@ -241,8 +248,15 @@ export class ProjectsService {
   // remove — DELETE /api/projects/:id
   // -------------------------------------------------------------------------
 
-  /** Deletes a project. BOM lines cascade per schema (`BomLine.projectId onDelete: Cascade`). */
-  async remove(id: string): Promise<void> {
+  /**
+   * Deletes a project. BOM lines cascade per schema (`BomLine.projectId
+   * onDelete: Cascade`). 404 for a foreign-workspace project, same as an
+   * unknown id (EVT-41) — the workspace-scoped existence check runs BEFORE
+   * the delete, so a foreign-workspace id can never even reach the raw
+   * `.delete()` call.
+   */
+  async remove(id: string, workspaceId: string): Promise<void> {
+    await this.assertProjectExists(id, workspaceId);
     try {
       await this.prisma.project.delete({ where: { id } });
     } catch (err) {
@@ -260,16 +274,21 @@ export class ProjectsService {
   /**
    * Adds a BOM line, either linked to an inventory item (its `name` is
    * copied, ignoring any `name` also present in the body) or free text.
+   * 404 for a foreign-workspace project (EVT-41). `dto.itemId` must belong
+   * to the same `workspaceId` — a foreign-workspace item is rejected with
+   * 404 (never distinguished from an unknown one), same "no cross-tenant
+   * reference smuggling" posture as `ItemsService.assertLocationInWorkspace`
+   * (EVT-41 AC 3).
    */
-  async addBomLine(projectId: string, dto: CreateBomLineDto) {
-    await this.assertProjectExists(projectId);
+  async addBomLine(projectId: string, dto: CreateBomLineDto, workspaceId: string) {
+    await this.assertProjectExists(projectId, workspaceId);
 
     let name = dto.name;
     let itemId: string | null = null;
 
     if (dto.itemId) {
-      const item = await this.prisma.item.findUnique({
-        where: { id: dto.itemId },
+      const item = await this.prisma.item.findFirst({
+        where: { id: dto.itemId, workspaceId },
         select: { id: true, name: true },
       });
       if (!item) {
@@ -298,14 +317,27 @@ export class ProjectsService {
   // updateBomLine — PATCH /api/projects/:id/bom/:lineId
   // -------------------------------------------------------------------------
 
-  async updateBomLine(projectId: string, lineId: string, dto: UpdateBomLineDto) {
+  /**
+   * 404 for a foreign-workspace project (EVT-41) — checked first, so the
+   * subsequent `assertBomLineExists` (which only re-checks
+   * `line.projectId === projectId`) transitively inherits the workspace
+   * scoping. A newly-linked `dto.itemId` must belong to the same
+   * `workspaceId`, same rationale as `addBomLine` (EVT-41 AC 3).
+   */
+  async updateBomLine(
+    projectId: string,
+    lineId: string,
+    dto: UpdateBomLineDto,
+    workspaceId: string,
+  ) {
+    await this.assertProjectExists(projectId, workspaceId);
     await this.assertBomLineExists(projectId, lineId);
 
     let name = dto.name;
 
     if (dto.itemId) {
-      const item = await this.prisma.item.findUnique({
-        where: { id: dto.itemId },
+      const item = await this.prisma.item.findFirst({
+        where: { id: dto.itemId, workspaceId },
         select: { id: true, name: true },
       });
       if (!item) {
@@ -332,7 +364,9 @@ export class ProjectsService {
   // removeBomLine — DELETE /api/projects/:id/bom/:lineId
   // -------------------------------------------------------------------------
 
-  async removeBomLine(projectId: string, lineId: string): Promise<void> {
+  /** 404 for a foreign-workspace project (EVT-41) — see `updateBomLine`'s doc comment. */
+  async removeBomLine(projectId: string, lineId: string, workspaceId: string): Promise<void> {
+    await this.assertProjectExists(projectId, workspaceId);
     await this.assertBomLineExists(projectId, lineId);
     await this.prisma.bomLine.delete({ where: { id: lineId } });
   }
@@ -373,11 +407,12 @@ export class ProjectsService {
    * allocation outcome.
    *
    * Read-only, point-in-time — see `ProjectAvailability.asOf`'s doc comment
-   * for the staleness contract (EVT-29 risk).
+   * for the staleness contract (EVT-29 risk). 404 for a foreign-workspace
+   * project, same as an unknown id (EVT-41).
    */
-  async availability(id: string): Promise<ProjectAvailability> {
-    const project = await this.prisma.project.findUnique({
-      where: { id },
+  async availability(id: string, workspaceId: string): Promise<ProjectAvailability> {
+    const project = await this.prisma.project.findFirst({
+      where: { id, workspaceId },
       include: {
         bomLines: {
           orderBy: { createdAt: 'asc' },
@@ -455,11 +490,12 @@ export class ProjectsService {
    * Builds the pre-confirmation backflush screen (AC 1): every item-linked
    * BOM line with its current on-hand and a suggested (on-hand-clamped)
    * consume quantity, shortages flagged; free-text lines listed as
-   * `skipped: true`. Read-only — writes nothing.
+   * `skipped: true`. Read-only — writes nothing. 404 for a foreign-workspace
+   * project, same as an unknown id (EVT-41).
    */
-  async previewBackflush(id: string): Promise<BackflushPreview> {
-    const project = await this.prisma.project.findUnique({
-      where: { id },
+  async previewBackflush(id: string, workspaceId: string): Promise<BackflushPreview> {
+    const project = await this.prisma.project.findFirst({
+      where: { id, workspaceId },
       include: {
         bomLines: {
           orderBy: { createdAt: 'asc' },
@@ -537,13 +573,17 @@ export class ProjectsService {
    * 2) — the previous shape counted before the transaction opened, leaving a
    * TOCTOU window where two concurrent first-time confirms could both
    * observe zero existing `build` movements and both proceed.
+   *
+   * 404 for a foreign-workspace project, same as an unknown id (EVT-41) —
+   * checked via the initial `findFirst` below; every BOM line/movement this
+   * writes inherits scope transitively from that already-verified project.
    */
   // Return type is inferred (rather than annotated) so `toProjectDetail`'s
   // generic resolves against the actual `tx.project.update(...)` payload
   // below, not its unconstrained default — see that helper's doc comment.
-  async backflush(id: string, dto: BackflushDto, createdById?: string) {
-    const project = await this.prisma.project.findUnique({
-      where: { id },
+  async backflush(id: string, dto: BackflushDto, workspaceId: string, createdById?: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { id, workspaceId },
       include: { bomLines: true },
     });
     if (!project) {
@@ -628,14 +668,24 @@ export class ProjectsService {
   // internal helpers
   // -------------------------------------------------------------------------
 
-  private async assertProjectExists(id: string): Promise<void> {
-    const project = await this.prisma.project.findUnique({ where: { id } });
+  /** 404 for a foreign-workspace project, same as an unknown id (EVT-41). */
+  private async assertProjectExists(id: string, workspaceId: string): Promise<void> {
+    const project = await this.prisma.project.findFirst({ where: { id, workspaceId } });
     if (!project) {
       throw new NotFoundException(`Project ${id} not found`);
     }
   }
 
-  /** Verifies the BOM line exists AND belongs to the given project. */
+  /**
+   * Verifies the BOM line exists AND belongs to the given project. Every
+   * caller (EVT-41) invokes `assertProjectExists(projectId, workspaceId)`
+   * FIRST, so `projectId` itself is already workspace-verified by the time
+   * this runs — a line whose `line.projectId !== projectId` 404s here
+   * regardless of which workspace it actually belongs to, so no separate
+   * `workspaceId` check is needed on `BomLine` itself (which, per the
+   * schema's doc comment, deliberately carries no `workspaceId` column of
+   * its own — it inherits scope transitively via `Project`).
+   */
   private async assertBomLineExists(projectId: string, lineId: string): Promise<void> {
     const line = await this.prisma.bomLine.findUnique({ where: { id: lineId } });
     if (!line || line.projectId !== projectId) {
