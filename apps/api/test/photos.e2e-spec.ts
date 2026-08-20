@@ -18,7 +18,7 @@
  * verified operationally, not here.
  */
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
@@ -28,7 +28,7 @@ import sharp from 'sharp';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { STORAGE_DIR, STORAGE_URL_PREFIX } from '../src/photos/photos.service';
+import { STORAGE_DIR } from '../src/photos/photos.service';
 import { AuthedHttp, createAuthedHttp } from './e2e-auth-helper';
 
 // ---------------------------------------------------------------------------
@@ -80,9 +80,14 @@ describe('Photos API (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication<NestExpressApplication>();
-    app.setGlobalPrefix('api');
-    // Mirror src/main.ts's bootstrap() — JwtAuthGuard reads `req.cookies`,
-    // which only exists once this middleware has run (EVT-14).
+    // Mirror src/main.ts's bootstrap() exactly — GET /storage/:filename
+    // (EVT-40 StorageController) stays outside the /api prefix but is a
+    // real, fully-guarded Nest route now, not `express.static` middleware.
+    app.setGlobalPrefix('api', {
+      exclude: [{ path: 'storage/:filename', method: RequestMethod.GET }],
+    });
+    // JwtAuthGuard reads `req.cookies`, which only exists once this
+    // middleware has run (EVT-14).
     app.use(cookieParser());
     app.useGlobalPipes(
       new ValidationPipe({
@@ -91,13 +96,6 @@ describe('Photos API (e2e)', () => {
         transform: true,
       }),
     );
-    // Mirror the static-asset wiring done in src/main.ts's bootstrap().
-    (app as NestExpressApplication).useStaticAssets(STORAGE_DIR, {
-      prefix: STORAGE_URL_PREFIX,
-      setHeaders: (res) => {
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-      },
-    });
     await app.init();
 
     prisma = moduleFixture.get<PrismaService>(PrismaService);

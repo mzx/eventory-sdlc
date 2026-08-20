@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { defaultWorkspaceTagWhere } from '../workspace/default-workspace';
 
 export interface TagWithCount {
   id: string;
@@ -32,30 +31,35 @@ export class TagsService {
   }
 
   /**
-   * Upsert a single tag by name. Returns the existing record if already present.
-   * Called by ItemsService (EVT-3) when creating/updating an item's tag list.
+   * Upsert a single tag by name, scoped to `workspaceId`. Returns the
+   * existing record if already present. Called by ItemsService (EVT-3) when
+   * creating/updating an item's tag list.
    *
    * `Tag.name` uniqueness was re-scoped to `@@unique([workspaceId, name])`
    * by EVT-39, so the lookup needs an explicit `workspaceId` to form the
-   * compound key — see `defaultWorkspaceTagWhere`'s doc comment. `create`
-   * itself doesn't need `workspaceId` spelled out — the column's schema
-   * default fills it — but including it keeps the row the upsert reads and
-   * the row it writes unambiguously the same one.
+   * compound key. `workspaceId` is now the caller's ACTIVE tenant context
+   * (EVT-40) rather than always the Default Workspace — every tag this
+   * upserts belongs to the same workspace as the item it's being attached
+   * to, per `ItemsService.create`/`.update`.
    */
-  async upsertByName(name: string): Promise<{ id: string; name: string; color: string | null }> {
+  async upsertByName(
+    name: string,
+    workspaceId: string,
+  ): Promise<{ id: string; name: string; color: string | null }> {
     return this.prisma.tag.upsert({
-      where: await defaultWorkspaceTagWhere(this.prisma, name),
+      where: { workspaceId_name: { workspaceId, name } },
       update: {},
-      create: { name },
+      create: { name, workspaceId },
     });
   }
 
   /**
-   * Upsert multiple tags by name in parallel; returns an array of tag IDs in
-   * the same order as the input names. Convenience wrapper for ItemsService.
+   * Upsert multiple tags by name in parallel, scoped to `workspaceId`;
+   * returns an array of tag IDs in the same order as the input names.
+   * Convenience wrapper for ItemsService.
    */
-  async upsertMany(names: string[]): Promise<string[]> {
-    const tags = await Promise.all(names.map((n) => this.upsertByName(n)));
+  async upsertMany(names: string[], workspaceId: string): Promise<string[]> {
+    const tags = await Promise.all(names.map((n) => this.upsertByName(n, workspaceId)));
     return tags.map((t) => t.id);
   }
 }

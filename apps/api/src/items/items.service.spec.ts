@@ -25,6 +25,9 @@ const LOC_ID = '22222222-2222-2222-2222-222222222222';
 const TAG_ID = '33333333-3333-3333-3333-333333333333';
 const QR_ITEM = 'qr-item-token';
 const QR_LOC = 'qr-loc-token';
+const WORKSPACE_ID = '77777777-7777-7777-7777-777777777777';
+const OTHER_WORKSPACE_ID = '88888888-8888-8888-8888-888888888888';
+const USER_FOR_QR = '99999999-9999-9999-9999-999999999999';
 
 function makeItemRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -38,6 +41,7 @@ function makeItemRow(overrides: Record<string, unknown> = {}) {
     locationId: LOC_ID,
     categoryId: null,
     primaryPhotoId: null,
+    workspaceId: WORKSPACE_ID,
     createdAt: new Date('2026-01-01'),
     updatedAt: new Date('2026-01-01'),
     tags: [
@@ -64,6 +68,7 @@ function makeLocationRow(overrides: Record<string, unknown> = {}) {
     path: 'garage',
     parentId: null,
     notes: null,
+    workspaceId: WORKSPACE_ID,
     ...overrides,
   };
 }
@@ -73,12 +78,25 @@ function makePrismaMock() {
     item: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       findUniqueOrThrow: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       delete: jest.fn(),
     },
     location: {
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+    },
+    // EVT-40 write-path workspace-consistency guards.
+    category: {
+      findFirst: jest.fn(),
+    },
+    photo: {
+      count: jest.fn(),
+    },
+    // EVT-40 QR scan-landing membership check.
+    workspaceMember: {
       findUnique: jest.fn(),
     },
     $queryRaw: jest.fn(),
@@ -128,6 +146,20 @@ describe('ItemsService', () => {
     aiMock = makeAiServiceMock();
     stockMovementsMock = makeStockMovementsMock();
 
+    // EVT-40 write-path workspace-consistency guards default to "found /
+    // in-workspace" — the handful of tests that exercise the foreign-
+    // reference 404 paths override these per-test.
+    prismaMock.location.findFirst.mockResolvedValue({ id: LOC_ID });
+    prismaMock.category.findFirst.mockResolvedValue({ id: 'category-1' });
+    // `assertPhotosInWorkspace` compares `count !== photoIds.length` — this
+    // default makes that check pass for ANY photoIds array by construction
+    // (count always equals what was queried), so tests that pass photoIds
+    // incidentally (not to test workspace scoping itself) don't need their
+    // own mock.
+    prismaMock.photo.count.mockImplementation(
+      async (args: { where: { id: { in: string[] } } }) => args.where.id.in.length,
+    );
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ItemsService,
@@ -150,17 +182,20 @@ describe('ItemsService', () => {
       const rows = [makeItemRow()];
       prismaMock.item.findMany.mockResolvedValue(rows);
 
-      const result = await service.list({});
+      const result = await service.list({}, WORKSPACE_ID);
 
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ orderBy: { createdAt: 'desc' } }),
+        expect.objectContaining({
+          where: { workspaceId: WORKSPACE_ID },
+          orderBy: { createdAt: 'desc' },
+        }),
       );
       expect(result).toBe(rows);
     });
 
     it('returns an empty array when no items exist', async () => {
       prismaMock.item.findMany.mockResolvedValue([]);
-      expect(await service.list({})).toEqual([]);
+      expect(await service.list({}, WORKSPACE_ID)).toEqual([]);
     });
 
     // -----------------------------------------------------------------------
@@ -171,11 +206,11 @@ describe('ItemsService', () => {
       prismaMock.$queryRaw.mockResolvedValue([{ id: ITEM_ID }]);
       prismaMock.item.findMany.mockResolvedValue([makeItemRow()]);
 
-      const result = await service.list({ search: 'drill' });
+      const result = await service.list({ search: 'drill' }, WORKSPACE_ID);
 
       expect(prismaMock.$queryRaw).toHaveBeenCalled();
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: { in: [ITEM_ID] } } }),
+        expect.objectContaining({ where: { workspaceId: WORKSPACE_ID, id: { in: [ITEM_ID] } } }),
       );
       expect(result).toHaveLength(1);
     });
@@ -184,10 +219,10 @@ describe('ItemsService', () => {
       prismaMock.$queryRaw.mockResolvedValue([]);
       prismaMock.item.findMany.mockResolvedValue([]);
 
-      const result = await service.list({ search: 'nonexistent-xyz' });
+      const result = await service.list({ search: 'nonexistent-xyz' }, WORKSPACE_ID);
 
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: { in: [] } } }),
+        expect.objectContaining({ where: { workspaceId: WORKSPACE_ID, id: { in: [] } } }),
       );
       expect(result).toHaveLength(0);
     });
@@ -201,13 +236,13 @@ describe('ItemsService', () => {
         makeItemRow({ properties: { voltage: '18V', brand: 'Makita' } }),
       ]);
 
-      const result = await service.list({ search: '18V' });
+      const result = await service.list({ search: '18V' }, WORKSPACE_ID);
 
       // $queryRaw must have been called (searches JSONB)
       expect(prismaMock.$queryRaw).toHaveBeenCalled();
       // findMany must receive the IDs from $queryRaw
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: { in: [ITEM_ID] } } }),
+        expect.objectContaining({ where: { workspaceId: WORKSPACE_ID, id: { in: [ITEM_ID] } } }),
       );
       expect(result[0]).toMatchObject({ properties: { voltage: '18V', brand: 'Makita' } });
     });
@@ -218,10 +253,23 @@ describe('ItemsService', () => {
       prismaMock.$queryRaw.mockResolvedValue([]);
       prismaMock.item.findMany.mockResolvedValue([]);
 
-      await service.list({ search: '50%_off\\path' });
+      await service.list({ search: '50%_off\\path' }, WORKSPACE_ID);
 
-      const [, patternArg] = prismaMock.$queryRaw.mock.calls[0];
-      expect(patternArg).toBe('%50\\%\\_off\\\\path%');
+      const queryArgs = prismaMock.$queryRaw.mock.calls[0];
+      expect(queryArgs).toContain('%50\\%\\_off\\\\path%');
+    });
+
+    // EVT-40 — the raw search query itself is scoped, not just the outer
+    // `where.workspaceId` findMany filter (defense in depth: this is what
+    // the review round explicitly calls "any unscoped query is critical").
+    it('EVT-40: scopes the raw search query to workspaceId', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([]);
+      prismaMock.item.findMany.mockResolvedValue([]);
+
+      await service.list({ search: 'drill' }, WORKSPACE_ID);
+
+      const queryArgs = prismaMock.$queryRaw.mock.calls[0];
+      expect(queryArgs).toContain(WORKSPACE_ID);
     });
 
     // -----------------------------------------------------------------------
@@ -231,18 +279,21 @@ describe('ItemsService', () => {
     it('filter by tag — passes correct where clause to findMany', async () => {
       prismaMock.item.findMany.mockResolvedValue([makeItemRow()]);
 
-      await service.list({ tag: 'power-tool' });
+      await service.list({ tag: 'power-tool' }, WORKSPACE_ID);
 
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { tags: { some: { tag: { name: 'power-tool' } } } },
+          where: {
+            workspaceId: WORKSPACE_ID,
+            tags: { some: { tag: { name: 'power-tool' } } },
+          },
         }),
       );
     });
 
     it('filter by tag — returns empty when no items have that tag', async () => {
       prismaMock.item.findMany.mockResolvedValue([]);
-      const result = await service.list({ tag: 'nonexistent-tag' });
+      const result = await service.list({ tag: 'nonexistent-tag' }, WORKSPACE_ID);
       expect(result).toEqual([]);
     });
 
@@ -250,18 +301,19 @@ describe('ItemsService', () => {
     // locationId subtree filter
     // -----------------------------------------------------------------------
 
-    it('filter by locationId — looks up location path then queries subtree', async () => {
-      prismaMock.location.findUnique.mockResolvedValue({ id: LOC_ID, path: 'garage' });
+    it('filter by locationId — looks up location path (scoped to workspace) then queries subtree', async () => {
+      prismaMock.location.findFirst.mockResolvedValue({ id: LOC_ID, path: 'garage' });
       prismaMock.item.findMany.mockResolvedValue([makeItemRow()]);
 
-      await service.list({ locationId: LOC_ID });
+      await service.list({ locationId: LOC_ID }, WORKSPACE_ID);
 
-      expect(prismaMock.location.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: LOC_ID } }),
+      expect(prismaMock.location.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: LOC_ID, workspaceId: WORKSPACE_ID } }),
       );
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
+            workspaceId: WORKSPACE_ID,
             location: {
               OR: [{ id: LOC_ID }, { path: { startsWith: 'garage.' } }],
             },
@@ -271,10 +323,18 @@ describe('ItemsService', () => {
     });
 
     it('filter by locationId — returns empty array when locationId does not exist', async () => {
-      prismaMock.location.findUnique.mockResolvedValue(null);
-      const result = await service.list({ locationId: LOC_ID });
+      prismaMock.location.findFirst.mockResolvedValue(null);
+      const result = await service.list({ locationId: LOC_ID }, WORKSPACE_ID);
       expect(result).toEqual([]);
       expect(prismaMock.item.findMany).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40: returns empty array (not a leak) when locationId belongs to a different workspace', async () => {
+      // findFirst is scoped by workspaceId, so a foreign location's row
+      // simply never matches — same "unknown locationId" outcome as above.
+      prismaMock.location.findFirst.mockResolvedValue(null);
+      const result = await service.list({ locationId: LOC_ID }, OTHER_WORKSPACE_ID);
+      expect(result).toEqual([]);
     });
   });
 
@@ -328,7 +388,7 @@ describe('ItemsService', () => {
       const weakMatch = makeItemRow({ id: OTHER_ID, name: 'Assorted hex bolts' });
       prismaMock.item.findMany.mockResolvedValue([weakMatch, bestMatch]);
 
-      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(aiMock.analyzePhoto).toHaveBeenCalledWith(FILE_BUFFER, MIME_TYPE);
       expect(result.analysis).toBe(analysis);
@@ -351,7 +411,7 @@ describe('ItemsService', () => {
       aiMock.analyzePhoto.mockResolvedValue(analysis);
       prismaMock.$queryRaw.mockResolvedValue([]);
 
-      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(result).toEqual({ analysis, matches: [] });
       expect(prismaMock.item.findMany).not.toHaveBeenCalled();
@@ -362,7 +422,7 @@ describe('ItemsService', () => {
       const stub = stubAnalysis();
       aiMock.analyzePhoto.mockResolvedValue(stub);
 
-      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(result).toEqual({ analysis: stub, matches: [] });
       expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
@@ -379,7 +439,7 @@ describe('ItemsService', () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([hitRow(ITEM_ID, 'power-tool')]);
       prismaMock.item.findMany.mockResolvedValue([makeItemRow()]);
 
-      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
       expect(result.matches).toHaveLength(1);
@@ -400,7 +460,7 @@ describe('ItemsService', () => {
       );
       prismaMock.$queryRaw.mockResolvedValueOnce([]);
 
-      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1);
       const [, patternsArg] = prismaMock.$queryRaw.mock.calls[0] as [unknown, { values: string[] }];
@@ -413,7 +473,7 @@ describe('ItemsService', () => {
       );
       prismaMock.$queryRaw.mockResolvedValueOnce([]);
 
-      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       const [, patternsArg] = prismaMock.$queryRaw.mock.calls[0] as [unknown, { values: string[] }];
       // A raw '%' would match everything unescaped; escaped it only matches
@@ -427,7 +487,7 @@ describe('ItemsService', () => {
       );
       prismaMock.$queryRaw.mockResolvedValueOnce([]);
 
-      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       const [, patternsArg] = prismaMock.$queryRaw.mock.calls[0] as [unknown, { values: string[] }];
       expect(patternsArg.values).toEqual(['%\\_%']);
@@ -460,7 +520,7 @@ describe('ItemsService', () => {
         .map((r) => r.id);
       prismaMock.item.findMany.mockResolvedValue(expectedIds.map((id) => makeItemRow({ id })));
 
-      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: { in: expectedIds } } }),
@@ -494,9 +554,23 @@ describe('ItemsService', () => {
         makeItemRow({ id: NEWER_ID }),
       ]);
 
-      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE);
+      const result = await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
 
       expect(result.matches.map((m) => m.id)).toEqual([NEWER_ID, OLDER_ID]);
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-40 — the batched matching query is scoped to workspaceId
+    // -----------------------------------------------------------------------
+
+    it('EVT-40: scopes the batched matching query to workspaceId', async () => {
+      aiMock.analyzePhoto.mockResolvedValue(analysisWith());
+      prismaMock.$queryRaw.mockResolvedValueOnce([]);
+
+      await service.searchByPhoto(FILE_BUFFER, MIME_TYPE, WORKSPACE_ID);
+
+      const calledWith = prismaMock.$queryRaw.mock.calls[0];
+      expect(calledWith).toContain(WORKSPACE_ID);
     });
   });
 
@@ -584,79 +658,137 @@ describe('ItemsService', () => {
   // =========================================================================
 
   describe('findById', () => {
-    it('returns the item when found', async () => {
+    it("returns the item when found in the caller's workspace", async () => {
       const detail = makeItemDetail();
-      prismaMock.item.findUnique.mockResolvedValue(detail);
+      prismaMock.item.findFirst.mockResolvedValue(detail);
 
-      const result = await service.findById(ITEM_ID);
+      const result = await service.findById(ITEM_ID, WORKSPACE_ID);
       expect(result).toBe(detail);
-      expect(prismaMock.item.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: ITEM_ID } }),
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: ITEM_ID, workspaceId: WORKSPACE_ID } }),
       );
     });
 
     it('throws NotFoundException when item does not exist', async () => {
-      prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.findById('bad-id')).rejects.toThrow(NotFoundException);
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.findById('bad-id', WORKSPACE_ID)).rejects.toThrow(NotFoundException);
     });
 
     it('includes the item id in the NotFoundException message', async () => {
-      prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.findById('bad-id')).rejects.toThrow(/bad-id/);
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.findById('bad-id', WORKSPACE_ID)).rejects.toThrow(/bad-id/);
+    });
+
+    it('EVT-40 AC 2: 404s for an item that exists but belongs to a different workspace', async () => {
+      // findFirst is scoped by workspaceId — a foreign item simply never
+      // matches, same "not found" outcome as a genuinely unknown id.
+      prismaMock.item.findFirst.mockResolvedValue(null);
+      await expect(service.findById(ITEM_ID, OTHER_WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
   // =========================================================================
-  // findByQr — AC 2
+  // findByQr — EVT-40 AC 4: QR scan-landing, membership-scoped (not the
+  // caller's currently-selected workspace)
   // =========================================================================
 
   describe('findByQr', () => {
-    it('AC2: returns { kind: "item", item } for an item QR token', async () => {
+    it('AC2/AC4: returns { kind: "item", item } for an item QR token when the caller is a member of its workspace', async () => {
       const detail = makeItemDetail({ qrCode: QR_ITEM });
       prismaMock.item.findUnique.mockResolvedValue(detail);
+      prismaMock.workspaceMember.findUnique.mockResolvedValue({ userId: USER_FOR_QR });
 
-      const result = await service.findByQr(QR_ITEM);
+      const result = await service.findByQr(QR_ITEM, USER_FOR_QR);
 
       expect(result.kind).toBe('item');
       expect(result.item).toBe(detail);
+      expect(prismaMock.workspaceMember.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { workspaceId_userId: { workspaceId: WORKSPACE_ID, userId: USER_FOR_QR } },
+        }),
+      );
     });
 
-    it('AC2: returns { kind: "location", location } for a location QR token', async () => {
+    it('AC2: returns { kind: "location", location } for a location QR token when the caller is a member', async () => {
       // Item lookup returns null; location lookup returns a location
       prismaMock.item.findUnique.mockResolvedValue(null);
-      const loc = makeLocationRow({ qrCode: QR_LOC });
+      const loc = makeLocationRow({ qrCode: QR_LOC, workspaceId: WORKSPACE_ID });
       prismaMock.location.findUnique.mockResolvedValue(loc);
+      prismaMock.workspaceMember.findUnique.mockResolvedValue({ userId: USER_FOR_QR });
 
-      const result = await service.findByQr(QR_LOC);
+      const result = await service.findByQr(QR_LOC, USER_FOR_QR);
 
       expect(result.kind).toBe('location');
-      expect((result as { kind: 'location'; location: typeof loc }).location).toBe(loc);
+      const { id, name, path, parentId, notes } = loc;
+      const expectedLocation = { id, name, path, parentId, notes };
+      expect((result as { kind: 'location'; location: typeof expectedLocation }).location).toEqual(
+        expectedLocation,
+      );
     });
 
     it('AC2: throws NotFoundException for an unknown QR token (404)', async () => {
       prismaMock.item.findUnique.mockResolvedValue(null);
       prismaMock.location.findUnique.mockResolvedValue(null);
 
-      await expect(service.findByQr('unknown-token')).rejects.toThrow(NotFoundException);
+      await expect(service.findByQr('unknown-token', USER_FOR_QR)).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('AC2: NotFoundException message mentions the unknown token', async () => {
       prismaMock.item.findUnique.mockResolvedValue(null);
       prismaMock.location.findUnique.mockResolvedValue(null);
 
-      await expect(service.findByQr('mystery-qr')).rejects.toThrow(/mystery-qr/);
+      await expect(service.findByQr('mystery-qr', USER_FOR_QR)).rejects.toThrow(/mystery-qr/);
     });
 
     it('checks item table before location table', async () => {
       const detail = makeItemDetail({ qrCode: QR_ITEM });
       prismaMock.item.findUnique.mockResolvedValue(detail);
+      prismaMock.workspaceMember.findUnique.mockResolvedValue({ userId: USER_FOR_QR });
       // location.findUnique should NOT be called when item is found
       prismaMock.location.findUnique.mockResolvedValue(makeLocationRow());
 
-      const result = await service.findByQr(QR_ITEM);
+      const result = await service.findByQr(QR_ITEM, USER_FOR_QR);
 
       expect(result.kind).toBe('item');
       expect(prismaMock.location.findUnique).not.toHaveBeenCalled();
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-40 AC 4 — neutral 404 for a caller who is NOT a member of the
+    // resolved resource's workspace (never distinguishes "wrong workspace"
+    // from "doesn't exist").
+    // -----------------------------------------------------------------------
+
+    it("AC4: a non-member of the item's workspace gets the same neutral 404 as an unknown token", async () => {
+      const detail = makeItemDetail({ qrCode: QR_ITEM });
+      prismaMock.item.findUnique.mockResolvedValue(detail);
+      prismaMock.workspaceMember.findUnique.mockResolvedValue(null);
+
+      await expect(service.findByQr(QR_ITEM, 'non-member-user')).rejects.toThrow(NotFoundException);
+    });
+
+    it("AC4: a non-member of the location's workspace gets the same neutral 404 as an unknown token", async () => {
+      prismaMock.item.findUnique.mockResolvedValue(null);
+      prismaMock.location.findUnique.mockResolvedValue(makeLocationRow({ qrCode: QR_LOC }));
+      prismaMock.workspaceMember.findUnique.mockResolvedValue(null);
+
+      await expect(service.findByQr(QR_LOC, 'non-member-user')).rejects.toThrow(NotFoundException);
+    });
+
+    it("AC4: does NOT scope the token lookup itself by the caller's current workspace — the raw qrCode lookup stays global", async () => {
+      const detail = makeItemDetail({ qrCode: QR_ITEM });
+      prismaMock.item.findUnique.mockResolvedValue(detail);
+      prismaMock.workspaceMember.findUnique.mockResolvedValue({ userId: USER_FOR_QR });
+
+      await service.findByQr(QR_ITEM, USER_FOR_QR);
+
+      expect(prismaMock.item.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { qrCode: QR_ITEM } }),
+      );
     });
   });
 
@@ -673,19 +805,24 @@ describe('ItemsService', () => {
       });
     }
 
-    it('creates the row with quantity: 0 and returns the recordMovement-stocked detail', async () => {
+    it('creates the row with quantity: 0, stamped with workspaceId, and returns the recordMovement-stocked detail', async () => {
       const detail = makeItemDetail({ quantity: 1 });
       prismaMock.item.create.mockResolvedValue(makeItemRow({ quantity: 0, locationId: LOC_ID }));
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(detail);
 
-      const result = await service.create({ name: 'Cordless Drill' });
+      const result = await service.create({ name: 'Cordless Drill' }, undefined, WORKSPACE_ID);
 
       // EVT-25: quantity is never written directly at create time — the row
       // starts at 0 and recordMovement brings it up to the requested value.
+      // EVT-40: workspaceId is stamped explicitly, not left to the schema default.
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ name: 'Cordless Drill', quantity: 0 }),
+          data: expect.objectContaining({
+            name: 'Cordless Drill',
+            quantity: 0,
+            workspaceId: WORKSPACE_ID,
+          }),
         }),
       );
       expect(result).toBe(detail);
@@ -697,7 +834,7 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(makeItemDetail());
 
-      await service.create({ name: 'Drill' });
+      await service.create({ name: 'Drill' }, undefined, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock, // tx === prismaMock, since $transaction invokes the callback with itself
@@ -707,6 +844,7 @@ describe('ItemsService', () => {
           delta: 1,
           toLocationId: LOC_ID,
           note: 'Initial intake',
+          workspaceId: WORKSPACE_ID,
         }),
         expect.anything(),
       );
@@ -718,7 +856,7 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(makeItemDetail({ quantity: 5 }));
 
-      await service.create({ name: 'Drill', quantity: 5 });
+      await service.create({ name: 'Drill', quantity: 5 }, undefined, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         expect.anything(),
@@ -732,21 +870,21 @@ describe('ItemsService', () => {
       prismaMock.item.create.mockResolvedValue(created);
       tagsMock.upsertMany.mockResolvedValue([]);
 
-      const result = await service.create({ name: 'Drill', quantity: 0 });
+      const result = await service.create({ name: 'Drill', quantity: 0 }, undefined, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
       expect(result).toBe(created);
     });
 
-    it('upserts tags and connects them to the item', async () => {
+    it('upserts tags (scoped to the workspace) and connects them to the item', async () => {
       tagsMock.upsertMany.mockResolvedValue([TAG_ID]);
       const created = makeItemRow({ quantity: 0 });
       prismaMock.item.create.mockResolvedValue(created);
       stubRecordMovement(makeItemDetail());
 
-      await service.create({ name: 'Drill', tags: ['power-tool'] });
+      await service.create({ name: 'Drill', tags: ['power-tool'] }, undefined, WORKSPACE_ID);
 
-      expect(tagsMock.upsertMany).toHaveBeenCalledWith(['power-tool']);
+      expect(tagsMock.upsertMany).toHaveBeenCalledWith(['power-tool'], WORKSPACE_ID);
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -763,7 +901,7 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(makeItemDetail({ primaryPhotoId: photoId }));
 
-      await service.create({ name: 'Item', photoIds: [photoId] });
+      await service.create({ name: 'Item', photoIds: [photoId] }, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -778,7 +916,7 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(makeItemDetail());
 
-      await service.create({ name: 'Drill' });
+      await service.create({ name: 'Drill' }, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -792,10 +930,10 @@ describe('ItemsService', () => {
       prismaMock.item.create.mockResolvedValue(created);
       stubRecordMovement(makeItemDetail());
 
-      await service.create({ name: 'Drill' });
+      await service.create({ name: 'Drill' }, undefined, WORKSPACE_ID);
       expect(tagsMock.upsertMany).not.toHaveBeenCalled();
 
-      await service.create({ name: 'Drill', tags: [] });
+      await service.create({ name: 'Drill', tags: [] }, undefined, WORKSPACE_ID);
       expect(tagsMock.upsertMany).not.toHaveBeenCalled();
     });
 
@@ -810,7 +948,7 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(makeItemDetail({ createdById: userId }));
 
-      await service.create({ name: 'Drill' }, userId);
+      await service.create({ name: 'Drill' }, userId, WORKSPACE_ID);
 
       expect(prismaMock.item.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ createdById: userId }) }),
@@ -829,10 +967,41 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([]);
       stubRecordMovement(makeItemDetail());
 
-      await service.create({ name: 'Drill' });
+      await service.create({ name: 'Drill' }, undefined, WORKSPACE_ID);
 
       const createArg = prismaMock.item.create.mock.calls[0][0];
       expect(createArg.data).not.toHaveProperty('createdById');
+    });
+
+    // -----------------------------------------------------------------------
+    // EVT-40 — write-path workspace-consistency guards
+    // -----------------------------------------------------------------------
+
+    it('EVT-40: throws NotFoundException when locationId belongs to a different workspace', async () => {
+      prismaMock.location.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.create({ name: 'Drill', locationId: LOC_ID }, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(NotFoundException);
+      expect(prismaMock.item.create).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40: throws NotFoundException when categoryId belongs to a different workspace', async () => {
+      prismaMock.category.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.create({ name: 'Drill', categoryId: 'cat-1' }, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(NotFoundException);
+      expect(prismaMock.item.create).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40: throws NotFoundException when a photoId belongs to a different workspace', async () => {
+      prismaMock.photo.count.mockResolvedValue(0); // 0 of 1 requested photoIds found in-workspace
+
+      await expect(
+        service.create({ name: 'Drill', photoIds: ['foreign-photo'] }, undefined, WORKSPACE_ID),
+      ).rejects.toThrow(NotFoundException);
+      expect(prismaMock.item.create).not.toHaveBeenCalled();
     });
   });
 
@@ -841,16 +1010,19 @@ describe('ItemsService', () => {
   // =========================================================================
 
   describe('receive', () => {
-    it('records an "add" movement for the given quantity against an existing item', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, locationId: LOC_ID });
+    it('records an "add" movement for the given quantity against an existing item in-workspace', async () => {
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID, locationId: LOC_ID });
       const received = makeItemDetail({ quantity: 125 });
       stockMovementsMock.recordMovement.mockResolvedValue({
         movement: { id: 'mv-1', kind: 'add' },
         item: received,
       });
 
-      const result = await service.receive(ITEM_ID, 25);
+      const result = await service.receive(ITEM_ID, 25, undefined, WORKSPACE_ID);
 
+      expect(prismaMock.item.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: ITEM_ID, workspaceId: WORKSPACE_ID } }),
+      );
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock,
         expect.objectContaining({
@@ -858,6 +1030,7 @@ describe('ItemsService', () => {
           kind: 'add',
           delta: 25,
           toLocationId: LOC_ID,
+          workspaceId: WORKSPACE_ID,
         }),
         expect.anything(),
       );
@@ -866,13 +1039,13 @@ describe('ItemsService', () => {
 
     it('attributes the movement to the caller when createdById is provided', async () => {
       const userId = '99999999-9999-9999-9999-999999999999';
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, locationId: null });
+      prismaMock.item.findFirst.mockResolvedValue({ id: ITEM_ID, locationId: null });
       stockMovementsMock.recordMovement.mockResolvedValue({
         movement: { id: 'mv-1', kind: 'add' },
         item: makeItemDetail(),
       });
 
-      await service.receive(ITEM_ID, 10, userId);
+      await service.receive(ITEM_ID, 10, userId, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock,
@@ -882,10 +1055,20 @@ describe('ItemsService', () => {
     });
 
     it('throws NotFoundException for an unknown item and never calls recordMovement', async () => {
-      prismaMock.item.findUnique.mockResolvedValue(null);
+      prismaMock.item.findFirst.mockResolvedValue(null);
 
-      await expect(service.receive(ITEM_ID, 10)).rejects.toThrow(NotFoundException);
+      await expect(service.receive(ITEM_ID, 10, undefined, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
       expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40: throws NotFoundException for an item belonging to a different workspace', async () => {
+      prismaMock.item.findFirst.mockResolvedValue(null);
+
+      await expect(service.receive(ITEM_ID, 10, undefined, OTHER_WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
@@ -900,7 +1083,7 @@ describe('ItemsService', () => {
       tagsMock.upsertMany.mockResolvedValue([NEW_TAG_ID]);
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { tags: ['hand-tool'] });
+      await service.update(ITEM_ID, { tags: ['hand-tool'] }, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -919,7 +1102,7 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { tags: [] });
+      await service.update(ITEM_ID, { tags: [] }, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -936,7 +1119,7 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { name: 'New Name' });
+      await service.update(ITEM_ID, { name: 'New Name' }, undefined, WORKSPACE_ID);
 
       // data should NOT contain a tags key
       const updateCall = prismaMock.item.update.mock.calls[0][0];
@@ -945,7 +1128,9 @@ describe('ItemsService', () => {
 
     it('throws NotFoundException when item does not exist', async () => {
       prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.update(ITEM_ID, { name: 'X' })).rejects.toThrow(NotFoundException);
+      await expect(service.update(ITEM_ID, { name: 'X' }, undefined, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('returns the updated item', async () => {
@@ -953,7 +1138,12 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(updated);
 
-      const result = await service.update(ITEM_ID, { name: 'Updated Drill' });
+      const result = await service.update(
+        ITEM_ID,
+        { name: 'Updated Drill' },
+        undefined,
+        WORKSPACE_ID,
+      );
       expect(result).toBe(updated);
     });
 
@@ -970,7 +1160,7 @@ describe('ItemsService', () => {
         item: makeItemDetail({ locationId: null }),
       });
 
-      const result = await service.update(ITEM_ID, { locationId: null });
+      const result = await service.update(ITEM_ID, { locationId: null }, undefined, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock,
@@ -994,7 +1184,7 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail({ categoryId: null }));
 
-      await service.update(ITEM_ID, { categoryId: null });
+      await service.update(ITEM_ID, { categoryId: null }, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1007,7 +1197,7 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { name: 'New Name' });
+      await service.update(ITEM_ID, { name: 'New Name' }, undefined, WORKSPACE_ID);
 
       const updateCall = prismaMock.item.update.mock.calls[0][0];
       expect(updateCall.data).not.toHaveProperty('locationId');
@@ -1023,7 +1213,12 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { lastVerifiedAt: '2026-08-01T00:00:00.000Z' });
+      await service.update(
+        ITEM_ID,
+        { lastVerifiedAt: '2026-08-01T00:00:00.000Z' },
+        undefined,
+        WORKSPACE_ID,
+      );
 
       const updateCall = prismaMock.item.update.mock.calls[0][0];
       expect(updateCall.data.lastVerifiedAt).toBeInstanceOf(Date);
@@ -1036,7 +1231,7 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { lastVerifiedAt: null });
+      await service.update(ITEM_ID, { lastVerifiedAt: null }, undefined, WORKSPACE_ID);
 
       const updateCall = prismaMock.item.update.mock.calls[0][0];
       expect(updateCall.data.lastVerifiedAt).toBeNull();
@@ -1046,7 +1241,7 @@ describe('ItemsService', () => {
       prismaMock.item.findUnique.mockResolvedValue(makeItemDetail());
       prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-      await service.update(ITEM_ID, { name: 'New Name' });
+      await service.update(ITEM_ID, { name: 'New Name' }, undefined, WORKSPACE_ID);
 
       const updateCall = prismaMock.item.update.mock.calls[0][0];
       expect(updateCall.data).not.toHaveProperty('lastVerifiedAt');
@@ -1065,7 +1260,7 @@ describe('ItemsService', () => {
           item: makeItemDetail({ quantity: 7 }),
         });
 
-        await service.update(ITEM_ID, { quantity: 7 });
+        await service.update(ITEM_ID, { quantity: 7 }, undefined, WORKSPACE_ID);
 
         const updateCall = prismaMock.item.update.mock.calls[0][0];
         expect(updateCall.data).not.toHaveProperty('quantity');
@@ -1079,7 +1274,7 @@ describe('ItemsService', () => {
           item: makeItemDetail({ quantity: 7 }),
         });
 
-        const result = await service.update(ITEM_ID, { quantity: 7 });
+        const result = await service.update(ITEM_ID, { quantity: 7 }, undefined, WORKSPACE_ID);
 
         expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
           prismaMock,
@@ -1097,7 +1292,7 @@ describe('ItemsService', () => {
           item: makeItemDetail({ quantity: 4 }),
         });
 
-        await service.update(ITEM_ID, { quantity: 4 });
+        await service.update(ITEM_ID, { quantity: 4 }, undefined, WORKSPACE_ID);
 
         expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
           prismaMock,
@@ -1110,7 +1305,12 @@ describe('ItemsService', () => {
         prismaMock.item.findUnique.mockResolvedValue(makeItemDetail({ quantity: 5 }));
         prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 5 }));
 
-        await service.update(ITEM_ID, { quantity: 5, name: 'Same qty, new name' });
+        await service.update(
+          ITEM_ID,
+          { quantity: 5, name: 'Same qty, new name' },
+          undefined,
+          WORKSPACE_ID,
+        );
 
         expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
       });
@@ -1124,7 +1324,12 @@ describe('ItemsService', () => {
           item: makeItemDetail({ locationId: NEW_LOC_ID }),
         });
 
-        const result = await service.update(ITEM_ID, { locationId: NEW_LOC_ID });
+        const result = await service.update(
+          ITEM_ID,
+          { locationId: NEW_LOC_ID },
+          undefined,
+          WORKSPACE_ID,
+        );
 
         expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
           prismaMock,
@@ -1144,7 +1349,7 @@ describe('ItemsService', () => {
         prismaMock.item.findUnique.mockResolvedValue(makeItemDetail()); // locationId === LOC_ID
         prismaMock.item.update.mockResolvedValue(makeItemDetail());
 
-        await service.update(ITEM_ID, { locationId: LOC_ID });
+        await service.update(ITEM_ID, { locationId: LOC_ID }, undefined, WORKSPACE_ID);
 
         expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
       });
@@ -1163,7 +1368,12 @@ describe('ItemsService', () => {
             item: makeItemDetail({ quantity: 9, locationId: NEW_LOC_ID }),
           });
 
-        const result = await service.update(ITEM_ID, { quantity: 9, locationId: NEW_LOC_ID });
+        const result = await service.update(
+          ITEM_ID,
+          { quantity: 9, locationId: NEW_LOC_ID },
+          undefined,
+          WORKSPACE_ID,
+        );
 
         expect(stockMovementsMock.recordMovement).toHaveBeenCalledTimes(2);
         expect(stockMovementsMock.recordMovement).toHaveBeenNthCalledWith(
@@ -1196,7 +1406,7 @@ describe('ItemsService', () => {
           item: makeItemDetail({ quantity: 2 }),
         });
 
-        await service.update(ITEM_ID, { quantity: 2 }, userId);
+        await service.update(ITEM_ID, { quantity: 2 }, userId, WORKSPACE_ID);
 
         expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
           prismaMock,
@@ -1231,7 +1441,7 @@ describe('ItemsService', () => {
           item: makeItemDetail({ quantity: 7 }),
         });
 
-        await service.update(ITEM_ID, { quantity: 7 });
+        await service.update(ITEM_ID, { quantity: 7 }, undefined, WORKSPACE_ID);
 
         expect(prismaMock.$transaction).toHaveBeenCalled();
         expect(prismaMock.item.findUnique).toHaveBeenCalled();
@@ -1242,7 +1452,9 @@ describe('ItemsService', () => {
 
       it('throws NotFoundException when the in-transaction read finds no row (item deleted concurrently)', async () => {
         prismaMock.item.findUnique.mockResolvedValue(null);
-        await expect(service.update(ITEM_ID, { quantity: 5 })).rejects.toThrow(NotFoundException);
+        await expect(
+          service.update(ITEM_ID, { quantity: 5 }, undefined, WORKSPACE_ID),
+        ).rejects.toThrow(NotFoundException);
         // No writes should be attempted once the item is known missing.
         expect(prismaMock.item.update).not.toHaveBeenCalled();
         expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
@@ -1256,7 +1468,9 @@ describe('ItemsService', () => {
         const writeError = new Error('connection reset');
         prismaMock.item.update.mockRejectedValue(writeError);
 
-        await expect(service.update(ITEM_ID, { quantity: 9 })).rejects.toThrow(writeError);
+        await expect(
+          service.update(ITEM_ID, { quantity: 9 }, undefined, WORKSPACE_ID),
+        ).rejects.toThrow(writeError);
 
         // The quantity movement must never be recorded on its own — the
         // ledger row and the quantity change stand or fall together.
@@ -1271,7 +1485,7 @@ describe('ItemsService', () => {
         stockMovementsMock.recordMovement.mockRejectedValueOnce(movementError);
 
         await expect(
-          service.update(ITEM_ID, { quantity: 9, locationId: NEW_LOC_ID }),
+          service.update(ITEM_ID, { quantity: 9, locationId: NEW_LOC_ID }, undefined, WORKSPACE_ID),
         ).rejects.toThrow(movementError);
 
         // The failed "adjust" call is the only recordMovement call — the
@@ -1286,39 +1500,59 @@ describe('ItemsService', () => {
   // =========================================================================
 
   describe('remove', () => {
-    it('AC1 delete: deletes the item successfully', async () => {
+    it('AC1 delete: deletes the item successfully when it belongs to the workspace', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       prismaMock.item.delete.mockResolvedValue(makeItemDetail());
 
-      await service.remove(ITEM_ID);
+      await service.remove(ITEM_ID, WORKSPACE_ID);
 
       expect(prismaMock.item.delete).toHaveBeenCalledWith({ where: { id: ITEM_ID } });
     });
 
-    it('throws NotFoundException when item does not exist (P2025)', async () => {
+    it('throws NotFoundException when item does not exist', async () => {
+      prismaMock.item.findUnique.mockResolvedValue(null);
+
+      await expect(service.remove('nonexistent-id', WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prismaMock.item.delete).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40 AC 2: throws NotFoundException when the item belongs to a different workspace, without attempting delete', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ workspaceId: OTHER_WORKSPACE_ID });
+
+      await expect(service.remove(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
+      expect(prismaMock.item.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the item was deleted concurrently, between the ownership check and the delete (P2025)', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       const p2025 = new Prisma.PrismaClientKnownRequestError('Record to delete not found', {
         code: 'P2025',
         clientVersion: '5.22.0',
       });
       prismaMock.item.delete.mockRejectedValue(p2025);
 
-      await expect(service.remove('nonexistent-id')).rejects.toThrow(NotFoundException);
+      await expect(service.remove(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(NotFoundException);
     });
 
     it('re-throws non-P2025 Prisma errors unchanged', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       const otherErr = new Prisma.PrismaClientKnownRequestError('Other error', {
         code: 'P2003',
         clientVersion: '5.22.0',
       });
       prismaMock.item.delete.mockRejectedValue(otherErr);
 
-      await expect(service.remove(ITEM_ID)).rejects.toThrow(otherErr);
+      await expect(service.remove(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(otherErr);
     });
 
     it('re-throws generic errors unchanged', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       const err = new Error('DB connection lost');
       prismaMock.item.delete.mockRejectedValue(err);
 
-      await expect(service.remove(ITEM_ID)).rejects.toThrow(err);
+      await expect(service.remove(ITEM_ID, WORKSPACE_ID)).rejects.toThrow(err);
     });
   });
 
@@ -1329,15 +1563,33 @@ describe('ItemsService', () => {
   describe('count', () => {
     it('throws NotFoundException when the item does not exist', async () => {
       prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.count(ITEM_ID, 5)).rejects.toThrow(NotFoundException);
+      await expect(service.count(ITEM_ID, 5, undefined, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40 AC 2: throws NotFoundException when the item belongs to a different workspace', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({
+        quantity: 3,
+        locationId: LOC_ID,
+        workspaceId: OTHER_WORKSPACE_ID,
+      });
+      await expect(service.count(ITEM_ID, 5, undefined, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
       expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
     });
 
     it('records an `adjust` movement with the correct delta when the count is higher than book', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ quantity: 3, locationId: LOC_ID });
+      prismaMock.item.findUnique.mockResolvedValue({
+        quantity: 3,
+        locationId: LOC_ID,
+        workspaceId: WORKSPACE_ID,
+      });
       prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 5 }));
 
-      const result = await service.count(ITEM_ID, 5, 'user-1');
+      const result = await service.count(ITEM_ID, 5, 'user-1', WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock,
@@ -1347,6 +1599,7 @@ describe('ItemsService', () => {
           delta: 2,
           toLocationId: LOC_ID,
           createdById: 'user-1',
+          workspaceId: WORKSPACE_ID,
         }),
       );
       expect(result.bookQuantity).toBe(3);
@@ -1355,10 +1608,14 @@ describe('ItemsService', () => {
     });
 
     it('records a negative-delta `adjust` movement when the count is lower than book', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ quantity: 10, locationId: LOC_ID });
+      prismaMock.item.findUnique.mockResolvedValue({
+        quantity: 10,
+        locationId: LOC_ID,
+        workspaceId: WORKSPACE_ID,
+      });
       prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 4 }));
 
-      const result = await service.count(ITEM_ID, 4);
+      const result = await service.count(ITEM_ID, 4, undefined, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).toHaveBeenCalledWith(
         prismaMock,
@@ -1368,10 +1625,14 @@ describe('ItemsService', () => {
     });
 
     it('writes NO movement when the count matches book quantity exactly', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ quantity: 7, locationId: LOC_ID });
+      prismaMock.item.findUnique.mockResolvedValue({
+        quantity: 7,
+        locationId: LOC_ID,
+        workspaceId: WORKSPACE_ID,
+      });
       prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 7 }));
 
-      const result = await service.count(ITEM_ID, 7);
+      const result = await service.count(ITEM_ID, 7, undefined, WORKSPACE_ID);
 
       expect(stockMovementsMock.recordMovement).not.toHaveBeenCalled();
       expect(result.delta).toBe(0);
@@ -1380,10 +1641,14 @@ describe('ItemsService', () => {
     });
 
     it('ALWAYS stamps lastVerifiedAt, even when the count matches book (nothing to adjust)', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ quantity: 7, locationId: LOC_ID });
+      prismaMock.item.findUnique.mockResolvedValue({
+        quantity: 7,
+        locationId: LOC_ID,
+        workspaceId: WORKSPACE_ID,
+      });
       prismaMock.item.update.mockResolvedValue(makeItemDetail({ quantity: 7 }));
 
-      await service.count(ITEM_ID, 7);
+      await service.count(ITEM_ID, 7, undefined, WORKSPACE_ID);
 
       expect(prismaMock.item.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1401,12 +1666,25 @@ describe('ItemsService', () => {
   describe('consume', () => {
     it('throws NotFoundException when the item does not exist', async () => {
       prismaMock.item.findUnique.mockResolvedValue(null);
-      await expect(service.consume(ITEM_ID, 1)).rejects.toThrow(NotFoundException);
+      await expect(service.consume(ITEM_ID, 1, undefined, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(stockMovementsMock.recordConsumption).not.toHaveBeenCalled();
+    });
+
+    it('EVT-40 AC 2: throws NotFoundException when the item belongs to a different workspace', async () => {
+      prismaMock.item.findUnique.mockResolvedValue({
+        id: ITEM_ID,
+        workspaceId: OTHER_WORKSPACE_ID,
+      });
+      await expect(service.consume(ITEM_ID, 1, undefined, WORKSPACE_ID)).rejects.toThrow(
+        NotFoundException,
+      );
       expect(stockMovementsMock.recordConsumption).not.toHaveBeenCalled();
     });
 
     it('delegates to recordConsumption with the requested quantity', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
         consumedQuantity: 3,
@@ -1415,7 +1693,7 @@ describe('ItemsService', () => {
         makeItemDetail({ quantity: 7, minQuantity: null }),
       );
 
-      await service.consume(ITEM_ID, 3, 'user-1');
+      await service.consume(ITEM_ID, 3, 'user-1', WORKSPACE_ID);
 
       expect(stockMovementsMock.recordConsumption).toHaveBeenCalledWith(
         prismaMock,
@@ -1424,6 +1702,7 @@ describe('ItemsService', () => {
           kind: 'consume',
           requestedQuantity: 3,
           createdById: 'user-1',
+          workspaceId: WORKSPACE_ID,
         }),
       );
     });
@@ -1435,17 +1714,19 @@ describe('ItemsService', () => {
     // -------------------------------------------------------------------------
 
     it('throws ConflictException when recordConsumption returns null (nothing on hand)', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue(null);
 
-      await expect(service.consume(ITEM_ID, 5)).rejects.toThrow(ConflictException);
+      await expect(service.consume(ITEM_ID, 5, undefined, WORKSPACE_ID)).rejects.toThrow(
+        ConflictException,
+      );
       // No item write should be attempted once recordConsumption reports
       // nothing was consumed.
       expect(prismaMock.item.findUniqueOrThrow).not.toHaveBeenCalled();
     });
 
     it('surfaces consumedQuantity from recordConsumption on the response', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
         consumedQuantity: 3,
@@ -1457,13 +1738,13 @@ describe('ItemsService', () => {
       // Requested 5, but on-hand only supported 3 (partial consumption) —
       // the caller must be able to tell "consumed 3" apart from "consumed
       // nothing" (EVT-27 review round 2, security-reviewer suggestion).
-      const result = await service.consume(ITEM_ID, 5);
+      const result = await service.consume(ITEM_ID, 5, undefined, WORKSPACE_ID);
 
       expect(result.consumedQuantity).toBe(3);
     });
 
     it('offerVerification is true when resulting on-hand is at the OPPORTUNISTIC_PROMPT_FLOOR with no minQuantity set', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
         consumedQuantity: 5,
@@ -1472,12 +1753,12 @@ describe('ItemsService', () => {
         makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR, minQuantity: null }),
       );
 
-      const result = await service.consume(ITEM_ID, 5);
+      const result = await service.consume(ITEM_ID, 5, undefined, WORKSPACE_ID);
       expect(result.offerVerification).toBe(true);
     });
 
     it('offerVerification is false when resulting on-hand is above the floor with no minQuantity set', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
         consumedQuantity: 1,
@@ -1486,12 +1767,12 @@ describe('ItemsService', () => {
         makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR + 1, minQuantity: null }),
       );
 
-      const result = await service.consume(ITEM_ID, 1);
+      const result = await service.consume(ITEM_ID, 1, undefined, WORKSPACE_ID);
       expect(result.offerVerification).toBe(false);
     });
 
     it('uses minQuantity as the floor when it is higher than OPPORTUNISTIC_PROMPT_FLOOR', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
         consumedQuantity: 2,
@@ -1501,12 +1782,12 @@ describe('ItemsService', () => {
         makeItemDetail({ quantity: 5, minQuantity: 5 }),
       );
 
-      const result = await service.consume(ITEM_ID, 2);
+      const result = await service.consume(ITEM_ID, 2, undefined, WORKSPACE_ID);
       expect(result.offerVerification).toBe(true);
     });
 
     it('uses the OPPORTUNISTIC_PROMPT_FLOOR when minQuantity is a small positive value below it', async () => {
-      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID });
+      prismaMock.item.findUnique.mockResolvedValue({ id: ITEM_ID, workspaceId: WORKSPACE_ID });
       stockMovementsMock.recordConsumption.mockResolvedValue({
         movement: { id: 'mv-1' },
         consumedQuantity: 1,
@@ -1517,7 +1798,7 @@ describe('ItemsService', () => {
         makeItemDetail({ quantity: OPPORTUNISTIC_PROMPT_FLOOR, minQuantity: 1 }),
       );
 
-      const result = await service.consume(ITEM_ID, 1);
+      const result = await service.consume(ITEM_ID, 1, undefined, WORKSPACE_ID);
       expect(result.offerVerification).toBe(true);
     });
   });
@@ -1544,11 +1825,13 @@ describe('ItemsService', () => {
       };
     }
 
-    it('only fetches items with countIntervalDays set', async () => {
+    it('only fetches items with countIntervalDays set, scoped to the workspace', async () => {
       prismaMock.item.findMany.mockResolvedValue([]);
-      await service.listVerificationQueue(NOW);
+      await service.listVerificationQueue(NOW, WORKSPACE_ID);
       expect(prismaMock.item.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { countIntervalDays: { not: null } } }),
+        expect.objectContaining({
+          where: { countIntervalDays: { not: null }, workspaceId: WORKSPACE_ID },
+        }),
       );
     });
 
@@ -1557,7 +1840,7 @@ describe('ItemsService', () => {
       prismaMock.item.findMany.mockResolvedValue([
         overdueRow({ lastVerifiedAt: new Date('2026-08-12T00:00:00.000Z') }),
       ]);
-      const result = await service.listVerificationQueue(NOW);
+      const result = await service.listVerificationQueue(NOW, WORKSPACE_ID);
       expect(result).toEqual([]);
     });
 
@@ -1569,7 +1852,7 @@ describe('ItemsService', () => {
           countIntervalDays: 30,
         }),
       ]);
-      const result = await service.listVerificationQueue(NOW);
+      const result = await service.listVerificationQueue(NOW, WORKSPACE_ID);
       expect(result).toHaveLength(1);
       expect(result[0].daysOverdue).toBe(0);
     });
@@ -1593,7 +1876,7 @@ describe('ItemsService', () => {
         }),
       ]);
 
-      const result = await service.listVerificationQueue(NOW);
+      const result = await service.listVerificationQueue(NOW, WORKSPACE_ID);
 
       expect(result.map((r) => r.id)).toEqual([
         'b-very-overdue',
@@ -1611,7 +1894,7 @@ describe('ItemsService', () => {
           createdAt: new Date('2026-07-04T00:00:00.000Z'),
         }),
       ]);
-      const result = await service.listVerificationQueue(NOW);
+      const result = await service.listVerificationQueue(NOW, WORKSPACE_ID);
       expect(result).toHaveLength(1);
       expect(result[0].daysOverdue).toBe(10);
     });
@@ -1626,13 +1909,13 @@ describe('ItemsService', () => {
       );
       prismaMock.item.findMany.mockResolvedValue(rows);
 
-      const result = await service.listVerificationQueue(NOW);
+      const result = await service.listVerificationQueue(NOW, WORKSPACE_ID);
       expect(result).toHaveLength(VERIFICATION_QUEUE_CAP);
     });
 
     it('defaults `now` to the current time when omitted', async () => {
       prismaMock.item.findMany.mockResolvedValue([]);
-      await expect(service.listVerificationQueue()).resolves.toEqual([]);
+      await expect(service.listVerificationQueue(undefined, WORKSPACE_ID)).resolves.toEqual([]);
     });
   });
 
@@ -1723,41 +2006,45 @@ describe('ItemsService', () => {
         item: created,
       });
 
-      const item = await service.create({ name: 'Cordless Drill', tags: ['power-tool'] });
+      const item = await service.create(
+        { name: 'Cordless Drill', tags: ['power-tool'] },
+        undefined,
+        WORKSPACE_ID,
+      );
       expect(item.id).toBe(ITEM_ID);
 
       // ---- 2. LIST ---------------------------------------------------------
       prismaMock.item.findMany.mockResolvedValue([created]);
-      const listed = await service.list({});
+      const listed = await service.list({}, WORKSPACE_ID);
       expect(listed).toHaveLength(1);
       expect(listed[0].id).toBe(ITEM_ID);
 
       // ---- 3. SEARCH HIT ---------------------------------------------------
       prismaMock.$queryRaw.mockResolvedValue([{ id: ITEM_ID }]);
       prismaMock.item.findMany.mockResolvedValue([created]);
-      const hits = await service.list({ search: 'drill' });
+      const hits = await service.list({ search: 'drill' }, WORKSPACE_ID);
       expect(hits).toHaveLength(1);
 
       // ---- 4. SEARCH MISS --------------------------------------------------
       prismaMock.$queryRaw.mockResolvedValue([]);
       prismaMock.item.findMany.mockResolvedValue([]);
-      const misses = await service.list({ search: 'unicorn' });
+      const misses = await service.list({ search: 'unicorn' }, WORKSPACE_ID);
       expect(misses).toHaveLength(0);
 
       // ---- 5. TAG FILTER ---------------------------------------------------
       prismaMock.item.findMany.mockResolvedValue([created]);
-      const byTag = await service.list({ tag: 'power-tool' });
+      const byTag = await service.list({ tag: 'power-tool' }, WORKSPACE_ID);
       expect(byTag).toHaveLength(1);
       expect(prismaMock.item.findMany).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          where: { tags: { some: { tag: { name: 'power-tool' } } } },
+          where: { workspaceId: WORKSPACE_ID, tags: { some: { tag: { name: 'power-tool' } } } },
         }),
       );
 
       // ---- 6. LOCATION SUBTREE FILTER --------------------------------------
-      prismaMock.location.findUnique.mockResolvedValue({ id: LOC_ID, path: 'garage' });
+      prismaMock.location.findFirst.mockResolvedValue({ id: LOC_ID, path: 'garage' });
       prismaMock.item.findMany.mockResolvedValue([created]);
-      const byLoc = await service.list({ locationId: LOC_ID });
+      const byLoc = await service.list({ locationId: LOC_ID }, WORKSPACE_ID);
       expect(byLoc).toHaveLength(1);
 
       // ---- 7. PATCH TAGS ---------------------------------------------------
@@ -1775,12 +2062,18 @@ describe('ItemsService', () => {
           ],
         }),
       );
-      const patched = await service.update(ITEM_ID, { tags: ['hand-tool'] });
+      const patched = await service.update(
+        ITEM_ID,
+        { tags: ['hand-tool'] },
+        undefined,
+        WORKSPACE_ID,
+      );
       expect(patched.tags[0].tag.name).toBe('hand-tool');
 
       // ---- 8. DELETE -------------------------------------------------------
+      prismaMock.item.findUnique.mockResolvedValue({ workspaceId: WORKSPACE_ID });
       prismaMock.item.delete.mockResolvedValue(undefined);
-      await service.remove(ITEM_ID);
+      await service.remove(ITEM_ID, WORKSPACE_ID);
       expect(prismaMock.item.delete).toHaveBeenCalledWith({ where: { id: ITEM_ID } });
     });
   });

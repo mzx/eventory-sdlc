@@ -1,8 +1,9 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { User, UserRole, UserStatus } from '@prisma/client';
+import { User, UserRole, UserStatus, WorkspaceRole } from '@prisma/client';
 import type { CookieOptions } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
+import { ensureDefaultWorkspaceMembership } from '../workspace/default-workspace';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -185,7 +186,7 @@ export class AuthService {
       const needsPromotion =
         isAllowlistedAdmin &&
         !(byGoogleId.role === UserRole.admin && byGoogleId.status === UserStatus.approved);
-      return this.prisma.user.update({
+      const updated = await this.prisma.user.update({
         where: { id: byGoogleId.id },
         data: {
           email: profile.email,
@@ -199,6 +200,13 @@ export class AuthService {
           }),
         },
       });
+      if (needsPromotion) {
+        // EVT-40: promotion to admin+approved must also grant Default
+        // Workspace access — see ensureDefaultWorkspaceMembership's doc
+        // comment.
+        await ensureDefaultWorkspaceMembership(this.prisma, updated.id, WorkspaceRole.owner);
+      }
+      return updated;
     }
 
     const byEmail = await this.prisma.user.findUnique({ where: { email: profile.email } });
@@ -215,7 +223,7 @@ export class AuthService {
       const needsPromotion =
         isAllowlistedAdmin &&
         !(byEmail.role === UserRole.admin && byEmail.status === UserStatus.approved);
-      return this.prisma.user.update({
+      const updated = await this.prisma.user.update({
         where: { id: byEmail.id },
         data: {
           googleId: profile.googleId,
@@ -229,9 +237,14 @@ export class AuthService {
           }),
         },
       });
+      if (needsPromotion) {
+        // EVT-40: see the byGoogleId branch above.
+        await ensureDefaultWorkspaceMembership(this.prisma, updated.id, WorkspaceRole.owner);
+      }
+      return updated;
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       const isFirstOAuthUser = (await tx.user.count({ where: { googleId: { not: null } } })) === 0;
       const promote = isFirstOAuthUser || isAllowlistedAdmin;
 
@@ -250,6 +263,13 @@ export class AuthService {
         },
       });
     });
+    if (created.status === UserStatus.approved) {
+      // EVT-40: the bootstrap admin (first-ever sign-in) or an
+      // EVENTORY_ADMIN_EMAILS-allowlisted new sign-in — see the byGoogleId
+      // branch above.
+      await ensureDefaultWorkspaceMembership(this.prisma, created.id, WorkspaceRole.owner);
+    }
+    return created;
   }
 
   /** Signs a JWT carrying the minimal claims `JwtAuthGuard` needs. */

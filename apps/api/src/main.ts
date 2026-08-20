@@ -1,4 +1,4 @@
-import { ValidationPipe } from '@nestjs/common';
+import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
@@ -6,7 +6,6 @@ import { AppModule } from './app.module';
 import { allowedCorsOrigins, corsOriginValidator } from './common/cors.config';
 import { resolveHttpsOptions } from './common/https-options';
 import { configureTrustProxy } from './common/trust-proxy.config';
-import { STORAGE_DIR, STORAGE_URL_PREFIX } from './photos/photos.service';
 
 async function bootstrap(): Promise<void> {
   // HTTPS via mkcert when apps/api/certs/{cert,key}.pem exist (EVT-18) —
@@ -21,7 +20,15 @@ async function bootstrap(): Promise<void> {
   // req.ip on every guarded request, and behind Caddy that's meaningless
   // without this (EVT-19 review round 2, finding 2; see trust-proxy.config.ts).
   configureTrustProxy(app);
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', {
+    // GET /storage/:filename (EVT-40 StorageController) stays mounted
+    // outside the /api prefix — the web app's STORAGE_URL_PREFIX constant
+    // and the Vite dev proxy both assume this exact path shape. The route
+    // itself is still a normal, fully-guarded Nest controller (unlike the
+    // `express.static` middleware it replaces) — only the URL prefix is
+    // excluded here, not the guard chain.
+    exclude: [{ path: 'storage/:filename', method: RequestMethod.GET }],
+  });
   // Global JwtAuthGuard (EVT-14) reads the session cookie off `req.cookies`,
   // which only exists once this middleware has parsed the raw `Cookie`
   // header — must run before any route handler / guard sees a request.
@@ -40,20 +47,9 @@ async function bootstrap(): Promise<void> {
       transform: true, // coerce primitives
     }),
   );
-  // Serve uploaded photos at GET /storage/<filename>, outside the /api
-  // prefix — this is Express-level static middleware, not a Nest
-  // controller route, so setGlobalPrefix does not affect it.
-  //
-  // `X-Content-Type-Options: nosniff` prevents browsers from MIME-sniffing
-  // uploaded files (e.g. content declared image/png that a browser decides
-  // to render/execute as HTML/script based on sniffed bytes) — user-supplied
-  // static content is exactly the case this header exists for.
-  app.useStaticAssets(STORAGE_DIR, {
-    prefix: STORAGE_URL_PREFIX,
-    setHeaders: (res) => {
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-    },
-  });
+  // Uploaded photos are served by StorageController (EVT-40,
+  // GET /storage/:filename) — see its doc comment for why this is no
+  // longer plain `express.static` middleware.
   const port = process.env.PORT ?? 3001;
   await app.listen(port, '0.0.0.0');
 }

@@ -48,8 +48,16 @@ export class ItemsService {
   // list — GET /api/items?search=&tag=&locationId=
   // -------------------------------------------------------------------------
 
-  async list(query: ListItemsQueryDto) {
-    const where: Prisma.ItemWhereInput = {};
+  /**
+   * `workspaceId` (EVT-40) is the caller's active tenant context — every
+   * item this returns is scoped to it. This is the primary tenant boundary
+   * for the items module: everything else (findById, update, etc.) either
+   * inherits scoping transitively (they all write/read through rows already
+   * created under a `workspaceId`) or checks it explicitly (see the
+   * per-method doc comments below).
+   */
+  async list(query: ListItemsQueryDto, workspaceId: string) {
+    const where: Prisma.ItemWhereInput = { workspaceId };
 
     // --- Tag filter ---------------------------------------------------------
     if (query.tag) {
@@ -58,8 +66,11 @@ export class ItemsService {
 
     // --- LocationId subtree filter (materialized-path prefix) ---------------
     if (query.locationId) {
-      const loc = await this.prisma.location.findUnique({
-        where: { id: query.locationId },
+      // Scoped by workspaceId too (EVT-40) — a foreign locationId must not
+      // leak whether it exists; it's simply treated the same as an unknown
+      // one, same as before EVT-40.
+      const loc = await this.prisma.location.findFirst({
+        where: { id: query.locationId, workspaceId },
         select: { id: true, path: true },
       });
       if (!loc) {
@@ -74,7 +85,7 @@ export class ItemsService {
 
     // --- Full-text search (name, description, properties JSONB) -------------
     if (query.search) {
-      const ids = await this.searchItemIds(query.search);
+      const ids = await this.searchItemIds(query.search, workspaceId);
       where.id = { in: ids };
     }
 
@@ -87,7 +98,8 @@ export class ItemsService {
 
   /**
    * Raw SQL: ILIKE across name, description, and the JSONB properties column
-   * (cast to text). Returns matching item IDs.
+   * (cast to text), scoped to `workspaceId` (EVT-40). Returns matching item
+   * IDs.
    *
    * `search` is escaped via `escapeLikePattern` before being embedded in the
    * `%...%` pattern — otherwise a caller-supplied `%` or `_` would act as a
@@ -95,13 +107,14 @@ export class ItemsService {
    * finding 1c). The pattern itself is still passed as a bound Prisma
    * parameter, never string-concatenated into the SQL text.
    */
-  private async searchItemIds(search: string): Promise<string[]> {
+  private async searchItemIds(search: string, workspaceId: string): Promise<string[]> {
     const pattern = `%${escapeLikePattern(search)}%`;
     const rows = await this.prisma.$queryRaw<{ id: string }[]>`
       SELECT id FROM "Item"
-      WHERE name ILIKE ${pattern} ESCAPE '\\'
+      WHERE "workspaceId" = ${workspaceId}::uuid
+        AND (name ILIKE ${pattern} ESCAPE '\\'
          OR description ILIKE ${pattern} ESCAPE '\\'
-         OR properties::text ILIKE ${pattern} ESCAPE '\\'
+         OR properties::text ILIKE ${pattern} ESCAPE '\\')
     `;
     return rows.map((r) => r.id);
   }
@@ -112,14 +125,14 @@ export class ItemsService {
 
   /**
    * Runs the EVT-7 vision analysis on an uploaded photo (never persisted —
-   * see `search-by-photo.helpers.ts`) and searches existing items using the
-   * analysis's `suggested_name` + `search_keywords` + `tags` as search
-   * terms (capped to `MAX_SEARCH_TERMS` by `buildSearchTerms` — see EVT-17
-   * review round 2, finding 1a). Matching reuses the same
-   * name/description/properties-JSONB ILIKE approach as `list()`'s `search`
-   * filter, extended to also match against item tag names (the vision
-   * `tags` output has no exact-name equivalent to filter by, unlike
-   * `list()`'s `tag` param).
+   * see `search-by-photo.helpers.ts`) and searches existing items — scoped
+   * to `workspaceId` (EVT-40) — using the analysis's `suggested_name` +
+   * `search_keywords` + `tags` as search terms (capped to `MAX_SEARCH_TERMS`
+   * by `buildSearchTerms` — see EVT-17 review round 2, finding 1a). Matching
+   * reuses the same name/description/properties-JSONB ILIKE approach as
+   * `list()`'s `search` filter, extended to also match against item tag
+   * names (the vision `tags` output has no exact-name equivalent to filter
+   * by, unlike `list()`'s `tag` param).
    *
    * Ranking: each search term contributes at most one match to an item
    * (distinct-term hit count), sorted by that count descending, ties broken
@@ -133,7 +146,11 @@ export class ItemsService {
    * file, or a genuine no-match) degrades to `matches: []` with the
    * analysis echoed back so the client can show why.
    */
-  async searchByPhoto(buffer: Buffer, mimeType: string): Promise<SearchByPhotoResult> {
+  async searchByPhoto(
+    buffer: Buffer,
+    mimeType: string,
+    workspaceId: string,
+  ): Promise<SearchByPhotoResult> {
     const analysis = await this.aiService.analyzePhoto(buffer, mimeType);
     const terms = buildSearchTerms(analysis);
 
@@ -141,7 +158,7 @@ export class ItemsService {
       return { analysis, matches: [] };
     }
 
-    const hits = await this.matchingItemHitsForTerms(terms);
+    const hits = await this.matchingItemHitsForTerms(terms, workspaceId);
 
     if (hits.size === 0) {
       return { analysis, matches: [] };
@@ -173,10 +190,11 @@ export class ItemsService {
 
   /**
    * Single parameterized query across all `terms` (already capped to
-   * `MAX_SEARCH_TERMS`), replacing the previous per-term sequential
-   * `$queryRaw` loop — an unbounded/high-cardinality `search_keywords` list
-   * from a crafted image could previously drive one sequential full-table
-   * scan per term (EVT-17 review round 2, finding 1b).
+   * `MAX_SEARCH_TERMS`), scoped to `workspaceId` (EVT-40), replacing the
+   * previous per-term sequential `$queryRaw` loop — an unbounded/
+   * high-cardinality `search_keywords` list from a crafted image could
+   * previously drive one sequential full-table scan per term (EVT-17 review
+   * round 2, finding 1b).
    *
    * Each escaped `%term%` pattern is `unnest()`'d via `Prisma.join` (still
    * fully parameterized — never string-concatenated) and cross-joined
@@ -187,6 +205,7 @@ export class ItemsService {
    */
   private async matchingItemHitsForTerms(
     terms: string[],
+    workspaceId: string,
   ): Promise<Map<string, { count: number; createdAt: Date }>> {
     const patterns = terms.map((term) => `%${escapeLikePattern(term)}%`);
     const rows = await this.prisma.$queryRaw<{ id: string; createdAt: Date; term: string }[]>`
@@ -195,10 +214,11 @@ export class ItemsService {
       CROSS JOIN unnest(ARRAY[${Prisma.join(patterns)}]::text[]) AS t(term)
       LEFT JOIN "ItemTag" it ON it."itemId" = i.id
       LEFT JOIN "Tag" tag ON tag.id = it."tagId"
-      WHERE i.name ILIKE t.term ESCAPE '\\'
+      WHERE i."workspaceId" = ${workspaceId}::uuid
+        AND (i.name ILIKE t.term ESCAPE '\\'
          OR i.description ILIKE t.term ESCAPE '\\'
          OR i.properties::text ILIKE t.term ESCAPE '\\'
-         OR tag.name ILIKE t.term ESCAPE '\\'
+         OR tag.name ILIKE t.term ESCAPE '\\')
     `;
 
     const hits = new Map<string, { count: number; createdAt: Date }>();
@@ -213,9 +233,13 @@ export class ItemsService {
   // findById — GET /api/items/:id
   // -------------------------------------------------------------------------
 
-  async findById(id: string) {
-    const item = await this.prisma.item.findUnique({
-      where: { id },
+  /**
+   * 404s for a foreign-workspace id exactly the same way as a genuinely
+   * unknown id (EVT-40 AC 2) — never reveals whether the row exists at all.
+   */
+  async findById(id: string, workspaceId: string) {
+    const item = await this.prisma.item.findFirst({
+      where: { id, workspaceId },
       include: ITEM_DETAIL_INCLUDE,
     });
     if (!item) {
@@ -225,36 +249,73 @@ export class ItemsService {
   }
 
   // -------------------------------------------------------------------------
-  // findByQr — GET /api/items/by-qr/:qr
+  // findByQr — GET /api/items/by-qr/:qr — QR scan-landing (EVT-40 AC 4)
   // -------------------------------------------------------------------------
 
   /**
    * Resolves a QR token to whichever entity it belongs to.
    *
+   * Deliberately DIFFERENT scoping from every other method in this service
+   * (EVT-40 task goal: "QR scan-landing: token lookup stays global, but
+   * returns the resource only to members of ITS workspace"). Physical QR
+   * labels stay globally unique (see the Prisma schema's `qrCode` doc
+   * comment) — the token lookup itself is NOT filtered by the caller's
+   * current workspace context. Once a token resolves, the caller must be a
+   * member of the RESOLVED item/location's own workspace — any of the
+   * caller's memberships, not just their currently-selected one — or this
+   * throws the exact same `NotFoundException` as an unknown token (never
+   * distinguishes "wrong workspace" from "doesn't exist").
+   *
    * - Returns `{ kind: 'item', item }` when the token is on an Item.
    * - Returns `{ kind: 'location', location }` when the token is on a Location.
-   * - Throws `NotFoundException` when the token is not found in either table.
+   * - Throws `NotFoundException` when the token matches neither, OR when it
+   *   matches one but `userId` is not a member of that resource's workspace.
    */
-  async findByQr(qr: string) {
+  async findByQr(qr: string, userId: string) {
     // Check items first
     const item = await this.prisma.item.findUnique({
       where: { qrCode: qr },
       include: ITEM_DETAIL_INCLUDE,
     });
     if (item) {
+      if (!(await this.isMemberOfWorkspace(userId, item.workspaceId))) {
+        throw new NotFoundException(`No item or location found for QR token: ${qr}`);
+      }
       return { kind: 'item' as const, item };
     }
 
     // Check locations
     const location = await this.prisma.location.findUnique({
       where: { qrCode: qr },
-      select: { id: true, name: true, path: true, parentId: true, notes: true },
+      select: {
+        id: true,
+        name: true,
+        path: true,
+        parentId: true,
+        notes: true,
+        workspaceId: true,
+      },
     });
     if (location) {
-      return { kind: 'location' as const, location };
+      if (!(await this.isMemberOfWorkspace(userId, location.workspaceId))) {
+        throw new NotFoundException(`No item or location found for QR token: ${qr}`);
+      }
+      // Omit workspaceId from the public response — it's only needed above
+      // for the membership check, not part of the returned shape.
+      const { id, name, path, parentId, notes } = location;
+      return { kind: 'location' as const, location: { id, name, path, parentId, notes } };
     }
 
     throw new NotFoundException(`No item or location found for QR token: ${qr}`);
+  }
+
+  /** Whether `userId` has ANY membership (any role) in `workspaceId`. */
+  private async isMemberOfWorkspace(userId: string, workspaceId: string): Promise<boolean> {
+    const membership = await this.prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId } },
+      select: { userId: true },
+    });
+    return membership !== null;
   }
 
   // -------------------------------------------------------------------------
@@ -265,6 +326,16 @@ export class ItemsService {
    * `createdById` (EVT-14) is optional so this remains callable without a
    * caller in scope (e.g. seed scripts, tests predating auth).
    *
+   * `workspaceId` (EVT-40) is stamped explicitly on the created row — the
+   * schema's `@default(...)` literal is only a Default-Workspace fallback
+   * for pre-EVT-40 callers (seed scripts, migration backfill); every
+   * request-driven create must land in the CALLER's active workspace, not
+   * whatever the column default happens to be. Referenced `locationId` /
+   * `categoryId` / `photoIds` are validated to belong to the same
+   * workspace first — without this, a caller could smuggle a cross-tenant
+   * reference into their own item (EVT-40 risk: "any unscoped
+   * query/write is critical").
+   *
    * EVT-25: the row is created with `quantity: 0` and immediately brought up
    * to the requested starting quantity via `recordMovement` (kind `add`), in
    * the same transaction — `Item.quantity` is never written directly by this
@@ -272,11 +343,21 @@ export class ItemsService {
    * count came from. A starting quantity of `0` writes no movement (there's
    * nothing to record).
    */
-  async create(dto: CreateItemDto, createdById?: string) {
+  async create(dto: CreateItemDto, createdById: string | undefined, workspaceId: string) {
     const { tags: tagNames, photoIds, ...itemData } = dto;
 
+    if (itemData.locationId) {
+      await this.assertLocationInWorkspace(itemData.locationId, workspaceId);
+    }
+    if (itemData.categoryId) {
+      await this.assertCategoryInWorkspace(itemData.categoryId, workspaceId);
+    }
+    if (photoIds?.length) {
+      await this.assertPhotosInWorkspace(photoIds, workspaceId);
+    }
+
     // Upsert tags by name → get their IDs
-    const tagIds = tagNames?.length ? await this.tagsService.upsertMany(tagNames) : [];
+    const tagIds = tagNames?.length ? await this.tagsService.upsertMany(tagNames, workspaceId) : [];
 
     // First photoId becomes the primary photo
     const primaryPhotoId = photoIds?.[0] ?? null;
@@ -297,6 +378,7 @@ export class ItemsService {
           locationId: itemData.locationId,
           categoryId: itemData.categoryId,
           primaryPhotoId,
+          workspaceId,
           ...(createdById && { createdById }),
           ...(photoIds?.length && {
             photos: { connect: photoIds.map((id) => ({ id })) },
@@ -321,6 +403,7 @@ export class ItemsService {
           toLocationId: item.locationId,
           createdById,
           note: 'Initial intake',
+          workspaceId,
         },
         ITEM_DETAIL_INCLUDE,
       );
@@ -339,11 +422,17 @@ export class ItemsService {
    * of creating a duplicate item. Mirrors `ShoppingListService.restock`'s
    * use of `recordMovement` for the same `kind: 'add'` write path — the
    * ONLY place `Item.quantity` should ever be written from application code
-   * (EVT-25 AC 2). 404 when the item does not exist.
+   * (EVT-25 AC 2). 404 when the item does not exist OR belongs to a
+   * different workspace (EVT-40 AC 2).
    */
-  async receive(id: string, quantity: number, createdById?: string) {
-    const item = await this.prisma.item.findUnique({
-      where: { id },
+  async receive(
+    id: string,
+    quantity: number,
+    createdById: string | undefined,
+    workspaceId: string,
+  ) {
+    const item = await this.prisma.item.findFirst({
+      where: { id, workspaceId },
       select: { id: true, locationId: true },
     });
     if (!item) {
@@ -359,6 +448,7 @@ export class ItemsService {
         toLocationId: item.locationId,
         createdById,
         note: 'Received via barcode scan',
+        workspaceId,
       },
       ITEM_DETAIL_INCLUDE,
     );
@@ -373,6 +463,12 @@ export class ItemsService {
    * `createdById` (EVT-25) attributes any `adjust`/`move` movement this
    * update generates to the acting user; optional for callers without one
    * in scope (e.g. tests, scripts).
+   *
+   * `workspaceId` (EVT-40): the pre-edit read inside the transaction (see
+   * below) also asserts the item belongs to this workspace — 404 for a
+   * foreign item, same as `findById`. A newly-set `locationId`/`categoryId`
+   * is validated to belong to the same workspace too (same rationale as
+   * `create`).
    *
    * EVT-25: `quantity` and `locationId` are pulled out of the plain scalar
    * update and routed through `recordMovement` instead — the ONLY path that
@@ -396,7 +492,12 @@ export class ItemsService {
    * concurrent requests (EVT-25 review round 2, finding 1). Reading via
    * `tx`, immediately before the writes that use it, closes that window.
    */
-  async update(id: string, dto: UpdateItemDto, createdById?: string) {
+  async update(
+    id: string,
+    dto: UpdateItemDto,
+    createdById: string | undefined,
+    workspaceId: string,
+  ) {
     const {
       tags: tagNames,
       photoIds,
@@ -407,10 +508,22 @@ export class ItemsService {
       ...scalarData
     } = dto;
 
+    if (locationId) {
+      await this.assertLocationInWorkspace(locationId, workspaceId);
+    }
+    if (dto.categoryId) {
+      await this.assertCategoryInWorkspace(dto.categoryId, workspaceId);
+    }
+    if (photoIds?.length) {
+      await this.assertPhotosInWorkspace(photoIds, workspaceId);
+    }
+
     // Build tag update: full replacement when `tags` is provided in the DTO
     let tagsUpdate: Prisma.ItemUpdateInput['tags'] | undefined;
     if (tagNames !== undefined) {
-      const tagIds = tagNames.length ? await this.tagsService.upsertMany(tagNames) : [];
+      const tagIds = tagNames.length
+        ? await this.tagsService.upsertMany(tagNames, workspaceId)
+        : [];
       tagsUpdate = {
         deleteMany: {},
         ...(tagIds.length && { create: tagIds.map((tagId) => ({ tagId })) }),
@@ -423,9 +536,9 @@ export class ItemsService {
     return this.prisma.$transaction(async (tx) => {
       const current = await tx.item.findUnique({
         where: { id },
-        select: { quantity: true, locationId: true },
+        select: { quantity: true, locationId: true, workspaceId: true },
       });
-      if (!current) {
+      if (!current || current.workspaceId !== workspaceId) {
         throw new NotFoundException(`Item ${id} not found`);
       }
 
@@ -460,6 +573,7 @@ export class ItemsService {
             delta: quantity! - current.quantity,
             createdById,
             note: 'Manual quantity edit',
+            workspaceId,
           },
           ITEM_DETAIL_INCLUDE,
         ));
@@ -475,6 +589,7 @@ export class ItemsService {
             fromLocationId: current.locationId,
             toLocationId: locationId,
             createdById,
+            workspaceId,
           },
           ITEM_DETAIL_INCLUDE,
         ));
@@ -488,7 +603,15 @@ export class ItemsService {
   // remove — DELETE /api/items/:id
   // -------------------------------------------------------------------------
 
-  async remove(id: string): Promise<void> {
+  /** 404 for a foreign-workspace item, same as an unknown id (EVT-40 AC 2). */
+  async remove(id: string, workspaceId: string): Promise<void> {
+    const item = await this.prisma.item.findUnique({
+      where: { id },
+      select: { workspaceId: true },
+    });
+    if (!item || item.workspaceId !== workspaceId) {
+      throw new NotFoundException(`Item ${id} not found`);
+    }
     try {
       await this.prisma.item.delete({ where: { id } });
     } catch (err) {
@@ -516,6 +639,8 @@ export class ItemsService {
    * whether the count matched — the verification itself happened either way,
    * which is what keeps the item off the overdue queue.
    *
+   * 404 for a foreign-workspace item, same as an unknown id (EVT-40 AC 2).
+   *
    * Known race (EVT-27 review round 2, security-reviewer, optional): the
    * read-then-write here (read `current.quantity`, compute `delta`, apply
    * via `recordMovement`'s blind `{ increment: delta }`) is not race-safe
@@ -529,13 +654,18 @@ export class ItemsService {
    * (conditional update keyed on the pre-read quantity, with retry) is out
    * of scope for this round.
    */
-  async count(id: string, countedQuantity: number, createdById?: string) {
+  async count(
+    id: string,
+    countedQuantity: number,
+    createdById: string | undefined,
+    workspaceId: string,
+  ) {
     return this.prisma.$transaction(async (tx) => {
       const current = await tx.item.findUnique({
         where: { id },
-        select: { quantity: true, locationId: true },
+        select: { quantity: true, locationId: true, workspaceId: true },
       });
-      if (!current) {
+      if (!current || current.workspaceId !== workspaceId) {
         throw new NotFoundException(`Item ${id} not found`);
       }
 
@@ -550,6 +680,7 @@ export class ItemsService {
           toLocationId: current.locationId,
           createdById,
           note: 'Verification count',
+          workspaceId,
         });
       }
 
@@ -573,6 +704,8 @@ export class ItemsService {
    * its doc comment; this is the first endpoint to actually write the
    * `consume` StockMovementKind, previously reserved-but-unwritten).
    *
+   * 404 for a foreign-workspace item, same as an unknown id (EVT-40 AC 2).
+   *
    * `recordConsumption` returns `null` when there is nothing on hand to
    * consume (on-hand was already 0, or hit 0 mid-retry-loop — see its doc
    * comment). Unlike `ProjectsService.backflush()` — which loops over
@@ -593,10 +726,18 @@ export class ItemsService {
    * (an inline, one-tap-skippable prompt) — this method only computes
    * whether the moment qualifies.
    */
-  async consume(id: string, requestedQuantity: number, createdById?: string) {
+  async consume(
+    id: string,
+    requestedQuantity: number,
+    createdById: string | undefined,
+    workspaceId: string,
+  ) {
     return this.prisma.$transaction(async (tx) => {
-      const existing = await tx.item.findUnique({ where: { id }, select: { id: true } });
-      if (!existing) {
+      const existing = await tx.item.findUnique({
+        where: { id },
+        select: { id: true, workspaceId: true },
+      });
+      if (!existing || existing.workspaceId !== workspaceId) {
         throw new NotFoundException(`Item ${id} not found`);
       }
 
@@ -606,6 +747,7 @@ export class ItemsService {
         requestedQuantity,
         createdById,
         note: 'Consumed',
+        workspaceId,
       });
       if (!result) {
         throw new ConflictException(`Item ${id} has nothing on hand to consume`);
@@ -631,7 +773,8 @@ export class ItemsService {
    * "Today's count list": items on a count schedule (`countIntervalDays`
    * not null) whose next-due date has passed, most-overdue first, capped at
    * `VERIFICATION_QUEUE_CAP`. Items with no `countIntervalDays` NEVER
-   * appear, regardless of how stale `lastVerifiedAt` is (AC 3).
+   * appear, regardless of how stale `lastVerifiedAt` is (AC 3). Scoped to
+   * `workspaceId` (EVT-40) — the queue is per-workspace, same as `list()`.
    *
    * Filtering/sorting happens in application code (not SQL date-interval
    * arithmetic) after fetching every scheduled item — the inventory sizes
@@ -640,9 +783,10 @@ export class ItemsService {
    * pure function precisely so overdue-ness and sort order can be unit
    * tested without a database.
    */
-  async listVerificationQueue(now: Date = new Date()) {
+  async listVerificationQueue(now: Date | undefined, workspaceId: string) {
+    const effectiveNow = now ?? new Date();
     const items = await this.prisma.item.findMany({
-      where: { countIntervalDays: { not: null } },
+      where: { countIntervalDays: { not: null }, workspaceId },
       select: {
         id: true,
         name: true,
@@ -657,11 +801,53 @@ export class ItemsService {
     });
 
     return items
-      .map((item) => ({ item, overdueBy: daysOverdue(item, now) }))
+      .map((item) => ({ item, overdueBy: daysOverdue(item, effectiveNow) }))
       .filter(({ overdueBy }) => overdueBy >= 0)
       .sort((a, b) => b.overdueBy - a.overdueBy)
       .slice(0, VERIFICATION_QUEUE_CAP)
       .map(({ item, overdueBy }) => ({ ...item, daysOverdue: Math.floor(overdueBy) }));
+  }
+
+  // -------------------------------------------------------------------------
+  // EVT-40 write-path workspace-consistency guards
+  // -------------------------------------------------------------------------
+
+  /**
+   * Validates `locationId` belongs to `workspaceId` before it's attached to
+   * an item — without this, a create/update could smuggle in a reference to
+   * another workspace's Location row (the FK itself doesn't enforce
+   * workspace consistency across relations). 404 rather than 400 — same
+   * "don't confirm existence" posture as everywhere else in this module.
+   */
+  private async assertLocationInWorkspace(locationId: string, workspaceId: string): Promise<void> {
+    const location = await this.prisma.location.findFirst({
+      where: { id: locationId, workspaceId },
+      select: { id: true },
+    });
+    if (!location) {
+      throw new NotFoundException(`Location ${locationId} not found`);
+    }
+  }
+
+  /** Same rationale as `assertLocationInWorkspace`, for `categoryId`. */
+  private async assertCategoryInWorkspace(categoryId: string, workspaceId: string): Promise<void> {
+    const category = await this.prisma.category.findFirst({
+      where: { id: categoryId, workspaceId },
+      select: { id: true },
+    });
+    if (!category) {
+      throw new NotFoundException(`Category ${categoryId} not found`);
+    }
+  }
+
+  /** Same rationale as `assertLocationInWorkspace`, for `photoIds`. */
+  private async assertPhotosInWorkspace(photoIds: string[], workspaceId: string): Promise<void> {
+    const count = await this.prisma.photo.count({
+      where: { id: { in: photoIds }, workspaceId },
+    });
+    if (count !== photoIds.length) {
+      throw new NotFoundException('One or more photos not found');
+    }
   }
 }
 

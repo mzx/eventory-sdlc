@@ -12,6 +12,7 @@ import {
   Query,
   UploadedFile,
   UseFilters,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -19,6 +20,8 @@ import { Throttle } from '@nestjs/throttler';
 import { IsOptional, IsUUID } from 'class-validator';
 import { AuthenticatedUser, CurrentUser } from '../auth/decorators';
 import { uploadThrottlerConfig } from '../common/throttle.config';
+import { CurrentWorkspace, WorkspaceContext } from '../workspace/workspace-context';
+import { WorkspaceWriteGuard } from '../workspace/workspace-write.guard';
 import { photoUploadMulterOptions, PayloadTooLargeFilter } from './photo-upload.helpers';
 import { PhotosService } from './photos.service';
 
@@ -50,7 +53,10 @@ export class PhotosController {
    *   intake form — nothing is auto-created from it.
    *
    * Returns the Photo row plus a public `url` the file is served at.
-   * `uploadedById` is stamped from the caller's session (EVT-14).
+   * `uploadedById` is stamped from the caller's session (EVT-14). Persisted
+   * into the caller's active workspace (EVT-40) — when `itemId` is
+   * provided it must belong to the same workspace (400 otherwise). Mutating
+   * — a `viewer` gets 403 (EVT-40 AC 5).
    *
    * Rate-limited more strictly than the app-wide default (10/min per IP by
    * default, env-tunable — see `common/throttle.config.ts`) since this
@@ -60,6 +66,7 @@ export class PhotosController {
    * EVT-7 review round 2, finding 1.
    */
   @Post('upload')
+  @UseGuards(WorkspaceWriteGuard)
   @Throttle(uploadThrottlerConfig())
   @HttpCode(HttpStatus.CREATED)
   @UseFilters(new PayloadTooLargeFilter())
@@ -69,17 +76,30 @@ export class PhotosController {
     @Body() body: UploadPhotoDto,
     @Query('analyze') analyze: string | undefined,
     @CurrentUser() user: AuthenticatedUser,
+    @CurrentWorkspace() workspace: WorkspaceContext,
   ) {
     if (!file) {
       throw new BadRequestException('file is required');
     }
-    return this.photosService.savePhoto(file, body.itemId, analyze === 'true', user.id);
+    return this.photosService.savePhoto(
+      file,
+      body.itemId,
+      analyze === 'true',
+      user.id,
+      workspace.id,
+    );
   }
 
-  /** GET /api/photos/:id — metadata row. 404 when not found. */
+  /**
+   * GET /api/photos/:id — metadata row. 404 when not found OR belonging to
+   * a different workspace (EVT-40 AC 3).
+   */
   @Get(':id')
-  findById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.photosService.findById(id);
+  findById(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ) {
+    return this.photosService.findById(id, workspace.id);
   }
 
   /**
@@ -87,11 +107,17 @@ export class PhotosController {
    *
    * Removes a photo (row + on-disk file). If it was an item's primary
    * photo, `Item.primaryPhotoId` is cleared automatically (schema
-   * `onDelete: SetNull`). 404 when the photo does not exist.
+   * `onDelete: SetNull`). 404 when the photo does not exist OR belongs to a
+   * different workspace (EVT-40 AC 3). Mutating — a `viewer` gets 403
+   * (EVT-40 AC 5).
    */
   @Delete(':id')
+  @UseGuards(WorkspaceWriteGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
-  remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    return this.photosService.remove(id);
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentWorkspace() workspace: WorkspaceContext,
+  ): Promise<void> {
+    return this.photosService.remove(id, workspace.id);
   }
 }

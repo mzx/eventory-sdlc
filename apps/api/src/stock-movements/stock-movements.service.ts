@@ -58,6 +58,22 @@ export interface RecordMovementInput {
   projectId?: string | null;
   note?: string | null;
   createdById?: string | null;
+  /**
+   * The workspace this movement belongs to (EVT-40) — MUST be the same
+   * workspace as `itemId`'s own `Item.workspaceId`; the caller (ItemsService)
+   * has already verified `itemId` belongs to its active tenant context
+   * before reaching this method, so the movement row simply inherits that
+   * same, already-asserted value rather than this method re-deriving it
+   * with an extra query.
+   *
+   * Optional so callers outside this task's scope (`ProjectsService`
+   * backflush, `ShoppingListService` restock — both remaining modules,
+   * EVT-41) keep compiling and behaving exactly as before: an omitted
+   * `workspaceId` leaves the column on its schema `@default(...)` (the
+   * Default Workspace), same as pre-EVT-40. Every call site THIS task
+   * touches (`ItemsService`) always passes it explicitly.
+   */
+  workspaceId?: string;
 }
 
 export interface RecordConsumptionInput {
@@ -73,6 +89,8 @@ export interface RecordConsumptionInput {
   projectId?: string | null;
   note?: string | null;
   createdById?: string | null;
+  /** See `RecordMovementInput.workspaceId` (EVT-40) — same optionality rationale. */
+  workspaceId?: string;
 }
 
 /**
@@ -149,6 +167,7 @@ export class StockMovementsService {
           projectId: input.projectId ?? null,
           note: input.note ?? null,
           createdById: input.createdById ?? null,
+          ...(input.workspaceId && { workspaceId: input.workspaceId }),
         },
       });
 
@@ -248,6 +267,7 @@ export class StockMovementsService {
             projectId: input.projectId ?? null,
             note: input.note ?? null,
             createdById: input.createdById ?? null,
+            ...(input.workspaceId && { workspaceId: input.workspaceId }),
           },
         });
 
@@ -325,9 +345,16 @@ export class StockMovementsService {
   // listForItem — GET /api/items/:id/movements
   // -------------------------------------------------------------------------
 
-  /** Paginated movement history for one item, newest first. 404 when the item doesn't exist. */
-  async listForItem(itemId: string, query: ListMovementsQueryDto) {
-    const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { id: true } });
+  /**
+   * Paginated movement history for one item, newest first. 404 when the
+   * item doesn't exist OR belongs to a different workspace (EVT-40 AC 2) —
+   * same "don't confirm existence" posture as `ItemsService`.
+   */
+  async listForItem(itemId: string, query: ListMovementsQueryDto, workspaceId: string) {
+    const item = await this.prisma.item.findFirst({
+      where: { id: itemId, workspaceId },
+      select: { id: true },
+    });
     if (!item) {
       throw new NotFoundException(`Item ${itemId} not found`);
     }

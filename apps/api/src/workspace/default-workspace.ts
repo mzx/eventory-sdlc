@@ -22,7 +22,7 @@
  * `getDefaultWorkspaceId` below rather than hand-rolling the literal.
  */
 
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient, WorkspaceRole } from '@prisma/client';
 
 /**
  * Fixed, well-known id of the single workspace the EVT-39 migration creates
@@ -70,6 +70,36 @@ export async function defaultWorkspaceTagWhere(
 ): Promise<Prisma.TagWhereUniqueInput> {
   const workspaceId = await getDefaultWorkspaceId(prisma);
   return { workspaceId_name: { workspaceId, name } };
+}
+
+/** Minimal shape {@link ensureDefaultWorkspaceMembership} needs from a Prisma client. */
+type MembershipClient = WorkspaceLookupClient & Pick<PrismaClient, 'workspaceMember'>;
+
+/**
+ * Grants `userId` a `WorkspaceMember` row in the Default Workspace,
+ * idempotently (a no-op if they already have one) — EVT-40's
+ * `WorkspaceContextGuard` is global, so an `approved` user with ZERO
+ * workspace memberships is locked out of every tenant-scoped route
+ * (items/photos/QR). Full membership management (inviting a user to a
+ * SPECIFIC, non-default workspace) is EVT-42's job; this narrower helper
+ * only keeps the pre-EVT-40, single-household-workspace deployment target
+ * working without that machinery existing yet. Every code path that makes a
+ * user `approved` calls this:
+ *   - `UsersService.updateStatus` (an admin approving a pending user)
+ *   - `AuthService.upsertFromGoogleProfile`'s three auto-promotion branches
+ *     (first-ever sign-in, and the `EVENTORY_ADMIN_EMAILS` allowlist)
+ */
+export async function ensureDefaultWorkspaceMembership(
+  prisma: MembershipClient,
+  userId: string,
+  role: WorkspaceRole,
+): Promise<void> {
+  const workspaceId = await getDefaultWorkspaceId(prisma);
+  await prisma.workspaceMember.upsert({
+    where: { workspaceId_userId: { workspaceId, userId } },
+    update: {},
+    create: { workspaceId, userId, role },
+  });
 }
 
 /** Test-only: resets the module-level cache between test runs. */

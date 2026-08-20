@@ -151,26 +151,25 @@ export class PhotosService {
    * this photo automatically becomes the primary (EVT-24 AC1) — see
    * `promoteToPrimaryIfNone`. Does not touch an item that already has a
    * primary (AC2).
+   *
+   * `workspaceId` (EVT-40) is stamped explicitly, same rationale as
+   * `ItemsService.create`. When `itemId` is provided, it's now ALWAYS
+   * validated to belong to `workspaceId` first (`assertItemInWorkspace`) —
+   * previously this only ran on the `analyze && itemId` path; without it, a
+   * caller could attach their upload to another workspace's item (EVT-40
+   * risk: "any unscoped query/write is critical").
    */
   async savePhoto(
     file: UploadedPhotoFile,
-    itemId?: string,
-    analyze = false,
-    uploadedById?: string,
+    itemId: string | undefined,
+    analyze: boolean,
+    uploadedById: string | undefined,
+    workspaceId: string,
   ) {
     try {
       const { width, height } = await this.readDimensions(file.path, file.mimetype);
-      // Pre-validate itemId before paying for a billed AI call —
-      // `photo.create`'s own FK-violation handling below (P2003 → 400)
-      // remains the source of truth for the final persisted row; this is a
-      // cheap short-circuit for the case this task actually cares about:
-      // `analyze=true` previously ran the vision call before Prisma ever
-      // got a chance to reject an invalid FK (EVT-7 review round 2,
-      // finding 5). Skipped when `analyze` is false since there's no
-      // billed call to protect and `photo.create` already validates the FK
-      // for free in that path.
-      if (analyze && itemId) {
-        await this.assertItemExists(itemId);
+      if (itemId) {
+        await this.assertItemInWorkspace(itemId, workspaceId);
       }
       // undefined (not null) when `analyze` is false, so the `data` object
       // below omits the key entirely and the column keeps its schema
@@ -184,6 +183,7 @@ export class PhotosService {
           sizeBytes: file.size,
           width,
           height,
+          workspaceId,
           ...(aiAnalysis !== undefined && {
             aiAnalysis: aiAnalysis as unknown as Prisma.InputJsonValue,
           }),
@@ -208,8 +208,9 @@ export class PhotosService {
   // findById — GET /api/photos/:id
   // -------------------------------------------------------------------------
 
-  async findById(id: string) {
-    const photo = await this.prisma.photo.findUnique({ where: { id } });
+  /** 404 for a foreign-workspace photo, same as an unknown id (EVT-40 AC 3). */
+  async findById(id: string, workspaceId: string) {
+    const photo = await this.prisma.photo.findFirst({ where: { id, workspaceId } });
     if (!photo) {
       throw new NotFoundException(`Photo ${id} not found`);
     }
@@ -233,10 +234,11 @@ export class PhotosService {
    * auto-promote per `promoteToPrimaryIfNone`, since `primaryPhotoId` is
    * `null` again at that point).
    *
-   * 404 when the photo does not exist.
+   * 404 when the photo does not exist OR belongs to a different workspace
+   * (EVT-40 AC 3).
    */
-  async remove(id: string): Promise<void> {
-    const photo = await this.prisma.photo.findUnique({ where: { id } });
+  async remove(id: string, workspaceId: string): Promise<void> {
+    const photo = await this.prisma.photo.findFirst({ where: { id, workspaceId } });
     if (!photo) {
       throw new NotFoundException(`Photo ${id} not found`);
     }
@@ -312,12 +314,16 @@ export class PhotosService {
   }
 
   /**
-   * Cheap `itemId` FK pre-check invoked only from the `analyze && itemId`
-   * branch of `savePhoto` — see the call site for why.
+   * `itemId` FK + workspace pre-check invoked from every `savePhoto` call
+   * that provides an `itemId` (EVT-40 — previously only ran on the
+   * `analyze && itemId` path; see `savePhoto`'s doc comment for why it now
+   * always runs). Confirms the item exists AND belongs to `workspaceId`
+   * before a billed AI call (when `analyze` is true) or the `photo.create`
+   * write.
    */
-  private async assertItemExists(itemId: string): Promise<void> {
-    const item = await this.prisma.item.findUnique({
-      where: { id: itemId },
+  private async assertItemInWorkspace(itemId: string, workspaceId: string): Promise<void> {
+    const item = await this.prisma.item.findFirst({
+      where: { id: itemId, workspaceId },
       select: { id: true },
     });
     if (!item) {
