@@ -28,6 +28,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import type { LocationKind } from '../api';
 import type { LocationNode } from '../lib/locationTree';
 import { frostedPanel } from '../theme';
+import { useIsViewer } from '../workspace/useActiveWorkspace';
 
 /**
  * Visual indent per tree depth. Below `sm`, capped at 3 levels — at the
@@ -139,6 +140,15 @@ function LocationTreeRow({
     };
   }, []);
 
+  // EVT-43 round-2 review, MAJOR 2: `LocationsPage`/`LocationDetailPage`
+  // wire real add/rename/delete mutations into this tree unconditionally —
+  // every OTHER mutating surface in the app hides/disables itself for a
+  // viewer (AC6), but this one didn't. The page-level `READ_ONLY_HINT`
+  // caption already communicates the read-only state once per page, so each
+  // row here just hides its own actions rather than repeating the hint at
+  // every node.
+  const isViewer = useIsViewer();
+
   const hasChildren = node.children.length > 0;
 
   function submitChild() {
@@ -226,104 +236,112 @@ function LocationTreeRow({
             sx={{ flexShrink: 0 }}
           />
 
-          {/* Desktop (>= sm): the three actions stay inline, unchanged. */}
-          <Stack
-            direction="row"
-            spacing={0.5}
-            sx={{ display: { xs: 'none', sm: 'flex' }, flexShrink: 0 }}
-          >
-            <Tooltip title="Add child location">
-              <IconButton
-                size="small"
-                aria-label={`Add child to ${node.name}`}
-                onClick={() => setAddingChild((v) => !v)}
-              >
-                <AddIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="Rename">
-              <IconButton size="small" aria-label={`Rename ${node.name}`} onClick={startRename}>
-                <EditOutlinedIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={hasChildren ? 'Delete disabled — has child locations' : 'Delete'}>
-              <span>
+          {/* Desktop (>= sm): the three actions stay inline, unchanged.
+              Hidden entirely for a viewer (EVT-43 AC6, round-2 review MAJOR 2). */}
+          {!isViewer && (
+            <Stack
+              direction="row"
+              spacing={0.5}
+              sx={{ display: { xs: 'none', sm: 'flex' }, flexShrink: 0 }}
+            >
+              <Tooltip title="Add child location">
                 <IconButton
                   size="small"
-                  aria-label={`Delete ${node.name}`}
-                  disabled={hasChildren}
-                  onClick={confirmDelete}
+                  aria-label={`Add child to ${node.name}`}
+                  onClick={() => setAddingChild((v) => !v)}
                 >
-                  <DeleteOutlineIcon fontSize="small" />
+                  <AddIcon fontSize="small" />
                 </IconButton>
-              </span>
-            </Tooltip>
-          </Stack>
+              </Tooltip>
+              <Tooltip title="Rename">
+                <IconButton size="small" aria-label={`Rename ${node.name}`} onClick={startRename}>
+                  <EditOutlinedIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title={hasChildren ? 'Delete disabled — has child locations' : 'Delete'}>
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label={`Delete ${node.name}`}
+                    disabled={hasChildren}
+                    onClick={confirmDelete}
+                  >
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Stack>
+          )}
 
           {/* xs: one overflow button + menu instead of three icon buttons —
               at depth >= 2 there isn't 190-210px to spare alongside a
-              readable name on a 390px screen. */}
-          <Tooltip title="More actions">
-            <IconButton
-              size="small"
-              aria-label={`More actions for ${node.name}`}
-              onClick={(e: MouseEvent<HTMLElement>) => setMenuAnchor(e.currentTarget)}
-              sx={{ display: { xs: 'inline-flex', sm: 'none' }, flexShrink: 0 }}
-            >
-              <MoreVertIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Menu
-            anchorEl={menuAnchor}
-            open={Boolean(menuAnchor)}
-            onClose={() => setMenuAnchor(null)}
-          >
-            <MenuItem
-              onClick={() => {
-                setMenuAnchor(null);
-                setAddingChild((v) => !v);
-              }}
-            >
-              <ListItemIcon>
-                <AddIcon fontSize="small" />
-              </ListItemIcon>
-              Add child
-            </MenuItem>
-            <MenuItem
-              onClick={() => {
-                setMenuAnchor(null);
-                // Deferred: MUI's Menu restores focus to the anchor
-                // (`More actions`) as it closes. Calling `startRename`
-                // synchronously here races that restoration — the freshly
-                // mounted, `autoFocus`ed rename `TextField` can lose focus
-                // again immediately, firing its `onBlur` no-op-submit and
-                // snapping straight back out of rename mode. Letting the
-                // Menu's close/focus-restore finish first avoids it.
-                renameTimerRef.current = setTimeout(startRename, 0);
-              }}
-            >
-              <ListItemIcon>
-                <EditOutlinedIcon fontSize="small" />
-              </ListItemIcon>
-              Rename
-            </MenuItem>
-            <MenuItem
-              disabled={hasChildren}
-              onClick={() => {
-                setMenuAnchor(null);
-                confirmDelete();
-              }}
-            >
-              <ListItemIcon>
-                <DeleteOutlineIcon fontSize="small" />
-              </ListItemIcon>
-              {hasChildren ? 'Delete (has child locations)' : 'Delete'}
-            </MenuItem>
-          </Menu>
+              readable name on a 390px screen. Hidden entirely for a viewer,
+              same as the desktop row above. */}
+          {!isViewer && (
+            <>
+              <Tooltip title="More actions">
+                <IconButton
+                  size="small"
+                  aria-label={`More actions for ${node.name}`}
+                  onClick={(e: MouseEvent<HTMLElement>) => setMenuAnchor(e.currentTarget)}
+                  sx={{ display: { xs: 'inline-flex', sm: 'none' }, flexShrink: 0 }}
+                >
+                  <MoreVertIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Menu
+                anchorEl={menuAnchor}
+                open={Boolean(menuAnchor)}
+                onClose={() => setMenuAnchor(null)}
+              >
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null);
+                    setAddingChild((v) => !v);
+                  }}
+                >
+                  <ListItemIcon>
+                    <AddIcon fontSize="small" />
+                  </ListItemIcon>
+                  Add child
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null);
+                    // Deferred: MUI's Menu restores focus to the anchor
+                    // (`More actions`) as it closes. Calling `startRename`
+                    // synchronously here races that restoration — the freshly
+                    // mounted, `autoFocus`ed rename `TextField` can lose focus
+                    // again immediately, firing its `onBlur` no-op-submit and
+                    // snapping straight back out of rename mode. Letting the
+                    // Menu's close/focus-restore finish first avoids it.
+                    renameTimerRef.current = setTimeout(startRename, 0);
+                  }}
+                >
+                  <ListItemIcon>
+                    <EditOutlinedIcon fontSize="small" />
+                  </ListItemIcon>
+                  Rename
+                </MenuItem>
+                <MenuItem
+                  disabled={hasChildren}
+                  onClick={() => {
+                    setMenuAnchor(null);
+                    confirmDelete();
+                  }}
+                >
+                  <ListItemIcon>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </ListItemIcon>
+                  {hasChildren ? 'Delete (has child locations)' : 'Delete'}
+                </MenuItem>
+              </Menu>
+            </>
+          )}
         </Stack>
       </ListItem>
 
-      {addingChild && (
+      {addingChild && !isViewer && (
         <ListItem disableGutters sx={{ pl: indentPl(depth + 1, 4), py: 0.5 }}>
           {/* Wraps below `sm` — the name field plus the two-option toggle
               group plus the confirm button are similarly over-wide at 390px

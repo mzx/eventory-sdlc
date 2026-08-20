@@ -100,6 +100,52 @@ describe('useMyWorkspaces (EVT-43)', () => {
     expect(screen.getByTestId('workspace-id')).toHaveTextContent('none');
     expect(getActiveWorkspaceRole()).toBeNull();
   });
+
+  // Round-2 review, MAJOR 1: previously, a removed member's `X-Workspace-Id`
+  // header was sent on `GET /api/workspaces` itself, 403ing the ONE request
+  // that could have told them their membership changed — a silent,
+  // unrecoverable lockout. `fetchWorkspaces` no longer sends the header at
+  // all (see api.ts), so the list keeps loading regardless of what's
+  // persisted; this test additionally exercises the full recovery loop —
+  // some OTHER request 403s on the now-stale id, which self-heals (clears
+  // the id, invalidates the cached list) and this hook's own fallback effect
+  // then lands on a still-valid membership from the refreshed list.
+  it('removed-member recovery: a workspace-context 403 on another request clears the stale id and re-resolves from a refreshed workspaces list', async () => {
+    api.setActiveWorkspaceId('removed-ws');
+    const fetchWorkspacesMock = vi
+      .spyOn(api, 'fetchWorkspaces')
+      .mockResolvedValueOnce([workspace({ id: 'ws-1', role: 'owner' })])
+      .mockResolvedValueOnce([workspace({ id: 'ws-2', name: 'Garage', role: 'member' })]);
+
+    renderProbe();
+
+    // The list loads successfully despite the stale/foreign persisted id
+    // (the header is never sent on this call) and the existing fallback
+    // effect already picks a valid membership from it.
+    await waitFor(() => expect(screen.getByTestId('workspace-id')).toHaveTextContent('ws-1'));
+
+    // Some other request 403s because `removed-ws` — the id `fetchWorkspaces`
+    // never actually validated — is rejected by every OTHER endpoint's
+    // `WorkspaceContextGuard` check. Simulated directly against `fetchItems`
+    // rather than through a page, to isolate the self-heal wiring itself.
+    api.setActiveWorkspaceId('removed-ws');
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          statusCode: 403,
+          message: 'Not a member of the requested workspace',
+          error: 'Forbidden',
+        }),
+        { status: 403 },
+      ),
+    );
+    await expect(api.fetchItems()).rejects.toThrow();
+
+    // Self-heal cleared the id and invalidated the cached list; this hook's
+    // fallback effect then lands on the refreshed list's own membership.
+    await waitFor(() => expect(fetchWorkspacesMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId('workspace-id')).toHaveTextContent('ws-2'));
+  });
 });
 
 describe('pending invite token helpers (EVT-43 AC4)', () => {

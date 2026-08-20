@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
 import { setActiveWorkspaceId } from '../api';
+import { expectAllQueryKeysScopedToWorkspace } from '../test/queryKeyAssertions';
 import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { MembersSettingsPage } from './MembersSettingsPage';
 
@@ -33,11 +34,12 @@ function invite(overrides: Partial<api.WorkspaceInviteRow> = {}): api.WorkspaceI
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <MembersSettingsPage />
     </QueryClientProvider>,
   );
+  return { ...result, queryClient };
 }
 
 describe('MembersSettingsPage (EVT-43 AC5)', () => {
@@ -63,6 +65,20 @@ describe('MembersSettingsPage (EVT-43 AC5)', () => {
     expect(within(table).getByText('owner@example.com')).toBeInTheDocument();
     expect(within(table).getByText('kid@example.com')).toBeInTheDocument();
     expect(within(table).getByText('Owner')).toBeInTheDocument();
+  });
+
+  // Round-2 review, suggestion 10 — same structural guard as ItemsPage's
+  // AC1 test, extracted to `test/queryKeyAssertions.ts` so it's cheap to
+  // apply here too.
+  it('AC1: every cached query key carries the active workspace id', async () => {
+    setActiveWorkspaceRole('owner');
+    vi.spyOn(api, 'fetchWorkspaceMembers').mockResolvedValue([member()]);
+    vi.spyOn(api, 'fetchWorkspaceInvites').mockResolvedValue([]);
+
+    const { queryClient } = renderPage();
+    await screen.findByRole('table', { name: /workspace members/i });
+
+    expectAllQueryKeysScopedToWorkspace(queryClient, 'ws-1');
   });
 
   it('owner can toggle a member between member and viewer', async () => {

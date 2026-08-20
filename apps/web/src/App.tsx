@@ -179,6 +179,39 @@ function AppShell() {
     );
   }
 
+  // Distinct from the zero-membership branch below (round-2 review, MINOR
+  // 4): `workspacesQuery.data` is also `undefined` on a network/API
+  // failure, which `workspaces.length === 0` can't tell apart from "really
+  // has no memberships" — silently rendering OnboardingPage for a returning
+  // member whose `GET /api/workspaces` just failed would be actively
+  // misleading (it reads as "you have no workspaces" rather than "we
+  // couldn't check").
+  if (workspacesQuery.isError) {
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 2,
+          minHeight: '100vh',
+          px: 2,
+          textAlign: 'center',
+        }}
+      >
+        <Typography variant="body1" color="text.secondary">
+          {workspacesQuery.error instanceof Error
+            ? workspacesQuery.error.message
+            : 'Failed to load your workspaces.'}
+        </Typography>
+        <Button variant="outlined" onClick={() => void workspacesQuery.refetch()}>
+          Retry
+        </Button>
+      </Box>
+    );
+  }
+
   if (workspaces.length === 0) {
     return <OnboardingPage />;
   }

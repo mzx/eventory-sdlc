@@ -52,6 +52,25 @@ describe('LocationsPage', () => {
     expect(screen.getByText(/read-only access/i)).toBeInTheDocument();
   });
 
+  // Round-2 review, MAJOR 2: the tree's own per-row add/rename/delete
+  // controls previously ignored the caller's role entirely — the top-level
+  // "Add root location" gate above doesn't cover them.
+  it('EVT-43 AC6: hides the per-row add/rename/delete controls in the tree for a viewer', async () => {
+    vi.spyOn(api, 'fetchLocations').mockResolvedValue([
+      loc({ id: 'garage', name: 'Garage', path: 'garage', parentId: null, itemCount: 5 }),
+    ]);
+    setActiveWorkspaceRole('viewer');
+
+    renderLocationsPage();
+
+    expect(await screen.findByText('Garage')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add child to Garage' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Rename Garage' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'More actions for Garage' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('renders a seeded tree nested with counts, and expand/collapse toggles children', async () => {
     vi.spyOn(api, 'fetchLocations').mockResolvedValue([
       loc({ id: 'garage', name: 'Garage', path: 'garage', parentId: null, itemCount: 5 }),

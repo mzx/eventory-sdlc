@@ -431,6 +431,38 @@ describe('App / workspace UI (EVT-43)', () => {
     expect(screen.queryByText('No items yet')).not.toBeInTheDocument();
   });
 
+  // Round-2 review, MINOR 4: a failed `GET /api/workspaces` also resolves
+  // `workspacesQuery.data` to `undefined` — indistinguishable from "really
+  // has zero memberships" by `workspaces.length === 0` alone. Silently
+  // showing OnboardingPage for a returning member whose request just failed
+  // misleads them into thinking they have no workspaces at all.
+  it('MINOR 4: a failed workspaces fetch shows a distinct error + retry, not the onboarding page', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchShoppingList').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchVerificationQueue').mockResolvedValue([]);
+    const fetchWorkspacesMock = vi
+      .spyOn(api, 'fetchWorkspaces')
+      .mockRejectedValueOnce(new Error('workspaces boom'))
+      // Not `-Once`: once the shell renders past the error branch, other
+      // mounted consumers of `useMyWorkspaces()` (e.g. `WorkspaceSwitcherDialog`,
+      // sharing the same query key) may trigger their own background
+      // refetch-on-mount — this only needs to keep succeeding from here on.
+      .mockResolvedValue([workspace()]);
+
+    renderApp('/');
+
+    expect(await screen.findByText('workspaces boom')).toBeInTheDocument();
+    expect(screen.queryByText('Welcome to Eventory')).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /retry/i }));
+
+    await waitFor(() => expect(fetchWorkspacesMock.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByText('No items yet')).toBeInTheDocument();
+  });
+
   it('AC3: "Switch workspace" in the avatar menu opens the switcher listing every workspace', async () => {
     vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser());
     vi.spyOn(api, 'fetchItems').mockResolvedValue([]);

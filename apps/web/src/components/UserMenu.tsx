@@ -13,7 +13,8 @@ import {
 } from '@mui/material';
 import { useState, type MouseEvent } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { authLogoutUrl, type AuthUser } from '../api';
+import { authLogoutUrl, setActiveWorkspaceId, type AuthUser } from '../api';
+import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 
 /** Renders `name`'s initial, or `?` when both `name` and `email` are absent. */
 function initial(user: AuthUser): string {
@@ -106,7 +107,26 @@ export function UserMenu({
             Admin &rsaquo; Users
           </MenuItem>
         )}
-        <MenuItem component="a" href={authLogoutUrl()}>
+        <MenuItem
+          component="a"
+          href={authLogoutUrl()}
+          onClick={() => {
+            // Round-2 review, MAJOR 1 ("nothing clears the key on logout"):
+            // this is a full-page nav (`<a href>`), not a client-side route
+            // — the JS module graph tears down and reloads from scratch, but
+            // `localStorage` survives the reload. Left unhandled, the NEXT
+            // sign-in on this browser (a different account on a shared
+            // machine, or the same account after switching workspaces
+            // elsewhere) inherits this session's `X-Workspace-Id`, which may
+            // 403 every request until `useMyWorkspaces`'s own fallback
+            // effect resolves it. Clearing synchronously here — the browser
+            // doesn't navigate away until this handler returns — removes
+            // that stale carry-over entirely rather than relying on
+            // self-heal to paper over it after the fact.
+            setActiveWorkspaceId(null);
+            setActiveWorkspaceRole(null);
+          }}
+        >
           <ListItemIcon>
             <LogoutIcon fontSize="small" />
           </ListItemIcon>

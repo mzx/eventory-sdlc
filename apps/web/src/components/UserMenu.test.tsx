@@ -1,8 +1,9 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
-import type { AuthUser } from '../api';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getActiveWorkspaceId, setActiveWorkspaceId, type AuthUser } from '../api';
+import { getActiveWorkspaceRole, setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { UserMenu } from './UserMenu';
 
 function authUser(overrides: Partial<AuthUser> = {}): AuthUser {
@@ -102,5 +103,37 @@ describe('UserMenu workspace switcher (EVT-43)', () => {
     );
     await openMenu();
     expect(screen.getByRole('menuitem', { name: /^members$/i })).toBeInTheDocument();
+  });
+});
+
+// Round-2 review, MAJOR 1: `authLogoutUrl()` is a full-page nav — the JS
+// module graph (and its in-memory active-workspace store) tears down and
+// reloads from scratch, but `localStorage` survives the reload. Left
+// unhandled, the NEXT sign-in on this browser (a different account on a
+// shared machine, or the same account rejoining later) would inherit this
+// session's `X-Workspace-Id`/role.
+describe('UserMenu logout clears the stale active-workspace selection (EVT-43 round-2)', () => {
+  afterEach(() => {
+    setActiveWorkspaceId(null);
+    setActiveWorkspaceRole(null);
+    vi.restoreAllMocks();
+  });
+
+  it('clears the persisted workspace id and role when "Log out" is clicked', async () => {
+    setActiveWorkspaceId('ws-1');
+    setActiveWorkspaceRole('owner');
+    // jsdom logs (but does not throw on) "Not implemented: navigation" for a
+    // real `<a href>` click — silence it so the assertion output stays
+    // readable; the handler under test runs synchronously before any
+    // navigation attempt either way.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(<UserMenu user={authUser()} />);
+    await openMenu();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('menuitem', { name: /log out/i }));
+
+    expect(getActiveWorkspaceId()).toBeNull();
+    expect(getActiveWorkspaceRole()).toBeNull();
   });
 });

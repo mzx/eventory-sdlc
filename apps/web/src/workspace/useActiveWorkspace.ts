@@ -15,11 +15,12 @@
 // call `setActiveWorkspaceId('ws-1')` (a page-level test fixture) or render
 // under a tree that also mounts `useMyWorkspaces()` once (the app shell).
 import { useEffect, useSyncExternalStore } from 'react';
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
   fetchWorkspaces,
   getActiveWorkspaceId,
   setActiveWorkspaceId,
+  setWorkspaceContextInvalidatedListener,
   subscribeActiveWorkspaceId,
   type WorkspaceRole,
   type WorkspaceSummary,
@@ -79,8 +80,28 @@ export const READ_ONLY_HINT = 'Read-only access — ask a workspace owner to cha
  * mounting it in multiple components at once is safe and cheap.
  */
 export function useMyWorkspaces(): UseQueryResult<WorkspaceSummary[]> {
+  const queryClient = useQueryClient();
   const query = useQuery({ queryKey: WORKSPACES_QUERY_KEY, queryFn: fetchWorkspaces });
   const activeId = useActiveWorkspaceId();
+
+  // Round-2 review, MAJOR 1: `api.ts`'s `selfHealStaleWorkspaceHeader`
+  // clears a stale/foreign `X-Workspace-Id` (and notifies this listener) the
+  // moment ANY request 403s specifically because of it — e.g. a member who
+  // was just removed from the workspace they were sitting in. Invalidating
+  // here forces a fresh `GET /api/workspaces` (which never sends the header
+  // at all — see `fetchWorkspaces`'s doc comment — so it always succeeds
+  // regardless of the id that was just cleared); the effect below then picks
+  // a still-valid fallback membership from the refreshed list. Registered
+  // unconditionally on every mount — idempotent, since the id only actually
+  // changes when the effect below finds a real mismatch — so mounting
+  // `useMyWorkspaces()` from multiple components at once (app shell +
+  // switcher + members settings, per the module doc comment above) is safe.
+  useEffect(() => {
+    setWorkspaceContextInvalidatedListener(() => {
+      void queryClient.invalidateQueries({ queryKey: WORKSPACES_QUERY_KEY });
+    });
+    return () => setWorkspaceContextInvalidatedListener(null);
+  }, [queryClient]);
 
   useEffect(() => {
     if (!query.data) return;

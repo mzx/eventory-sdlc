@@ -35,11 +35,22 @@ import {
   type InvitableWorkspaceRole,
   type WorkspaceInviteWithToken,
   type WorkspaceMemberRow,
+  type WorkspaceRole,
 } from '../api';
 import { wsKey } from '../lib/queryKeys';
 import { useActiveWorkspaceId, useActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 
-const ROLE_LABEL: Record<string, string> = { owner: 'Owner', member: 'Member', viewer: 'Viewer' };
+/**
+ * `Record<WorkspaceRole, string>` (round-2 review, suggestion 9) rather than
+ * `Record<string, string>` — a future role added to the union without a
+ * matching entry here now fails to compile instead of silently falling back
+ * to the `?? member.role` raw-value display at each call site.
+ */
+const ROLE_LABEL: Record<WorkspaceRole, string> = {
+  owner: 'Owner',
+  member: 'Member',
+  viewer: 'Viewer',
+};
 
 /**
  * `/settings/members` (EVT-43 AC5) — owners manage the roster + invites for

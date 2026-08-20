@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../api';
 import { setActiveWorkspaceId } from '../api';
+import { expectAllQueryKeysScopedToWorkspace } from '../test/queryKeyAssertions';
 import { setActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
 import { ItemsPage } from './ItemsPage';
 
@@ -410,15 +411,7 @@ describe('ItemsPage', () => {
       const { queryClient } = renderItemsPage();
       await screen.findByTestId('item-card');
 
-      const keys = queryClient
-        .getQueryCache()
-        .getAll()
-        .map((q) => q.queryKey);
-      expect(keys.length).toBeGreaterThan(0);
-      for (const key of keys) {
-        expect(key[0]).toBe('ws');
-        expect(key[1]).toBe('ws-1');
-      }
+      expectAllQueryKeysScopedToWorkspace(queryClient, 'ws-1');
     });
 
     it('AC2: switching workspaces swaps the item grid with no stale flash', async () => {
