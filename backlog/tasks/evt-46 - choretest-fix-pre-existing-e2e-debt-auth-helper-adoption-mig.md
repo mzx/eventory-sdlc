@@ -48,6 +48,17 @@ precisely during EVT-42's rebase, 2026-08-21; first observed 2026-08-14):
    invocation (separate `--chmod` flags, detect rsync flavor, or plain
    scp + chmod fallback), plus a spec in the backup-lib tests.
 
+4. **The prod VM is Alpine Linux, not Ubuntu** (discovered 2026-08-21 installing
+   the backup timer): `install-backup-timer.sh` assumes systemd (`/etc/systemd/
+   system` does not exist; init is BusyBox) and deploy.sh's ufw section has
+   been silently no-opping since day one (`command -v ufw` guard). The nightly
+   backup was installed manually via Alpine crond (`/etc/crontabs/root`,
+   03:15 daily, log at /var/log/eventory-backup.log) — port exposure is still
+   correct (prod compose publishes only caddy 80/443). Fix: make
+   install-backup-timer.sh detect init system (systemd unit OR crontab entry),
+   and either make deploy.sh's firewall section Alpine-aware (iptables/nftables)
+   or delete it with a comment stating the compose port model is the boundary.
+
 ## Non-goals
 
 - Adding e2e to CI's required checks (separate decision — note it in the PR
