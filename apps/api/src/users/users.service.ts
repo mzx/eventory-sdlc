@@ -1,10 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { User, UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  defaultWorkspaceRoleForUserRole,
-  ensureDefaultWorkspaceMembership,
-} from '../workspace/default-workspace';
 import { UpdateUserRoleDto } from './update-user-role.dto';
 import { UpdateUserStatusDto } from './update-user-status.dto';
 
@@ -31,18 +27,20 @@ export class UsersService {
    *
    * An admin cannot reject (or otherwise un-approve) themself — AC3.
    *
-   * EVT-40: approving a user also grants them Default Workspace membership
-   * (idempotent) — see `ensureDefaultWorkspaceMembership`'s doc comment for
-   * why. Role maps the same way the EVT-39 migration's backfill did:
-   * `UserRole.admin` -> `owner`, everyone else -> `member`.
+   * EVT-42: this no longer has any workspace side-effect — `status` is
+   * purely an instance-admin bookkeeping/ban field now (`rejected` blocks
+   * every route via `JwtAuthGuard`; `pending`/`approved` have no gating
+   * effect). Inventory access is granted exclusively by explicit workspace
+   * creation/invite-redemption (`WorkspacesService`), not by an admin
+   * flipping this status.
    */
   async updateStatus(id: string, dto: UpdateUserStatusDto, actingAdmin: User): Promise<User> {
     if (id === actingAdmin.id && dto.status !== UserStatus.approved) {
       throw new ForbiddenException('Admins cannot reject or un-approve themselves');
     }
-    const target = await this.findOrThrow(id);
+    await this.findOrThrow(id);
 
-    const updated = await this.prisma.user.update({
+    return this.prisma.user.update({
       where: { id },
       data: {
         status: dto.status,
@@ -50,16 +48,6 @@ export class UsersService {
         approvedAt: new Date(),
       },
     });
-
-    if (dto.status === UserStatus.approved) {
-      await ensureDefaultWorkspaceMembership(
-        this.prisma,
-        id,
-        defaultWorkspaceRoleForUserRole(target.role),
-      );
-    }
-
-    return updated;
   }
 
   // -------------------------------------------------------------------------

@@ -15,17 +15,28 @@ export type RequestWithUser = Omit<Request, 'user'> & { user?: AuthenticatedUser
 
 /**
  * Global guard (registered as `APP_GUARD` in `AppModule`) — every route
- * requires an `approved` user by default.
+ * requires a resolvable, non-`rejected` user by default.
  *
  * - `@Public()` routes skip this guard entirely (no cookie is inspected,
  *   `request.user` is never set).
  * - `@AllowPending()` routes resolve whatever user the cookie points to
- *   (any status), and — unlike every other route — do NOT throw when no
- *   cookie is presented or it doesn't resolve to a user; the route itself
- *   handles an absent user (used exclusively by `GET /api/auth/me`, which
- *   must always return 200).
- * - Every other route: no resolvable user → 401; a resolvable user whose
- *   `status !== approved` → 403.
+ *   (any status, including `rejected`), and — unlike every other route —
+ *   do NOT throw when no cookie is presented or it doesn't resolve to a
+ *   user; the route itself handles an absent user (used exclusively by
+ *   `GET /api/auth/me`, which must always return 200).
+ * - Every other route: no resolvable user → 401; a resolvable `rejected`
+ *   user → 403.
+ *
+ * EVT-42 auth rework: pre-EVT-42, this guard also rejected a `pending` user
+ * (403 "not approved yet") — the global approval gate. That's retired in
+ * favor of workspace membership: a `pending`/plain `approved` user with zero
+ * `WorkspaceMember` rows now passes this guard fine and can hit
+ * `POST /api/workspaces` / `POST /api/invites/:token/redeem`; every
+ * workspace-scoped route separately 403s them via
+ * `WorkspaceContextGuard`/`@CurrentWorkspace()` (see that guard's doc
+ * comment), not via this one. `rejected` is the one `UserStatus` that still
+ * blocks every route here — an explicit instance-admin ban
+ * (`PATCH /api/users/:id/status`), not a workspace concept.
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -64,8 +75,8 @@ export class JwtAuthGuard implements CanActivate {
       return true;
     }
 
-    if (user.status !== UserStatus.approved) {
-      throw new ForbiddenException('Your account is not approved yet');
+    if (user.status === UserStatus.rejected) {
+      throw new ForbiddenException('Your account has been rejected');
     }
 
     return true;

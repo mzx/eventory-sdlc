@@ -1,11 +1,11 @@
 /**
  * Default-workspace resolution (EVT-39 — workspace schema foundation).
  *
- * This task is schema-only: every domain table now carries a non-null
- * `workspaceId` FK, but there is no per-request tenant context yet (that's
- * EVT-40's job). Every pre-existing row — and, until EVT-40 lands, every
- * newly created row — belongs to a single "Default Workspace" created by the
- * EVT-39 migration (`prisma/migrations/20260820020000_workspace_schema_foundation`).
+ * Every domain table carries a non-null `workspaceId` FK, and every
+ * pre-existing row (plus everything created before EVT-42 self-service
+ * workspace creation shipped) belongs to a single "Default Workspace"
+ * created by the EVT-39 migration
+ * (`prisma/migrations/20260820020000_workspace_schema_foundation`).
  *
  * Most call sites need no change at all: every `workspaceId` column has a
  * schema-level `@default(...)` pointing at this same id, so a plain
@@ -15,9 +15,19 @@
  * rationale (three places the literal below must stay in sync).
  *
  * The handful of call sites that DO need this module are the ones that need
- * the Default Workspace's id explicitly — e.g. `ensureDefaultWorkspaceMembership`
- * below, granted on user approval/promotion since EVT-40's global
- * `WorkspaceContextGuard` requires a resolvable membership.
+ * the Default Workspace's id explicitly — e.g. `TagsService.upsertByName`'s
+ * composite-unique `where` clause.
+ *
+ * EVT-40 introduced a runtime self-heal, `ensureDefaultWorkspaceMembership`,
+ * that auto-granted an approved-but-membership-less user a Default Workspace
+ * membership. EVT-42 REMOVES it (binding carry-over from the EVT-40 round-3
+ * security review): now that self-service workspace creation and invite
+ * redemption exist (`WorkspacesService`), a zero-membership user is expected
+ * to explicitly create or redeem, not be silently defaulted into the legacy
+ * Default Workspace — and the self-heal's own safety gate ("only heal a user
+ * with ZERO memberships anywhere") would otherwise resurrect a deliberate
+ * EVT-42 membership revocation the moment the revoked user next logs in and
+ * still holds no other membership.
  */
 
 import { PrismaClient, UserRole, WorkspaceRole } from '@prisma/client';
@@ -64,63 +74,14 @@ export async function getDefaultWorkspaceId(prisma: WorkspaceLookupClient): Prom
 /**
  * Maps a global `UserRole` to the `WorkspaceRole` a user should default to
  * in the Default Workspace — mirrors the EVT-39 migration's backfill:
- * `admin` -> `owner`, everyone else -> `member`. Shared by every call site
- * that grants Default Workspace membership (`ensureDefaultWorkspaceMembership`
- * callers in `AuthService` and `UsersService`).
+ * `admin` -> `owner`, everyone else -> `member`. Still used by test fixtures
+ * (`test/e2e-auth-helper.ts`) that seed a Default Workspace membership
+ * directly; the runtime self-heal that used to call this
+ * (`ensureDefaultWorkspaceMembership`) was removed in EVT-42 — see this
+ * module's doc comment.
  */
 export function defaultWorkspaceRoleForUserRole(role: UserRole): WorkspaceRole {
   return role === UserRole.admin ? WorkspaceRole.owner : WorkspaceRole.member;
-}
-
-/** Minimal shape {@link ensureDefaultWorkspaceMembership} needs from a Prisma client. */
-type MembershipClient = WorkspaceLookupClient & Pick<PrismaClient, 'workspaceMember'>;
-
-/**
- * Grants `userId` a `WorkspaceMember` row in the Default Workspace — but
- * ONLY when they have ZERO memberships in ANY workspace. EVT-40's
- * `WorkspaceContextGuard` is global, so an `approved` user with ZERO
- * workspace memberships is locked out of every tenant-scoped route
- * (items/photos/QR); this function is exclusively that lockout-recovery
- * path (EVT-20), never a general "make sure they're in the Default
- * Workspace" upsert.
- *
- * CONTRACT (EVT-40 round-3 review, security finding — EVT-42 relies on
- * this): a user who already belongs to AT LEAST ONE workspace is left
- * completely untouched, even if none of their memberships is in the
- * Default Workspace specifically. This is what makes self-healing safe
- * once EVT-42 introduces deliberate membership revocation — without this
- * gate, a revoked user's Default Workspace membership would be silently
- * re-granted on their very next login, turning "revoke" into a no-op (and,
- * since the role mapper below never yields `viewer`, a revoked `viewer`
- * would come back as `member` — revocation as an accidental privilege
- * upgrade). Only a user with NO membership anywhere is healed back into
- * the Default Workspace; a user who still holds membership in some OTHER
- * workspace after a Default Workspace revocation is assumed to be exactly
- * where EVT-42's revocation left them, not accidentally locked out.
- *
- * Idempotent and safe to call unconditionally on every approved login —
- * the zero-membership check above already covers the "no-op if they
- * already have one" case. Every code path that makes a user `approved`
- * calls this:
- *   - `UsersService.updateStatus` (an admin approving a pending user)
- *   - `AuthService.upsertFromGoogleProfile`'s three auto-promotion branches
- *     (first-ever sign-in, and the `EVENTORY_ADMIN_EMAILS` allowlist)
- */
-export async function ensureDefaultWorkspaceMembership(
-  prisma: MembershipClient,
-  userId: string,
-  role: WorkspaceRole,
-): Promise<void> {
-  const existingMembershipCount = await prisma.workspaceMember.count({ where: { userId } });
-  if (existingMembershipCount > 0) {
-    return;
-  }
-  const workspaceId = await getDefaultWorkspaceId(prisma);
-  await prisma.workspaceMember.upsert({
-    where: { workspaceId_userId: { workspaceId, userId } },
-    update: {},
-    create: { workspaceId, userId, role },
-  });
 }
 
 /** Test-only: resets the module-level cache between test runs. */

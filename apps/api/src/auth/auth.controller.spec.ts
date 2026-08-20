@@ -94,7 +94,7 @@ describe('AuthController', () => {
       expect(res.redirect).toHaveBeenCalledWith('https://web.example.com');
     });
 
-    it('redirects to /pending for a pending user', async () => {
+    it('EVT-42: redirects to WEB_BASE (not /pending) for a pending user — the approval gate is retired', async () => {
       const user = makeUser({ status: UserStatus.pending });
       authService.upsertFromGoogleProfile.mockResolvedValue(user);
       authService.signToken.mockReturnValue('signed-jwt');
@@ -103,7 +103,7 @@ describe('AuthController', () => {
 
       await controller.googleCallback(req, res as unknown as Response);
 
-      expect(res.redirect).toHaveBeenCalledWith('https://web.example.com/pending');
+      expect(res.redirect).toHaveBeenCalledWith('https://web.example.com');
     });
 
     it('redirects to /rejected for a rejected user', async () => {

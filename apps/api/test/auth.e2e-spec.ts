@@ -12,9 +12,11 @@
  * task's requirement that tests "must not require... real Google OAuth".
  *
  * Coverage:
- *   AC1 — first user → admin+approved; second → pending, blocked from
- *          /api/items (403) but allowed /auth/me; after admin approves →
- *          allowed
+ *   AC1 — first user → admin+approved; second → ALSO approved immediately
+ *          (EVT-42 auth rework: the global pending gate is retired), but
+ *          starts with ZERO workspace memberships → blocked from
+ *          /api/items (403 via workspace context, not status) though still
+ *          allowed /auth/me; granted a workspace → allowed
  *   AC2 — /auth/me with no/invalid cookie → null, 200
  *   AC3 — admin endpoints reject non-admins; self-demotion/self-rejection
  *          rejected
@@ -231,10 +233,11 @@ describe('Auth API (e2e)', () => {
   });
 
   // =========================================================================
-  // AC1 — first-user-admin, second-user-pending approval workflow
+  // AC1 — first-user-admin; EVT-42 auth rework: second sign-in is ALSO
+  // approved immediately, gated instead by workspace membership
   // =========================================================================
 
-  describe('AC1: approval workflow', () => {
+  describe('AC1: sign-in / workspace-membership gating (EVT-42 auth rework)', () => {
     it('the FIRST-ever Google sign-in becomes admin + approved', async () => {
       const user = await authService.upsertFromGoogleProfile(makeProfile());
 
@@ -242,37 +245,33 @@ describe('Auth API (e2e)', () => {
       expect(user.status).toBe(UserStatus.approved);
     });
 
-    it('the SECOND sign-in is a plain pending user, blocked from /api/items (403) but allowed /auth/me', async () => {
+    it('EVT-42: the SECOND sign-in is ALSO approved immediately (no pending gate) — but starts with ZERO workspace memberships, so /api/items is 403 while /auth/me stays 200', async () => {
       await authService.upsertFromGoogleProfile(makeProfile());
-      const pending = await authService.upsertFromGoogleProfile(makeProfile());
+      const second = await authService.upsertFromGoogleProfile(makeProfile());
 
-      expect(pending.role).toBe(UserRole.user);
-      expect(pending.status).toBe(UserStatus.pending);
+      expect(second.role).toBe(UserRole.user);
+      expect(second.status).toBe(UserStatus.approved);
 
-      const pendingHttp = wrapWithCookie(app, authService, pending);
+      const secondHttp = wrapWithCookie(app, authService, second);
 
-      await pendingHttp.get('/api/items').expect(403);
+      // Blocked by WorkspaceContextGuard/@CurrentWorkspace() (zero
+      // memberships), NOT by JwtAuthGuard/status.
+      await secondHttp.get('/api/items').expect(403);
 
-      const meRes = await pendingHttp.get('/api/auth/me').expect(200);
-      expect(meRes.body.id).toBe(pending.id);
-      expect(meRes.body.status).toBe(UserStatus.pending);
+      const meRes = await secondHttp.get('/api/auth/me').expect(200);
+      expect(meRes.body.id).toBe(second.id);
+      expect(meRes.body.status).toBe(UserStatus.approved);
     });
 
-    it('after the admin approves the pending user, they are allowed through /api/items', async () => {
-      const admin = await authService.upsertFromGoogleProfile(makeProfile());
-      const pending = await authService.upsertFromGoogleProfile(makeProfile());
+    it('EVT-42: once the user creates (or redeems into) a workspace, they are allowed through /api/items — no admin action required', async () => {
+      const user = await authService.upsertFromGoogleProfile(makeProfile());
+      const http = wrapWithCookie(app, authService, user);
 
-      const adminHttp = wrapWithCookie(app, authService, admin);
-      await adminHttp
-        .patch(`/api/users/${pending.id}/status`)
-        .send({ status: UserStatus.approved })
-        .expect(200);
+      await http.get('/api/items').expect(403);
 
-      // Re-derive the client for `pending`'s id — JwtAuthGuard re-reads the
-      // DB row by id on every request, so the JWT payload's stale
-      // role/status never matter (see AuthService.getUserFromToken).
-      const nowApprovedHttp = wrapWithCookie(app, authService, pending);
-      await nowApprovedHttp.get('/api/items').expect(200);
+      await http.post('/api/workspaces').send({ name: 'My Workspace' }).expect(201);
+
+      await http.get('/api/items').expect(200);
     });
   });
 

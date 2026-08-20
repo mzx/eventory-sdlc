@@ -3,10 +3,6 @@ import { JwtService } from '@nestjs/jwt';
 import { User, UserRole, UserStatus } from '@prisma/client';
 import type { CookieOptions } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  defaultWorkspaceRoleForUserRole,
-  ensureDefaultWorkspaceMembership,
-} from '../workspace/default-workspace';
 import { GoogleProfile } from './google.strategy';
 
 // ---------------------------------------------------------------------------
@@ -168,10 +164,22 @@ export class AuthService {
    * - `EVENTORY_ADMIN_EMAILS` (see `parseAdminAllowlist`) is the reliable
    *   operator bootstrap mechanism: any email on that allowlist ALWAYS lands
    *   `admin` + `approved` on sign-in — on first creation, and retroactively
-   *   promoted on a later sign-in if they already exist as `pending` /
-   *   `rejected` / plain `user` — independent of the first-user count
-   *   (EVT-20 AC1). This is what recovers an already-stuck instance: set
-   *   the env var, then have the operator sign in (again).
+   *   promoted on a later sign-in if they already exist as `rejected` /
+   *   plain `user` — independent of the first-user count (EVT-20 AC1). This
+   *   is what recovers an already-stuck instance: set the env var, then have
+   *   the operator sign in (again). EVT-42: this allowlist still means
+   *   "instance admin" (gates `UsersController`/`AdminUsersPage`) — it no
+   *   longer has any bearing on inventory access, which is gated by
+   *   `Workspace` membership instead (see the `status` bullet below).
+   * - EVT-42 auth rework: a BRAND NEW sign-in is created `approved`
+   *   immediately, never `pending` — the old global "wait for an admin to
+   *   approve you before you can do anything" gate is retired in favor of
+   *   workspace membership (`WorkspaceContextGuard`/`@CurrentWorkspace()`,
+   *   `WorkspacesService`). A user with zero workspace memberships can still
+   *   sign in and hit `POST /api/workspaces` / `POST /api/invites/:token/redeem`
+   *   — they're simply blocked from every workspace-scoped route until they
+   *   create or join one. `JwtAuthGuard` now blocks ONLY `rejected` (an
+   *   explicit instance-admin ban); see its doc comment.
    * - Every sign-in (new or returning) stamps `lastLoginAt`.
    */
   async upsertFromGoogleProfile(
@@ -203,22 +211,6 @@ export class AuthService {
           }),
         },
       });
-      if (updated.status === UserStatus.approved) {
-        // EVT-40, round-2 review finding 8: called on EVERY login for an
-        // already-approved user, not just a fresh promotion — this
-        // self-heals a user who is approved but somehow has ZERO
-        // memberships anywhere (e.g. a transient failure right after a
-        // prior promotion committed) rather than leaving them stuck until
-        // an operator intervenes. `ensureDefaultWorkspaceMembership` is a
-        // no-op for a user who already belongs to ANY workspace (round-3
-        // review, security finding) — see its doc comment for why that gate
-        // is required once EVT-42 adds membership revocation.
-        await ensureDefaultWorkspaceMembership(
-          this.prisma,
-          updated.id,
-          defaultWorkspaceRoleForUserRole(updated.role),
-        );
-      }
       return updated;
     }
 
@@ -250,14 +242,6 @@ export class AuthService {
           }),
         },
       });
-      if (updated.status === UserStatus.approved) {
-        // EVT-40: see the byGoogleId branch above (self-healing, every login).
-        await ensureDefaultWorkspaceMembership(
-          this.prisma,
-          updated.id,
-          defaultWorkspaceRoleForUserRole(updated.role),
-        );
-      }
       return updated;
     }
 
@@ -272,24 +256,20 @@ export class AuthService {
           name: profile.name,
           picture: profile.picture,
           lastLoginAt: new Date(),
+          // EVT-42: every new sign-in is `approved` immediately — the
+          // retired global approval gate is replaced by workspace
+          // membership (see this method's doc comment). `status` is no
+          // longer conditional on `promote`; `role`/`approvedAt` still are
+          // (only the bootstrap admin / an EVENTORY_ADMIN_EMAILS match gets
+          // `role: admin`).
+          status: UserStatus.approved,
           ...(promote && {
             role: UserRole.admin,
-            status: UserStatus.approved,
             approvedAt: new Date(),
           }),
         },
       });
     });
-    if (created.status === UserStatus.approved) {
-      // EVT-40: the bootstrap admin (first-ever sign-in) or an
-      // EVENTORY_ADMIN_EMAILS-allowlisted new sign-in — see the byGoogleId
-      // branch above.
-      await ensureDefaultWorkspaceMembership(
-        this.prisma,
-        created.id,
-        defaultWorkspaceRoleForUserRole(created.role),
-      );
-    }
     return created;
   }
 

@@ -221,10 +221,35 @@ bootstrap, or to recover an already-stuck instance, set `EVENTORY_ADMIN_EMAILS` 
 EVENTORY_ADMIN_EMAILS=you@example.com
 ```
 
-Then sign in (or sign in again, if you're already stuck on the "pending" page) with that
-Google account — no manual SQL required. This works both for a brand-new deployment and for
-recovering an instance where someone else's row already consumed the first-user slot; the
-promotion is applied retroactively on sign-in even if the row already exists as `pending`.
+Then sign in with that Google account — no manual SQL required. This works both for a
+brand-new deployment and for recovering an instance where someone else's row already
+consumed the first-user slot; the promotion is applied retroactively on sign-in even if the
+row already exists as `pending`.
+
+### Workspaces & memberships (EVT-42) — approval gate retired
+
+`EVENTORY_ADMIN_EMAILS` and the first-user auto-promotion above control **instance-admin**
+status only (who can see/manage the household's user list — `GET /api/users` and friends,
+`AdminUsersPage` in the web app). As of EVT-42 they have **no bearing on inventory access**.
+
+Pre-EVT-42, a brand-new sign-in landed `pending` and was locked out of every route except
+`GET /auth/me` until an admin flipped them to `approved`. That global approval gate is
+retired: every new sign-in is `approved` immediately (`JwtAuthGuard` now only blocks a
+`rejected` — i.e. explicitly instance-admin-banned — user). Inventory access is instead
+governed entirely by `Workspace` membership:
+
+- `POST /api/workspaces` — any signed-in user (regardless of instance-admin status or
+  workspace membership) can create a workspace; the creator becomes its `owner`.
+- `POST /api/invites/:token/redeem` — an owner shares a single-use, expiring invite
+  token (created via `POST /api/workspaces/:id/invites`, role `member` or `viewer`) out of
+  band; the invitee signs in with Google, then redeems it while authenticated.
+- A user who belongs to zero workspaces can still sign in and hit the two routes above, but
+  every inventory endpoint (items/locations/etc.) 403s them until they create or join one.
+
+This means a **fresh deployment needs zero env vars** to become fully operational: the first
+sign-in auto-promotes to instance-admin (unrelated to workspace access), then immediately
+creates their own workspace via `POST /api/workspaces` and is instantly productive — no
+"pending" page, no second admin action required.
 
 ## Production backups (EVT-33)
 

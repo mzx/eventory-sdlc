@@ -31,8 +31,15 @@ export class AuthController {
    * Google redirects here with the authenticated profile (verified by
    * `AuthGuard('google')` → `GoogleStrategy.validate`). Upserts the User row
    * (first-ever user becomes admin + approved), signs a JWT, sets the
-   * httpOnly session cookie, then redirects to the web app based on the
-   * user's approval status.
+   * httpOnly session cookie, then redirects to the web app.
+   *
+   * EVT-42: a brand-new sign-in is always `approved` now (the `pending`
+   * landing page is retired — see `AuthService.upsertFromGoogleProfile`'s
+   * doc comment), so the only status-specific redirect left is `rejected`
+   * (an explicit instance-admin ban). Whether the signed-in user has any
+   * workspace membership yet — and therefore whether the web app should
+   * show "create a workspace or redeem an invite" — is a client-side
+   * concern (`GET /api/workspaces`), not something this redirect encodes.
    */
   @Public()
   @UseGuards(AuthGuard('google'))
@@ -44,12 +51,7 @@ export class AuthController {
     res.cookie(AUTH_COOKIE_NAME, token, this.authService.cookieOptions());
 
     const webBase = this.authService.webBase();
-    const destination =
-      user.status === UserStatus.pending
-        ? `${webBase}/pending`
-        : user.status === UserStatus.rejected
-          ? `${webBase}/rejected`
-          : webBase;
+    const destination = user.status === UserStatus.rejected ? `${webBase}/rejected` : webBase;
     res.redirect(destination);
   }
 
