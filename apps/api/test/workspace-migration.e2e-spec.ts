@@ -72,19 +72,42 @@ function readMigrations(): { name: string; sql: string }[] {
     }));
 }
 
-function waitForPostgres(timeoutMs = 30_000): void {
+/**
+ * EVT-46: `docker exec ... pg_isready` lies during postgres:16's startup.
+ * `pg_isready` (and the healthcheck driving it) connects over the
+ * container-LOCAL unix socket — but initdb runs a *temporary* postmaster on
+ * that same unix socket (no TCP listener yet) to execute its bootstrap SQL
+ * before starting the real, TCP-listening server. `pg_isready` happily
+ * reports "accepting connections" against that temporary server, so this
+ * probe used to return well before `-p ${DB_PORT}:5432` was actually
+ * mapped and listening — `new Client({ connectionString: DB_URL }).connect()`
+ * then died with "Connection terminated unexpectedly" in beforeAll,
+ * intermittently and load-dependently (slower CI runners hit the window
+ * more often).
+ *
+ * Fixed by retrying the REAL thing the caller needs — a successful
+ * `client.connect()` against the externally mapped TCP port — instead of a
+ * proxy signal from inside the container. initdb's socket-only phase can't
+ * fake a TCP-level client handshake the way it fakes a unix-socket
+ * `pg_isready`.
+ */
+async function waitForPostgres(timeoutMs = 30_000): Promise<Client> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
   while (Date.now() < deadline) {
+    const candidate = new Client({ connectionString: DB_URL });
     try {
-      execSync(`docker exec ${CONTAINER_NAME} pg_isready -U ${DB_USER} -d ${DB_NAME}`, {
-        stdio: 'pipe',
-      });
-      return;
-    } catch {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      await candidate.connect();
+      return candidate;
+    } catch (err) {
+      lastError = err;
+      await candidate.end().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
   }
-  throw new Error(`Postgres container "${CONTAINER_NAME}" did not become ready in time`);
+  throw new Error(
+    `Postgres container "${CONTAINER_NAME}" did not become ready (TCP) within ${timeoutMs}ms: ${String(lastError)}`,
+  );
 }
 
 describe('EVT-39 — migration backfill on pre-existing data (AC1-AC3, dedicated container)', () => {
@@ -107,7 +130,6 @@ describe('EVT-39 — migration backfill on pre-existing data (AC1-AC3, dedicated
       ].join(' '),
       { stdio: 'pipe' },
     );
-    waitForPostgres();
 
     const migrations = readMigrations();
     const newMigrationIndex = migrations.findIndex((m) => m.name === NEW_MIGRATION_NAME);
@@ -117,8 +139,7 @@ describe('EVT-39 — migration backfill on pre-existing data (AC1-AC3, dedicated
     const legacyMigrations = migrations.slice(0, newMigrationIndex);
     const workspaceMigration = migrations[newMigrationIndex];
 
-    client = new Client({ connectionString: DB_URL });
-    await client.connect();
+    client = await waitForPostgres();
 
     // 1. Apply every migration OLDER than EVT-39 — the DB now has the exact
     //    pre-workspaceId shape every existing deployment has today.

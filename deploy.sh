@@ -8,9 +8,11 @@
 #   1. Packages the current HEAD commit with `git archive` (no node_modules,
 #      no local junk — exactly what's committed).
 #   2. Copies the tarball + local .env.prod to the VM over SSH.
-#   3. On the VM: installs Docker if missing, opens ports 80/443 (ufw),
-#      adds 2G swap when RAM < 2GB, unpacks to /opt/eventory, and runs
-#      docker compose -f docker-compose.prod.yml up --build -d.
+#   3. On the VM: installs Docker if missing, adds 2G swap when RAM < 2GB,
+#      unpacks to /opt/eventory, and runs
+#      docker compose -f docker-compose.prod.yml up --build -d. No host
+#      firewall step (EVT-46) — see the "Firewall" comment below the
+#      Docker-install step for why the compose port model is the boundary.
 #
 # Safe to re-run for updates — Docker volumes (db, photos, certs) persist.
 # SSH connection sharing means you enter the password once per run.
@@ -50,14 +52,19 @@ if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 
-# --- Firewall (ufw ships on Vultr Ubuntu images) -----------------------------
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow 22/tcp >/dev/null
-  ufw allow 80/tcp >/dev/null
-  ufw allow 443/tcp >/dev/null
-  ufw --force enable >/dev/null
-  echo "--> ufw: 22/80/443 open"
-fi
+# --- Firewall -----------------------------------------------------------
+# EVT-46: no host firewall step here. The prod VM is Alpine (no ufw at all
+# — the `command -v ufw` guard that used to live here was a permanent,
+# silent no-op since day one), and the compose port model IS the boundary:
+# only `caddy` publishes host ports (80/443, see docker-compose.prod.yml —
+# `db` and `api` publish nothing), so there's nothing left for a host
+# firewall to additionally restrict. Hand-rolling one on Alpine wouldn't
+# even be straightforward: Docker manages its own iptables/nftables
+# DOCKER-USER rules to implement `ports:` publishing, and those take
+# priority over a plain `ufw`/`iptables` INPUT-chain rule — a naive `deny`
+# would NOT actually block a Docker-published port without deliberate
+# DOCKER-USER-chain surgery (e.g. ufw-docker). That complexity buys nothing
+# over "don't publish the port," which the compose file already does.
 
 # --- Swap: the on-VM image build OOMs on small instances ---------------------
 mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
