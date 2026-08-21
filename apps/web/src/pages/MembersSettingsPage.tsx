@@ -11,6 +11,7 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  Divider,
   IconButton,
   MenuItem,
   Stack,
@@ -25,12 +26,16 @@ import {
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   changeWorkspaceMemberRole,
   createWorkspaceInvite,
+  deleteWorkspace,
+  fetchItems,
   fetchWorkspaceInvites,
   fetchWorkspaceMembers,
   removeWorkspaceMember,
+  renameWorkspace,
   revokeWorkspaceInvite,
   type InvitableWorkspaceRole,
   type WorkspaceInviteWithToken,
@@ -38,7 +43,12 @@ import {
   type WorkspaceRole,
 } from '../api';
 import { wsKey } from '../lib/queryKeys';
-import { useActiveWorkspaceId, useActiveWorkspaceRole } from '../workspace/useActiveWorkspace';
+import {
+  useActiveWorkspaceId,
+  useActiveWorkspaceRole,
+  useMyWorkspaces,
+  WORKSPACES_QUERY_KEY,
+} from '../workspace/useActiveWorkspace';
 
 /**
  * `Record<WorkspaceRole, string>` (round-2 review, suggestion 9) rather than
@@ -65,6 +75,89 @@ export function MembersSettingsPage() {
   const role = useActiveWorkspaceRole();
   const isOwner = role === 'owner';
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+
+  // Backs the rename form + the delete-confirmation "type the name" check
+  // (AC1/AC5) — `useMyWorkspaces` is the SAME cache every other consumer
+  // (app bar, switcher, this page) reads, so invalidating it after a
+  // rename/delete updates all of them without a reload.
+  const workspacesQuery = useMyWorkspaces();
+  const activeWorkspace = workspacesQuery.data?.find((w) => w.id === workspaceId) ?? null;
+
+  function invalidateWorkspaces() {
+    return queryClient.invalidateQueries({ queryKey: WORKSPACES_QUERY_KEY });
+  }
+
+  // -------------------------------------------------------------------------
+  // rename (EVT-47 AC1) — `nameDraft` stays `null` ("follow the server
+  // value") until the owner actually types; this way a background refetch
+  // (e.g. another tab renaming it) never clobbers unsaved input, and a
+  // successful save resets to `null` so the field reflects the fresh cache
+  // entry rather than a second, now-redundant local copy of it.
+  // -------------------------------------------------------------------------
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const displayedName = nameDraft ?? activeWorkspace?.name ?? '';
+  const trimmedDraft = displayedName.trim();
+  const renameMutation = useMutation({
+    mutationFn: (name: string) => renameWorkspace(workspaceId as string, name),
+    onSuccess: () => {
+      setNameDraft(null);
+      return invalidateWorkspaces();
+    },
+  });
+
+  // -------------------------------------------------------------------------
+  // delete (EVT-47 AC2/AC4/AC5/AC6)
+  // -------------------------------------------------------------------------
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [confirmName, setConfirmName] = useState('');
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  function openDeleteDialog() {
+    setConfirmName('');
+    setDeleteError(null);
+    setDeleteDialogOpen(true);
+  }
+
+  function closeDeleteDialog() {
+    setDeleteDialogOpen(false);
+  }
+
+  // Approximate counts for the confirmation dialog (AC5) — reuses the
+  // already-existing item list endpoint rather than adding a dedicated
+  // counts endpoint; only fetched once the dialog is actually open. Photo
+  // count is a deliberate UNDER-count (primary photos only, not every photo
+  // an item has) — the task explicitly allows "fetchable or approximate".
+  const deletionPreviewQuery = useQuery({
+    queryKey: wsKey(workspaceId, 'workspace-deletion-preview'),
+    queryFn: () => fetchItems(),
+    enabled: deleteDialogOpen && workspaceId != null,
+  });
+  const approxItemCount = deletionPreviewQuery.data?.length ?? null;
+  const approxPhotoCount =
+    deletionPreviewQuery.data?.filter((item) => item.primaryPhoto != null).length ?? null;
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteWorkspace(workspaceId as string),
+    onSuccess: () => {
+      setDeleteDialogOpen(false);
+      setDeleteError(null);
+      void invalidateWorkspaces();
+      // The workspace this page was showing no longer exists — land
+      // somewhere coherent rather than a settings page for a workspace
+      // that's gone. `useMyWorkspaces`'s own fallback effect (re-run by the
+      // invalidation above) picks another membership, or — if that was the
+      // caller's last one — AppShell's zero-membership check renders
+      // OnboardingPage regardless of route (AC6).
+      navigate('/');
+    },
+    onError: (err: unknown) =>
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete workspace'),
+  });
+  const canConfirmDelete =
+    activeWorkspace != null &&
+    confirmName.trim() === activeWorkspace.name &&
+    !deleteMutation.isPending;
 
   const membersQuery = useQuery({
     queryKey: wsKey(workspaceId, 'workspace-members'),
@@ -160,6 +253,61 @@ export function MembersSettingsPage() {
 
   return (
     <Stack spacing={3}>
+      {isOwner && (
+        <>
+          <Box>
+            <Typography variant="h5" component="h1" gutterBottom>
+              Workspace
+            </Typography>
+            <Stack direction="row" spacing={1.5} alignItems="flex-start" flexWrap="wrap" gap={1.5}>
+              <TextField
+                size="small"
+                label="Workspace name"
+                value={displayedName}
+                onChange={(e) => setNameDraft(e.target.value)}
+                sx={{ minWidth: 240 }}
+                inputProps={{ 'aria-label': 'Workspace name' }}
+              />
+              <Button
+                variant="contained"
+                onClick={() => trimmedDraft && renameMutation.mutate(trimmedDraft)}
+                disabled={
+                  renameMutation.isPending ||
+                  !trimmedDraft ||
+                  trimmedDraft === activeWorkspace?.name
+                }
+                sx={{ minHeight: 40 }}
+              >
+                Save
+              </Button>
+            </Stack>
+            {renameMutation.isError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {renameMutation.error instanceof Error
+                  ? renameMutation.error.message
+                  : 'Failed to rename workspace'}
+              </Alert>
+            )}
+          </Box>
+
+          <Box>
+            <Typography variant="subtitle1" gutterBottom>
+              Danger zone
+            </Typography>
+            <Button
+              color="error"
+              variant="outlined"
+              startIcon={<DeleteOutlineIcon />}
+              onClick={openDeleteDialog}
+            >
+              Delete workspace
+            </Button>
+          </Box>
+
+          <Divider />
+        </>
+      )}
+
       <Typography variant="h5" component="h1">
         Members
       </Typography>
@@ -351,6 +499,49 @@ export function MembersSettingsPage() {
             disabled={removeMutation.isPending}
           >
             Remove
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={deleteDialogOpen} onClose={closeDeleteDialog}>
+        <DialogTitle>Delete &ldquo;{activeWorkspace?.name}&rdquo;?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This permanently deletes ALL items, photos, locations, categories, tags, projects, and
+            shopping-list history in this workspace, for every member — there is no undo.
+          </DialogContentText>
+          <DialogContentText sx={{ mt: 1.5 }}>
+            {deletionPreviewQuery.isLoading
+              ? 'Checking what will be destroyed…'
+              : `This will destroy approximately ${approxItemCount ?? 0} item(s) and at least ${approxPhotoCount ?? 0} photo(s).`}
+          </DialogContentText>
+          <TextField
+            fullWidth
+            size="small"
+            sx={{ mt: 2 }}
+            label={`Type "${activeWorkspace?.name ?? ''}" to confirm`}
+            value={confirmName}
+            onChange={(e) => setConfirmName(e.target.value)}
+            inputProps={{ 'aria-label': 'Confirm workspace name' }}
+          />
+          {deleteError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {deleteError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {/* `autoFocus` — cancel is the default-focused action on a
+           * destructive confirmation dialog (AC5, GitHub-style). */}
+          <Button onClick={closeDeleteDialog} autoFocus>
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            onClick={() => deleteMutation.mutate()}
+            disabled={!canConfirmDelete}
+          >
+            Delete forever
           </Button>
         </DialogActions>
       </Dialog>

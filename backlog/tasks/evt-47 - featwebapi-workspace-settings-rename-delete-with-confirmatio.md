@@ -1,7 +1,7 @@
 ---
 id: EVT-47
 title: 'feat(web,api): workspace settings — rename + delete with confirmation'
-status: To Do
+status: In Progress
 priority: medium
 labels:
   - web

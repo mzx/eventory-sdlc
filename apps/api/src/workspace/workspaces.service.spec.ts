@@ -2,8 +2,16 @@ import { ConflictException, ForbiddenException, NotFoundException } from '@nestj
 import { Test, TestingModule } from '@nestjs/testing';
 import { InviteStatus, WorkspaceRole } from '@prisma/client';
 import { createHash } from 'crypto';
+import * as path from 'path';
+import { STORAGE_DIR } from '../photos/photos.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { DEFAULT_WORKSPACE_ID } from './default-workspace';
 import { InvitesService, WorkspacesService } from './workspaces.service';
+
+const unlinkMock = jest.fn();
+jest.mock('fs/promises', () => ({
+  unlink: (...args: unknown[]) => unlinkMock(...args),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,8 +38,13 @@ function makeMembership(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+/** Bare `{ deleteMany: jest.fn() }` shape shared by every `remove()` domain-table delegate below. */
+function makeDeleteManyModel() {
+  return { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) };
+}
+
 function makePrismaMock() {
-  const workspace = { create: jest.fn(), update: jest.fn() };
+  const workspace = { create: jest.fn(), update: jest.fn(), delete: jest.fn() };
   const workspaceMember = {
     findUnique: jest.fn(),
     findMany: jest.fn(),
@@ -48,16 +61,45 @@ function makePrismaMock() {
     update: jest.fn(),
     updateMany: jest.fn(),
   };
+  // `remove()`'s domain-table deleteMany calls (EVT-47) — `photo` also needs
+  // `findMany` (reads filenames to unlink after commit).
+  const stockMovement = makeDeleteManyModel();
+  const bomLine = makeDeleteManyModel();
+  const photo = { ...makeDeleteManyModel(), findMany: jest.fn().mockResolvedValue([]) };
+  const item = makeDeleteManyModel();
+  const tag = makeDeleteManyModel();
+  const category = makeDeleteManyModel();
+  const location = makeDeleteManyModel();
+  const project = makeDeleteManyModel();
+  const shoppingListEntry = makeDeleteManyModel();
   const mock: {
     workspace: typeof workspace;
     workspaceMember: typeof workspaceMember;
     workspaceInvite: typeof workspaceInvite;
+    stockMovement: typeof stockMovement;
+    bomLine: typeof bomLine;
+    photo: typeof photo;
+    item: typeof item;
+    tag: typeof tag;
+    category: typeof category;
+    location: typeof location;
+    project: typeof project;
+    shoppingListEntry: typeof shoppingListEntry;
     $queryRaw: jest.Mock;
     $transaction: jest.Mock;
   } = {
     workspace,
     workspaceMember,
     workspaceInvite,
+    stockMovement,
+    bomLine,
+    photo,
+    item,
+    tag,
+    category,
+    location,
+    project,
+    shoppingListEntry,
     // `lockOwnerRows` (SELECT ... FOR UPDATE) — a no-op in this mock; tests
     // that care about lock ORDERING assert on `$queryRaw`'s call order
     // relative to `workspaceMember.count`, not its return value.
@@ -77,6 +119,8 @@ describe('WorkspacesService', () => {
 
   beforeEach(async () => {
     prisma = makePrismaMock();
+    unlinkMock.mockReset();
+    unlinkMock.mockResolvedValue(undefined);
     const module: TestingModule = await Test.createTestingModule({
       providers: [WorkspacesService, { provide: PrismaService, useValue: prisma }],
     }).compile();
@@ -213,6 +257,122 @@ describe('WorkspacesService', () => {
       await expect(service.rename(WORKSPACE_ID, 'New Name', OTHER_ID)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  // =========================================================================
+  // remove (EVT-47)
+  // =========================================================================
+
+  describe('remove', () => {
+    it('AC2: deletes every domain table in FK-safe dependency order, then the workspace row, inside one $transaction', async () => {
+      prisma.workspaceMember.findUnique.mockResolvedValue(makeMembership());
+      prisma.photo.findMany.mockResolvedValue([{ filename: 'a.jpg' }, { filename: 'b.png' }]);
+
+      await service.remove(WORKSPACE_ID, OWNER_ID);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.photo.findMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+        select: { filename: true },
+      });
+      expect(prisma.stockMovement.deleteMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+      });
+      expect(prisma.bomLine.deleteMany).toHaveBeenCalledWith({
+        where: { project: { workspaceId: WORKSPACE_ID } },
+      });
+      expect(prisma.photo.deleteMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+      });
+      expect(prisma.item.deleteMany).toHaveBeenCalledWith({ where: { workspaceId: WORKSPACE_ID } });
+      expect(prisma.tag.deleteMany).toHaveBeenCalledWith({ where: { workspaceId: WORKSPACE_ID } });
+      expect(prisma.category.deleteMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+      });
+      expect(prisma.location.deleteMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+      });
+      expect(prisma.project.deleteMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+      });
+      expect(prisma.shoppingListEntry.deleteMany).toHaveBeenCalledWith({
+        where: { workspaceId: WORKSPACE_ID },
+      });
+      expect(prisma.workspace.delete).toHaveBeenCalledWith({ where: { id: WORKSPACE_ID } });
+
+      // Dependency order: stock movements/BOM lines/photos/items before
+      // tags/categories/locations/projects/shopping-list rows, before the
+      // workspace row itself.
+      const orderOf = (mockFn: jest.Mock) => mockFn.mock.invocationCallOrder[0];
+      expect(orderOf(prisma.stockMovement.deleteMany)).toBeLessThan(
+        orderOf(prisma.item.deleteMany),
+      );
+      expect(orderOf(prisma.bomLine.deleteMany)).toBeLessThan(orderOf(prisma.item.deleteMany));
+      expect(orderOf(prisma.photo.deleteMany)).toBeLessThan(orderOf(prisma.item.deleteMany));
+      expect(orderOf(prisma.item.deleteMany)).toBeLessThan(orderOf(prisma.tag.deleteMany));
+      expect(orderOf(prisma.tag.deleteMany)).toBeLessThan(orderOf(prisma.category.deleteMany));
+      expect(orderOf(prisma.category.deleteMany)).toBeLessThan(orderOf(prisma.location.deleteMany));
+      expect(orderOf(prisma.location.deleteMany)).toBeLessThan(orderOf(prisma.project.deleteMany));
+      expect(orderOf(prisma.project.deleteMany)).toBeLessThan(
+        orderOf(prisma.shoppingListEntry.deleteMany),
+      );
+      expect(orderOf(prisma.shoppingListEntry.deleteMany)).toBeLessThan(
+        orderOf(prisma.workspace.delete),
+      );
+    });
+
+    it("unlinks every deleted workspace's photo file, best-effort, AFTER the transaction commits", async () => {
+      prisma.workspaceMember.findUnique.mockResolvedValue(makeMembership());
+      prisma.photo.findMany.mockResolvedValue([{ filename: 'keep-me.jpg' }]);
+
+      await service.remove(WORKSPACE_ID, OWNER_ID);
+
+      expect(unlinkMock).toHaveBeenCalledWith(path.join(STORAGE_DIR, 'keep-me.jpg'));
+      // Commit (workspace.delete, inside $transaction) happens strictly
+      // before the disk unlink — DB-first ordering, same as PhotosService.
+      const transactionOrder = prisma.$transaction.mock.invocationCallOrder[0];
+      const unlinkOrder = unlinkMock.mock.invocationCallOrder[0];
+      expect(transactionOrder).toBeLessThan(unlinkOrder);
+    });
+
+    it('swallows a failed unlink rather than rejecting the whole delete', async () => {
+      prisma.workspaceMember.findUnique.mockResolvedValue(makeMembership());
+      prisma.photo.findMany.mockResolvedValue([{ filename: 'gone-already.jpg' }]);
+      unlinkMock.mockRejectedValue(new Error('ENOENT'));
+
+      await expect(service.remove(WORKSPACE_ID, OWNER_ID)).resolves.toBeUndefined();
+    });
+
+    it('AC1: rejects a non-owner member with 403, and deletes nothing', async () => {
+      prisma.workspaceMember.findUnique.mockResolvedValue(
+        makeMembership({ userId: MEMBER_ID, role: WorkspaceRole.member }),
+      );
+
+      await expect(service.remove(WORKSPACE_ID, MEMBER_ID)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-member with 404 (does not confirm the workspace exists)', async () => {
+      prisma.workspaceMember.findUnique.mockResolvedValue(null);
+
+      await expect(service.remove(WORKSPACE_ID, OTHER_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('AC4: refuses to delete the Default Workspace with 409, even for its owner, and deletes nothing', async () => {
+      prisma.workspaceMember.findUnique.mockResolvedValue(
+        makeMembership({ workspaceId: DEFAULT_WORKSPACE_ID }),
+      );
+
+      await expect(service.remove(DEFAULT_WORKSPACE_ID, OWNER_ID)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 

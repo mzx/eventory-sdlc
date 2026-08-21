@@ -1419,6 +1419,15 @@ export async function renameWorkspace(id: string, name: string): Promise<Workspa
   });
 }
 
+/**
+ * DELETE /api/workspaces/:id — permanently deletes the workspace and ALL of
+ * its data (EVT-47). Owner-only server-side; the Default Workspace is
+ * refused with 409.
+ */
+export async function deleteWorkspace(id: string): Promise<void> {
+  return request<void>(`/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 /** GET /api/workspaces/:id/members — roster + roles. Reachable by any member. */
 export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMemberRow[]> {
   return request<WorkspaceMemberRow[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`);
