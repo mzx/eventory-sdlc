@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Eventory app icon">
+  <title>Eventory app icon</title>
+  <rect width="128" height="128" fill="#0B2138"/>
+  <g stroke="#9FC6E8" stroke-opacity="0.12" stroke-width="1">
+    <path d="M16 0V128"/>
+    <path d="M32 0V128"/>
+    <path d="M48 0V128"/>
+    <path d="M64 0V128"/>
+    <path d="M80 0V128"/>
+    <path d="M96 0V128"/>
+    <path d="M112 0V128"/>
+    <path d="M0 16H128"/>
+    <path d="M0 32H128"/>
+    <path d="M0 48H128"/>
+    <path d="M0 64H128"/>
+    <path d="M0 80H128"/>
+    <path d="M0 96H128"/>
+    <path d="M0 112H128"/>
+  </g>
+  <g transform="translate(64 64) scale(0.84) translate(-64 -64)">
+    <path fill="#E8F2FB" d="M16 12h21v104h-21z"/>
+    <path fill="#E8F2FB" fill-rule="evenodd" d="M37 12h75v27h-75z M57 22.5h35v6h-35z"/>
+    <path fill="#64D2FF"   fill-rule="evenodd" d="M37 50.5h75v27h-75z M57 61h35v6h-35z"/>
+    <path fill="#E8F2FB" fill-rule="evenodd" d="M37 89h75v27h-75z M57 99.5h35v6h-35z"/>
+  </g>
+</svg>

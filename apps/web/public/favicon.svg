@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Eventory">
+  <title>Eventory</title>
+  <rect width="128" height="128" fill="#0B2138"/>
+  <g transform="translate(64 64) scale(1.08) translate(-64 -64)">
+    <path fill="#E8F2FB" d="M16 12h21v104h-21z"/>
+    <path fill="#E8F2FB" d="M37 12h75v29h-75z"/>
+    <path fill="#64D2FF" d="M37 49.5h75v29h-75z"/>
+    <path fill="#E8F2FB" d="M37 87h75v29h-75z"/>
+  </g>
+</svg>

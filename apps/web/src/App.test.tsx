@@ -89,6 +89,19 @@ describe('App / auth-aware shell', () => {
     vi.restoreAllMocks();
   });
 
+  it('the app bar shows the horizontal brand lockup linking home (brand/README.md)', async () => {
+    vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser({ role: 'user' }));
+    vi.spyOn(api, 'fetchItems').mockResolvedValue([]);
+    vi.spyOn(api, 'fetchTags').mockResolvedValue([]);
+
+    renderApp('/');
+    expect(await screen.findByText('No items yet')).toBeInTheDocument();
+
+    const logo = screen.getByRole('img', { name: 'Eventory' });
+    expect(logo).toHaveAttribute('src', expect.stringContaining('eventory-logo-horizontal'));
+    expect(logo.closest('a')).toHaveAttribute('href', '/');
+  });
+
   it('AC3: non-admin sees no Admin menu entry and /admin/users redirects home', async () => {
     vi.spyOn(api, 'fetchCurrentUser').mockResolvedValue(authUser({ role: 'user' }));
     vi.spyOn(api, 'fetchItems').mockResolvedValue([]);

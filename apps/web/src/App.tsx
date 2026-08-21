@@ -27,6 +27,7 @@ import {
   useNavigate,
 } from 'react-router-dom';
 import { fetchShoppingList, fetchVerificationQueue } from './api';
+import logoHorizontal from './assets/brand/eventory-logo-horizontal.svg';
 import { AuthGate } from './auth/AuthGate';
 import { useAuth } from './auth/AuthContext';
 import { BOTTOM_NAV_HEIGHT, BottomNav } from './components/BottomNav';
@@ -220,14 +221,19 @@ function AppShell() {
     <>
       <AppBar position="sticky" color="primary" enableColorOnDark>
         <Toolbar>
-          <Typography
-            variant="h6"
-            component={RouterLink}
-            to="/"
-            sx={{ flexGrow: 1, color: 'inherit', textDecoration: 'none' }}
-          >
-            Eventory
-          </Typography>
+          {/* Brand lockup (brand/README.md): ink-on-dark horizontal variant on
+           * the title-block bar; 28px tall ≈ 119px wide, above the 96px lockup
+           * minimum, and the Toolbar's own padding provides the clear space. */}
+          <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center' }}>
+            <RouterLink to="/" style={{ display: 'flex', alignItems: 'center' }}>
+              <Box
+                component="img"
+                src={logoHorizontal}
+                alt="Eventory"
+                sx={{ height: 28, display: 'block' }}
+              />
+            </RouterLink>
+          </Box>
           {isDesktopNav && (
             <>
               <Button

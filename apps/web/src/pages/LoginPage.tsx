@@ -3,6 +3,7 @@ import { Box, Button, Paper, Stack, Typography } from '@mui/material';
 import { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { authGoogleUrl } from '../api';
+import logoStacked from '../assets/brand/eventory-logo-stacked.svg';
 import { setPendingInviteToken } from '../workspace/useActiveWorkspace';
 
 /** Matches `/invite/:token` — deliberately mirrors `App.tsx`'s route, not a shared constant, since neither side needs the other to change in lockstep. */
@@ -48,8 +49,11 @@ export function LoginPage() {
     >
       <Paper variant="outlined" sx={{ p: 4, maxWidth: 360, width: '100%', textAlign: 'center' }}>
         <Stack spacing={3} alignItems="center">
-          <Typography variant="h5" component="h1">
-            Eventory
+          {/* Stacked brand lockup (brand/README.md's square-ish/splash
+           * variant) — stays an h1 so the page keeps its heading; the img alt
+           * is the accessible name. */}
+          <Typography component="h1" sx={{ lineHeight: 0, m: 0 }}>
+            <Box component="img" src={logoStacked} alt="Eventory" sx={{ width: 168 }} />
           </Typography>
           <Typography variant="body2" color="text.secondary">
             Sign in with your household Google account to continue.

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Eventory mark (single colour)">
+  <title>Eventory mark (single colour)</title>
+  <desc>Inherits colour from the CSS 'color' property.</desc>
+  <path fill="currentColor" d="M16 12h21v104h-21z"/>
+  <path fill="currentColor" fill-rule="evenodd" d="M37 12h75v27h-75z M57 22.5h35v6h-35z"/>
+  <path fill="currentColor"   fill-rule="evenodd" d="M37 50.5h75v27h-75z M57 61h35v6h-35z"/>
+  <path fill="currentColor" fill-rule="evenodd" d="M37 89h75v27h-75z M57 99.5h35v6h-35z"/>
+</svg>

@@ -35,4 +35,12 @@ describe('LoginPage (EVT-43 AC4 sign-in-if-needed)', () => {
     expect(link).toHaveAttribute('href', '/api/auth/google?invite=raw-token-abc');
     expect(getPendingInviteToken()).toBe('raw-token-abc');
   });
+
+  it('shows the stacked brand lockup as the page heading (brand/README.md)', () => {
+    renderLogin('/');
+
+    const logo = screen.getByRole('img', { name: 'Eventory' });
+    expect(logo).toHaveAttribute('src', expect.stringContaining('eventory-logo-stacked'));
+    expect(screen.getByRole('heading', { level: 1 })).toContainElement(logo);
+  });
 });
