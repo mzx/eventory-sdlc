@@ -13,6 +13,7 @@
 
 import { execSync, spawnSync } from 'child_process';
 import * as path from 'path';
+import { Client } from 'pg';
 
 const CONTAINER_NAME = 'evt3-test-postgres';
 const DB_PORT = 5433;
@@ -33,20 +34,53 @@ function isContainerRunning(): boolean {
   return result.status === 0 && result.stdout.trim() === 'true';
 }
 
-function waitForPostgres(timeoutMs = 30_000): void {
+/**
+ * EVT-46: `docker exec ... pg_isready` lies during postgres:16's startup.
+ * `pg_isready` connects over the container-LOCAL unix socket — but initdb
+ * runs a *temporary* postmaster on that same unix socket (no TCP listener
+ * yet) to execute its bootstrap SQL before starting the real,
+ * TCP-listening server. `pg_isready` happily reports "accepting
+ * connections" against that temporary server, so this probe used to return
+ * well before `-p ${DB_PORT}:5432` was actually mapped and listening —
+ * every e2e suite's `beforeAll` (which connects over that mapped TCP port)
+ * could then intermittently die with "Connection terminated unexpectedly",
+ * load-dependently.
+ *
+ * Fixed by retrying a REAL `pg` `Client.connect()` (full wire-protocol
+ * startup handshake), not a bare TCP socket `connect()`. A raw TCP-level
+ * probe was tried first and is NOT sufficient on every Docker setup: some
+ * port-forwarding implementations (observed here with OrbStack) accept the
+ * TCP handshake at the host-side proxy as soon as the container/port
+ * mapping exists, before the process inside is actually listening — a bare
+ * socket connect can report "ready" the same way `pg_isready`'s unix-socket
+ * check does, moments before `prisma migrate deploy` then fails with
+ * "Can't reach database server". A full `pg` client handshake talks all the
+ * way through to postgres itself, so initdb's socket-only phase (or an
+ * unready host-side proxy) can't fake it.
+ */
+async function waitForPostgres(timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
   while (Date.now() < deadline) {
-    const result = spawnSync(
-      'docker',
-      ['exec', CONTAINER_NAME, 'pg_isready', '-U', DB_USER, '-d', DB_NAME],
-      { encoding: 'utf-8' },
-    );
-    if (result.status === 0) return;
-    // sleep 500 ms
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    const candidate = new Client({
+      host: 'localhost',
+      port: DB_PORT,
+      user: DB_USER,
+      password: DB_PASS,
+      database: DB_NAME,
+    });
+    try {
+      await candidate.connect();
+      await candidate.end();
+      return;
+    } catch (err) {
+      lastError = err;
+      await candidate.end().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
   }
   throw new Error(
-    `PostgreSQL container "${CONTAINER_NAME}" did not become ready within ${timeoutMs}ms`,
+    `PostgreSQL container "${CONTAINER_NAME}" did not become ready within ${timeoutMs}ms: ${String(lastError)}`,
   );
 }
 
@@ -73,7 +107,7 @@ export default async function globalSetup(): Promise<void> {
     console.log(`\n[e2e] Reusing existing container "${CONTAINER_NAME}".`);
   }
 
-  waitForPostgres();
+  await waitForPostgres();
 
   // Run Prisma migrations against the test database
   console.log('[e2e] Applying Prisma migrations…');

@@ -56,14 +56,32 @@ echo "[fetch] rsync ${VM_USER}@${VM_IP}:${REMOTE_BACKUP_DIR}/ -> ${LOCAL_BACKUP_
 #
 # --safe-links: the VM is the internet-exposed asset in this pair — don't
 # let a compromised sender write a symlink that escapes LOCAL_BACKUP_DIR.
-# --chmod=F600,D700: backups contain the full DB (user emails, OAuth ids)
-# and every photo; force owner-only perms on the Mac side regardless of
-# what mode bits rsync would otherwise preserve from the remote.
+#
+# NOTE: no --chmod here (EVT-46). GNU rsync's comma-separated
+# "--chmod=F600,D700" form is a GNU extension: macOS's bundled `rsync` is
+# actually `openrsync` (a BSD-licensed rewrite that reports itself as
+# "rsync version 2.6.9 compatible" for compatibility) and rejects it
+# outright with "invalid argument". Worse, openrsync's own accepted
+# syntax (single symbolic specs like "--chmod=u=rw") was verified to be a
+# silent no-op — the destination's mode bits came out completely
+# unchanged, with a zero exit code. `--chmod` cannot be trusted to actually
+# do anything across rsync flavors, so this script doesn't rely on it at
+# all: permissions are enforced explicitly below, after the transfer, with
+# plain POSIX `find`+`chmod` — which behaves identically on every rsync
+# variant because it isn't rsync.
 # `--`: the operand that follows is a path, not an option, even if VM_IP or
 # a path component were ever attacker-influenced.
-rsync -az --partial --safe-links --chmod=F600,D700 \
+rsync -az --partial --safe-links \
   -e "ssh -o BatchMode=yes -o ConnectTimeout=15" \
   -- "${VM_USER}@${VM_IP}:${REMOTE_BACKUP_DIR}/" "${LOCAL_BACKUP_DIR}/"
+
+echo "[fetch] enforcing owner-only permissions on the local mirror…"
+# Backups contain the full DB (user emails, OAuth ids) and every photo —
+# force owner-only perms on the Mac side regardless of what mode bits rsync
+# preserved from the remote (see the --chmod note above for why this can't
+# be done via rsync itself).
+find "$LOCAL_BACKUP_DIR" -type d -exec chmod 700 {} +
+find "$LOCAL_BACKUP_DIR" -type f -exec chmod 600 {} +
 
 echo "[fetch] pruning local mirror older than ${LOCAL_RETENTION_DAYS}d…"
 find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type f -name 'eventory-db-*.dump' -mtime "+${LOCAL_RETENTION_DAYS}" -print -delete

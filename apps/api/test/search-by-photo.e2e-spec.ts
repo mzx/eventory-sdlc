@@ -9,16 +9,23 @@
  *          ranked matches; a no-match search returns an empty list, 200.
  *   AC2 — the uploaded search photo is never persisted: no `Photo` row is
  *          created, and no file appears under `STORAGE_DIR`.
+ *
+ * EVT-46: this suite never adopted the shared e2e-auth-helper after
+ * `JwtAuthGuard` went global (EVT-14) — every request 401'd on its very
+ * first hop. Ported to the same `AuthedHttp`/`createAuthedHttp` pattern
+ * `items.e2e-spec.ts` / `photos.e2e-spec.ts` already use.
  */
 
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import cookieParser from 'cookie-parser';
 import { readdirSync } from 'fs';
-import supertest from 'supertest';
 import { AiService } from '../src/ai/ai.service';
 import { AppModule } from '../src/app.module';
+import { AuthService } from '../src/auth/auth.service';
 import { STORAGE_DIR } from '../src/photos/photos.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { AuthedHttp, createAuthedHttp } from './e2e-auth-helper';
 
 // ---------------------------------------------------------------------------
 // Test database URL — provided by global-setup.ts via the known container URL
@@ -35,7 +42,9 @@ const TEST_DB_URL =
 describe('POST /api/items/search-by-photo (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
-  let http: ReturnType<typeof supertest>;
+  /** Authenticated as an approved admin (EVT-14) — see e2e-auth-helper.ts;
+   * this suite exercises the search-by-photo endpoint, not auth itself. */
+  let http: AuthedHttp;
   const analyzePhotoMock = jest.fn();
 
   beforeAll(async () => {
@@ -52,6 +61,9 @@ describe('POST /api/items/search-by-photo (e2e)', () => {
 
     app = moduleFixture.createNestApplication();
     app.setGlobalPrefix('api');
+    // Mirror src/main.ts's bootstrap() — JwtAuthGuard reads `req.cookies`,
+    // which only exists once this middleware has run (EVT-14).
+    app.use(cookieParser());
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -62,7 +74,8 @@ describe('POST /api/items/search-by-photo (e2e)', () => {
     await app.init();
 
     prisma = moduleFixture.get<PrismaService>(PrismaService);
-    http = supertest(app.getHttpServer());
+    const authService = moduleFixture.get<AuthService>(AuthService);
+    http = await createAuthedHttp(app, prisma, authService);
   });
 
   afterAll(async () => {
