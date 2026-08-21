@@ -70,6 +70,21 @@ export class WorkspacesController {
     return this.workspacesService.rename(id, body.name, user!.id);
   }
 
+  /**
+   * DELETE /api/workspaces/:id — permanently deletes a workspace and ALL of
+   * its domain data (EVT-47). Owner-only; the Default Workspace is refused
+   * with 409 — see `WorkspacesService.remove`'s doc comment for the full
+   * dependency-order deletion + RLS-pinning writeup.
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<void> {
+    await this.workspacesService.remove(id, user!.id);
+  }
+
   /** GET /api/workspaces/:id/members — roster. Any member may view. */
   @Get(':id/members')
   listMembers(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthenticatedUser) {

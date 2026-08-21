@@ -12,6 +12,7 @@ function makeWorkspacesServiceMock() {
     create: jest.fn(),
     listMine: jest.fn(),
     rename: jest.fn(),
+    remove: jest.fn(),
     listMembers: jest.fn(),
     changeRole: jest.fn(),
     transferOwnership: jest.fn(),
@@ -74,6 +75,12 @@ describe('WorkspacesController', () => {
 
     expect(workspacesService.rename).toHaveBeenCalledWith(WORKSPACE_ID, 'New Name', 'user-1');
     expect(result).toBe(renamed);
+  });
+
+  it('remove delegates to WorkspacesService.remove', async () => {
+    await controller.remove(WORKSPACE_ID, USER);
+
+    expect(workspacesService.remove).toHaveBeenCalledWith(WORKSPACE_ID, 'user-1');
   });
 
   it('listMembers delegates to WorkspacesService.listMembers', async () => {

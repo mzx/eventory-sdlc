@@ -1,4 +1,6 @@
 import { randomBytes, createHash } from 'crypto';
+import { unlink } from 'fs/promises';
+import * as path from 'path';
 import {
   ConflictException,
   ForbiddenException,
@@ -6,7 +8,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InviteStatus, Prisma, WorkspaceMember, WorkspaceRole } from '@prisma/client';
+import { STORAGE_DIR } from '../photos/photos.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { DEFAULT_WORKSPACE_ID } from './default-workspace';
+import { workspaceDbContext } from './workspace-context';
 
 /** Either the top-level `PrismaService` or a `$transaction` callback's `tx` — both expose the same model delegates. */
 type PrismaOrTx = PrismaService | Prisma.TransactionClient;
@@ -242,6 +247,104 @@ export class WorkspacesService {
       role: membership.role,
       createdAt: workspace.createdAt,
     };
+  }
+
+  /**
+   * Permanently deletes a workspace and ALL of its domain data (EVT-47) —
+   * items, photos, stock movements, BOM lines, tags, categories, locations,
+   * projects, shopping-list entries. Owner-only. No soft-delete/undo (a
+   * deliberate non-goal for a household-scale tool with nightly backups).
+   *
+   * The Default Workspace (`DEFAULT_WORKSPACE_ID`) can NEVER be deleted —
+   * every domain column's schema-level `@default(dbgenerated(...))` points
+   * at it, and it holds prod's original pre-EVT-42 data (see
+   * `schema.prisma`'s header note). 409, not 403/404 — the caller (an
+   * owner) is fully authorized and the workspace fully exists; the refusal
+   * is a structural invariant, not a permission or existence question.
+   *
+   * Domain tables FK the workspace with `onDelete: Restrict` (EVT-39,
+   * deliberate — see `schema.prisma`'s header note), so every
+   * workspace-scoped row must be explicitly removed, in FK-safe dependency
+   * order, inside ONE `$transaction`, before the `Workspace` row itself can
+   * be deleted: stock movements -> BOM lines -> photos -> items -> tags ->
+   * categories -> locations -> projects -> shopping-list entries -> the
+   * workspace row. `WorkspaceMember`/`WorkspaceInvite` need no explicit
+   * deletion here — both cascade automatically via their own
+   * `onDelete: Cascade` FK straight to `Workspace`. Several of the explicit
+   * `deleteMany` calls below end up matching zero rows by the time they run
+   * (e.g. an item's `ShoppingListEntry`/`StockMovement`/`ItemTag` rows are
+   * already gone once that item itself is deleted, via THEIR OWN cascade
+   * FKs) — harmless, and kept explicit anyway to match this exact order
+   * even if the schema's cascade graph shifts later.
+   *
+   * **RLS trap (EVT-44).** Every domain table above carries a Postgres RLS
+   * policy keyed to the `app.workspace_id` session setting, which
+   * `PrismaService` normally drives from the AMBIENT `workspaceDbContext` —
+   * populated, per-request, from the CALLER'S currently ACTIVE workspace
+   * (`X-Workspace-Id` header / their default membership), which has no
+   * necessary relationship to `workspaceId` here (an owner can delete a
+   * workspace they aren't currently "in"). Left alone, every `tx.item`/
+   * `tx.location`/... delete below would silently apply
+   * `set_config('app.workspace_id', <ACTIVE workspace>, true)` instead —
+   * FORCE ROW LEVEL SECURITY would then make every one of this workspace's
+   * OWN rows invisible to the delete, so it would "succeed" (zero SQL
+   * errors) while removing precisely nothing, and the final
+   * `tx.workspace.delete` would then fail its `onDelete: Restrict` FK check
+   * against rows that are still very much there. Explicitly wrapping the
+   * whole transaction in `workspaceDbContext.run({ workspaceId }, ...)`
+   * pins the session setting to the TARGET workspace for exactly this call,
+   * overriding whatever the ambient request context is.
+   *
+   * Photo files on disk are unlinked best-effort AFTER the transaction
+   * commits — same DB-first ordering rationale as `PhotosService.remove`
+   * (a crash between the two can only ever leave a harmless orphaned file
+   * on disk, never a row pointing at a file that's already gone).
+   */
+  async remove(workspaceId: string, userId: string): Promise<void> {
+    await this.requireOwner(workspaceId, userId);
+    if (workspaceId === DEFAULT_WORKSPACE_ID) {
+      throw new ConflictException('The Default Workspace cannot be deleted');
+    }
+
+    const deletedPhotos = await workspaceDbContext.run({ workspaceId }, () =>
+      this.prisma.$transaction(async (tx) => {
+        const photos = await tx.photo.findMany({
+          where: { workspaceId },
+          select: { filename: true },
+        });
+        await tx.stockMovement.deleteMany({ where: { workspaceId } });
+        await tx.bomLine.deleteMany({ where: { project: { workspaceId } } });
+        await tx.photo.deleteMany({ where: { workspaceId } });
+        await tx.item.deleteMany({ where: { workspaceId } });
+        await tx.tag.deleteMany({ where: { workspaceId } });
+        await tx.category.deleteMany({ where: { workspaceId } });
+        await tx.location.deleteMany({ where: { workspaceId } });
+        await tx.project.deleteMany({ where: { workspaceId } });
+        await tx.shoppingListEntry.deleteMany({ where: { workspaceId } });
+        await tx.workspace.delete({ where: { id: workspaceId } });
+        return photos;
+      }),
+    );
+
+    await Promise.all(
+      deletedPhotos.map((photo) => this.unlinkPhotoQuietly(path.join(STORAGE_DIR, photo.filename))),
+    );
+  }
+
+  /**
+   * Best-effort disk cleanup for `remove()`, mirroring
+   * `PhotosService`'s own `unlinkQuietly` — kept as a small local copy
+   * rather than injecting `PhotosService` here, which would pull a
+   * `PhotosModule` dependency into `WorkspaceModule` for one tiny helper.
+   */
+  private async unlinkPhotoQuietly(filePath: string): Promise<void> {
+    try {
+      await unlink(filePath);
+    } catch {
+      // Don't let a missing/unwritable file turn an otherwise-successful
+      // workspace deletion into an error — the DB is already the source of
+      // truth by the time this runs.
+    }
   }
 
   // -------------------------------------------------------------------------
